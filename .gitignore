@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+venv/
+.venv/  # Dodaj też tę linię dla pewności
+.env
+
+# Sekrety
+kalendarzklucz.json
+arkuszklucz.json
+aiklucz.json
+google_token.json
+credentials2.json
+# Dodaj inne pliki z sekretami
