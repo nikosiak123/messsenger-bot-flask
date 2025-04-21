@@ -37,6 +37,7 @@ except Exception as e:
     gemini_model = None # Ustawiamy model na None, aby uniknąć błędów później
 
 # --- Funkcja do wysyłania wiadomości do Messengera ---
+# (Bez zmian - pozostaje taka sama jak poprzednio)
 def send_message(recipient_id, message_text):
     """Wysyła wiadomość tekstową do użytkownika przez Messenger API."""
     if not message_text: # Nie wysyłaj pustych wiadomości
@@ -66,27 +67,30 @@ def send_message(recipient_id, message_text):
             except json.JSONDecodeError:
                 print(f"Odpowiedź serwera FB (błąd, nie JSON): {e.response.text}")
 
-# --- Funkcja do generowania odpowiedzi przez Gemini ---
+# --- Funkcja do generowania odpowiedzi przez Gemini - ZMODYFIKOWANA DLA J. POLSKIEGO ---
 def get_gemini_response(prompt_text):
-    """Generuje odpowiedź tekstową używając załadowanego modelu Gemini."""
+    """Generuje odpowiedź tekstową używając załadowanego modelu Gemini, starając się odpowiadać po polsku."""
     if not gemini_model:
         print("!!! BŁĄD: Model Gemini nie został załadowany. Nie można wygenerować odpowiedzi. !!!")
         return "Przepraszam, mam chwilowy problem techniczny z moim AI."
 
-    print(f"--- Generowanie odpowiedzi Gemini dla promptu: '{prompt_text}' ---")
+    # *** DODAJEMY INSTRUKCJĘ JĘZYKOWĄ DO PROMPTU ***
+    enhanced_prompt = f"Odpowiedz na poniższe pytanie lub polecenie w języku polskim.\n\nUżytkownik pyta: {prompt_text}"
+
+    print(f"--- Generowanie odpowiedzi Gemini dla promptu: '{enhanced_prompt}' ---") # Logujemy rozszerzony prompt
     try:
         # Konfiguracja generowania - można dostosować
         generation_config = {
             "max_output_tokens": 2048,
-            "temperature": 0.9,
+            "temperature": 0.8, # Można dostosować temperaturę
             "top_p": 1,
             "top_k": 32
         }
         safety_settings = {} # Puste dla uproszczenia
 
-        # Wywołanie modelu
+        # Wywołanie modelu z rozszerzonym promptem
         response = gemini_model.generate_content(
-            prompt_text,
+            enhanced_prompt, # <--- UŻYWAMY NOWEGO, ROZSZERZONEGO PROMPTU
             generation_config=generation_config,
             safety_settings=safety_settings,
             stream=False,
@@ -101,11 +105,10 @@ def get_gemini_response(prompt_text):
         else:
              print("Odpowiedź Gemini była pusta lub zablokowana.")
              print(f"Cała odpowiedź: {response}")
-             return "Hmm, nie wiem co odpowiedzieć."
+             return "Hmm, nie wiem co odpowiedzieć." # Domyślna odpowiedź, gdy AI zawiedzie
 
     except Exception as e:
         print(f"!!! BŁĄD podczas generowania treści przez Gemini: {e} !!!")
-        # Sprawdźmy, czy błąd to znany problem z dostępem do modelu
         if "Publisher Model" in str(e):
              print("   >>> Wygląda na to, że nadal występuje problem z dostępem do modelu.")
              print("   >>> Sprawdź, czy model jest dostępny w regionie i czy Twój projekt ma uprawnienia.")
@@ -131,7 +134,7 @@ def webhook_verification():
         return Response("Verification failed", status=403, mimetype='text/plain')
 
 # --- Obsługa Odbioru Wiadomości (metoda POST) - Z Gemini ---
-# (Bez zmian w logice, użyje nowego MODEL_ID w get_gemini_response)
+# (Bez zmian w logice, użyje nowego promptu w get_gemini_response)
 @app.route('/webhook', methods=['POST'])
 def webhook_handle():
     print("\n------------------------------------------")
@@ -151,15 +154,15 @@ def webhook_handle():
                         if "text" in messaging_event["message"]:
                             message_text = messaging_event["message"]["text"]
                             print(f"Odebrano wiadomość tekstową '{message_text}' od użytkownika {sender_id}")
-                            response_text = get_gemini_response(message_text)
-                            send_message(sender_id, response_text)
+                            response_text = get_gemini_response(message_text) # Wywołaj Gemini
+                            send_message(sender_id, response_text) # Wyślij odpowiedź
                         else:
                             print(f"Odebrano wiadomość bez tekstu od użytkownika {sender_id}")
                             send_message(sender_id, "Przepraszam, na razie potrafię czytać tylko tekst.")
                     elif messaging_event.get("postback"):
                          payload = messaging_event["postback"]["payload"]
                          print(f"Odebrano postback z payload '{payload}' od użytkownika {sender_id}")
-                         prompt_for_button = f"Użytkownik kliknął przycisk oznaczony jako: {payload}. Co powinienem odpowiedzieć?"
+                         prompt_for_button = f"Użytkownik kliknął przycisk oznaczony jako: {payload}. Odpowiedz na to krótko po polsku." # Dodano instrukcję PL
                          response_text = get_gemini_response(prompt_for_button)
                          send_message(sender_id, response_text)
                     else:
