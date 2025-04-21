@@ -3,63 +3,120 @@
 from flask import Flask, request, Response
 import os
 import json
-import requests # Potrzebna biblioteka do wysyłania żądań HTTP
+import requests # Do wysyłania wiadomości do FB API
+import vertexai # Do komunikacji z Vertex AI
+from vertexai.generative_models import GenerativeModel # Do użycia modeli Gemini
 
 app = Flask(__name__)
 
-# --- Token Weryfikacyjny ---
-# Ten sam token, który wpisujesz w polu "Verify token" na Facebooku
-VERIFY_TOKEN = "KOLAGEN"
+# --- Konfiguracja ---
+VERIFY_TOKEN = "KOLAGEN" # Twój token weryfikacyjny FB
 
-# --- Page Access Token ---
-# !!! UŻYTO PRZYKŁADOWEGO TOKENU PODANEGO PRZEZ UŻYTKOWNIKA !!!
-# W prawdziwej aplikacji wstaw tutaj swój rzeczywisty token!
-# Pamiętaj o bezpieczeństwie - nie umieszczaj prawdziwych tokenów w kodzie w produkcji.
-PAGE_ACCESS_TOKEN = "EACNAHFzEhkUBO77CfzD3OSOHMC5aLZAZA4X6bbBF6lWXENIrci2mwZCj24q8oJb20fDgU4YXsZC9IMGCZBpc78FTLkrZADFr2WfHTZBDnVavxqQi8ZBudc4iqELuDiLBSDfQImtQIrdwvJtfj4NvtSZCq0kpkMFyh0trKjTgl3zMuD45lDmpakqhxXfaPRD0v0grgBAZDZD" # <--- PRZYKŁADOWY TOKEN
+# !!! WAŻNE: Zastąp poniższe wartości swoimi !!!
+PAGE_ACCESS_TOKEN = "EACNAHFzEhkUBO7nbFAtYvfPWbEht1B3chQqWLx76Ljg2ekdbJYoOrnpjATqhS0EZC8S0q8a49hEZBaZByZCaj5gr1z62dAaMgcZA1BqFOruHfFo86EWTbI3S9KL59oxFWfZCfCjwbQra9lY5of1JVnj2c9uFJDhIpWlXxLLao9Cv8JKssgs3rEDxIJBRr26HgUewZDZD" # Token dostępu do strony FB
+PROJECT_ID = "linear-booth-450221-k1"  # Twoje Google Cloud Project ID
+LOCATION = "us-central1"  # Region GCP dla Vertex AI (np. us-central1, europe-west1)
+MODEL_ID = "gemini-2.0-flash-001" # Używamy modelu wskazanego przez użytkownika
 
 # Adres URL API Facebook Graph do wysyłania wiadomości
-FACEBOOK_GRAPH_API_URL = "https://graph.facebook.com/v21.0/me/messages" # Używamy najnowszej dostępnej wersji API
+FACEBOOK_GRAPH_API_URL = f"https://graph.facebook.com/v19.0/me/messages" # Użyj stabilnej wersji API
 
+# --- Inicjalizacja Vertex AI ---
+try:
+    print(f"Inicjalizowanie Vertex AI dla projektu: {PROJECT_ID}, lokalizacja: {LOCATION}")
+    vertexai.init(project=PROJECT_ID, location=LOCATION)
+    print("Inicjalizacja Vertex AI pomyślna.")
+    # Załadowanie modelu Gemini
+    print(f"Ładowanie modelu: {MODEL_ID}")
+    gemini_model = GenerativeModel(MODEL_ID)
+    print("Model załadowany pomyślnie.")
+except Exception as e:
+    print(f"!!! KRYTYCZNY BŁĄD podczas inicjalizacji Vertex AI lub ładowania modelu: {e} !!!")
+    print("   Sprawdź PROJECT_ID, LOCATION, uprawnienia konta usługi VM i czy API Vertex AI jest włączone.")
+    print(f"   Upewnij się również, że model '{MODEL_ID}' jest poprawną i dostępną nazwą.")
+    gemini_model = None # Ustawiamy model na None, aby uniknąć błędów później
 
-# --- Funkcja do wysyłania wiadomości ---
+# --- Funkcja do wysyłania wiadomości do Messengera ---
 def send_message(recipient_id, message_text):
     """Wysyła wiadomość tekstową do użytkownika przez Messenger API."""
+    if not message_text: # Nie wysyłaj pustych wiadomości
+        print("Pominięto wysyłanie pustej wiadomości.")
+        return
+
     print(f"--- Próba wysłania odpowiedzi do {recipient_id} ---")
-    params = {
-        "access_token": PAGE_ACCESS_TOKEN
-    }
-    # Przygotowujemy słownik Pythona z danymi
+    params = {"access_token": PAGE_ACCESS_TOKEN}
     payload = {
-        "recipient": {
-            "id": recipient_id
-        },
-        "message": {
-            "text": message_text
-        }
+        "recipient": {"id": recipient_id},
+        "message": {"text": message_text},
+        "messaging_type": "RESPONSE" # Ważne dla zgodności z polityką FB
     }
-    print(f"Wysyłane dane (payload): {payload}") # Logujemy, co wysyłamy
+    print(f"Wysyłane dane (payload): {json.dumps(payload, indent=2)}")
 
     try:
-        # Używamy parametru 'json' zamiast 'data' i przekazujemy słownik
         r = requests.post(FACEBOOK_GRAPH_API_URL, params=params, json=payload)
-        r.raise_for_status() # Sprawdza, czy wystąpił błąd HTTP (np. 400, 500)
+        r.raise_for_status()
         response_json = r.json()
         print(f"Odpowiedź z Facebook API: {response_json}")
         print(f"--- Wiadomość wysłana pomyślnie do {recipient_id} ---")
     except requests.exceptions.RequestException as e:
-        print(f"!!! BŁĄD podczas wysyłania wiadomości: {e} !!!")
-        # Próbujemy zalogować odpowiedź błędu, jeśli istnieje
+        print(f"!!! BŁĄD podczas wysyłania wiadomości do Messengera: {e} !!!")
         if hasattr(e, 'response') and e.response is not None:
             try:
-                print(f"Odpowiedź serwera (błąd): {e.response.json()}")
+                print(f"Odpowiedź serwera FB (błąd): {e.response.json()}")
             except json.JSONDecodeError:
-                print(f"Odpowiedź serwera (błąd, nie JSON): {e.response.text}")
+                print(f"Odpowiedź serwera FB (błąd, nie JSON): {e.response.text}")
+
+# --- Funkcja do generowania odpowiedzi przez Gemini ---
+def get_gemini_response(prompt_text):
+    """Generuje odpowiedź tekstową używając załadowanego modelu Gemini."""
+    if not gemini_model:
+        print("!!! BŁĄD: Model Gemini nie został załadowany. Nie można wygenerować odpowiedzi. !!!")
+        return "Przepraszam, mam chwilowy problem techniczny z moim AI."
+
+    print(f"--- Generowanie odpowiedzi Gemini dla promptu: '{prompt_text}' ---")
+    try:
+        # Konfiguracja generowania - można dostosować
+        generation_config = {
+            "max_output_tokens": 2048,
+            "temperature": 0.9,
+            "top_p": 1,
+            "top_k": 32
+        }
+        safety_settings = {} # Puste dla uproszczenia
+
+        # Wywołanie modelu
+        response = gemini_model.generate_content(
+            prompt_text,
+            generation_config=generation_config,
+            safety_settings=safety_settings,
+            stream=False,
+        )
+
+        print("\n--- Odpowiedź Gemini ---")
+        # Sprawdzanie odpowiedzi
+        if response.candidates and hasattr(response.candidates[0].content, 'parts') and response.candidates[0].content.parts:
+             generated_text = response.candidates[0].content.parts[0].text
+             print(f"Wygenerowany tekst: {generated_text}")
+             return generated_text
+        else:
+             print("Odpowiedź Gemini była pusta lub zablokowana.")
+             print(f"Cała odpowiedź: {response}")
+             return "Hmm, nie wiem co odpowiedzieć."
+
+    except Exception as e:
+        print(f"!!! BŁĄD podczas generowania treści przez Gemini: {e} !!!")
+        # Sprawdźmy, czy błąd to znany problem z dostępem do modelu
+        if "Publisher Model" in str(e):
+             print("   >>> Wygląda na to, że nadal występuje problem z dostępem do modelu.")
+             print("   >>> Sprawdź, czy model jest dostępny w regionie i czy Twój projekt ma uprawnienia.")
+             return "Niestety, nie mogę teraz uzyskać dostępu do mojego modułu AI dla tego zapytania."
+        return "Wystąpił błąd podczas myślenia. Spróbuj zadać pytanie inaczej."
 
 
 # --- Obsługa Weryfikacji Webhooka (metoda GET) ---
+# (Bez zmian)
 @app.route('/webhook', methods=['GET'])
 def webhook_verification():
-    # Funkcja bez zmian - obsługuje weryfikację przy konfiguracji webhooka
     print("!!! FUNKCJA webhook_verification WYWOŁANA !!!")
     print("--- Otrzymano żądanie GET weryfikacyjne ---")
     hub_mode = request.args.get('hub.mode')
@@ -73,68 +130,50 @@ def webhook_verification():
         print("Weryfikacja GET nieudana.")
         return Response("Verification failed", status=403, mimetype='text/plain')
 
-
-# --- Obsługa Odbioru Wiadomości (metoda POST) ---
+# --- Obsługa Odbioru Wiadomości (metoda POST) - Z Gemini ---
+# (Bez zmian w logice, użyje nowego MODEL_ID w get_gemini_response)
 @app.route('/webhook', methods=['POST'])
 def webhook_handle():
-    # Funkcja obsługuje przychodzące wiadomości i zdarzenia
     print("\n------------------------------------------")
     print("!!! FUNKCJA webhook_handle WYWOŁANA (POST) !!!")
     data = None
     try:
         data = request.get_json()
         print("Odebrane dane JSON:")
-        print(json.dumps(data, indent=2)) # Loguje całe odebrane dane
+        print(json.dumps(data, indent=2))
 
-        # Przetwarzanie odebranych danych
         if data and data.get("object") == "page":
             for entry in data.get("entry", []):
                 for messaging_event in entry.get("messaging", []):
+                    sender_id = messaging_event["sender"]["id"]
 
-                    # Sprawdza, czy to wiadomość od użytkownika
                     if messaging_event.get("message"):
-                        sender_id = messaging_event["sender"]["id"] # ID nadawcy (PSID)
-
-                        # Sprawdza, czy wiadomość zawiera tekst
                         if "text" in messaging_event["message"]:
                             message_text = messaging_event["message"]["text"]
                             print(f"Odebrano wiadomość tekstową '{message_text}' od użytkownika {sender_id}")
-
-                            # *** Logika odpowiedzi - Echo ***
-                            response_text = f"Otrzymałem: {message_text}" # Przygotowuje odpowiedź
-                            send_message(sender_id, response_text) # Wysyła odpowiedź
-
+                            response_text = get_gemini_response(message_text)
+                            send_message(sender_id, response_text)
                         else:
-                            # Obsługa wiadomości bez tekstu (np. załącznik)
                             print(f"Odebrano wiadomość bez tekstu od użytkownika {sender_id}")
-                            send_message(sender_id, "Przepraszam, rozumiem tylko wiadomości tekstowe.")
-
-                    # Obsługa kliknięcia przycisku (postback)
+                            send_message(sender_id, "Przepraszam, na razie potrafię czytać tylko tekst.")
                     elif messaging_event.get("postback"):
-                         sender_id = messaging_event["sender"]["id"]
                          payload = messaging_event["postback"]["payload"]
                          print(f"Odebrano postback z payload '{payload}' od użytkownika {sender_id}")
-                         send_message(sender_id, f"Kliknąłeś przycisk! Payload: {payload}")
-
+                         prompt_for_button = f"Użytkownik kliknął przycisk oznaczony jako: {payload}. Co powinienem odpowiedzieć?"
+                         response_text = get_gemini_response(prompt_for_button)
+                         send_message(sender_id, response_text)
                     else:
-                        # Loguje inne, nieobsługiwane typy zdarzeń
                         print("Odebrano inne zdarzenie messaging:", messaging_event)
-
     except Exception as e:
         print(f"!!! BŁĄD podczas przetwarzania webhooka POST: {e} !!!")
-        # Odpowiada 200 OK mimo błędu, aby Facebook nie próbował ponownie
         return Response("EVENT_PROCESSING_ERROR", status=200)
 
-    # Zawsze odpowiada 200 OK na końcu, potwierdzając odbiór
     print("Odpowiadam 200 OK (koniec przetwarzania).")
     print("------------------------------------------\n")
     return Response("EVENT_RECEIVED", status=200)
 
-
 # --- Uruchomienie Serwera ---
 if __name__ == '__main__':
     port = 8080
-    print(f"Uruchamianie serwera Flask na porcie {port}...")
-    # Wyłącz debug=True w środowisku produkcyjnym!
+    print(f"Uruchamianie serwera Flask z integracją Gemini na porcie {port}...")
     app.run(host='0.0.0.0', port=port, debug=True)
-  
