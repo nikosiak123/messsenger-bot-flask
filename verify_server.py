@@ -355,8 +355,11 @@ def get_gemini_response_with_history(user_psid, current_user_message):
     print(f"\n--- [{user_psid}] Zawartość wysyłana do Gemini ({MODEL_ID}) ---")
     for i, content in enumerate(prompt_content_with_instruction):
         role = content.role
-        text = content.parts[0].text[:150].replace('\n', '\\n') + "..." if len(content.parts[0].text) > 150 else content.parts[0].text.replace('\n', '\\n') # Skrócony tekst, zastąpione \n
-        print(f"  [{i}] Role: {role}, Text: '{text}'")
+        # Poprawka: wykonaj replace i skracanie przed f-stringiem
+        raw_text = content.parts[0].text
+        text_fragment = raw_text[:150].replace('\n', '\\n')
+        text_to_log = text_fragment + "..." if len(raw_text) > 150 else text_fragment
+        print(f"  [{i}] Role: {role}, Text: '{text_to_log}'") # Używamy przetworzonej zmiennej
     print(f"--- Koniec zawartości dla {user_psid} ---\n")
     # ---------------------------------------------------------
 
@@ -390,7 +393,12 @@ def get_gemini_response_with_history(user_psid, current_user_message):
         if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
             generated_text = response.candidates[0].content.parts[0].text
             print(f"[{user_psid}] Wygenerowany tekst (pełna długość): {len(generated_text)}")
-            print(f"[{user_psid}] Fragment wygenerowanego tekstu: '{generated_text[:150].replace('\n', '\\n')}...'")
+
+            # --- POPRAWKA TUTAJ ---
+            # Wykonaj replace i skracanie przed f-stringiem
+            text_preview = generated_text[:150].replace('\n', '\\n')
+            print(f"[{user_psid}] Fragment wygenerowanego tekstu: '{text_preview}...'")
+            # --- KONIEC POPRAWKI ---
 
             # --- KROK 9: Aktualizacja i zapis PEŁNEJ (ale przyciętej do zapisu) historii ---
             # Dodajemy odpowiedź modelu do *pełnej* historii z bieżącą wiadomością użytkownika
@@ -594,5 +602,5 @@ if __name__ == '__main__':
 
     # Uruchom aplikację Flask
     # UWAGA: W środowisku produkcyjnym użyj serwera WSGI jak gunicorn lub uwsgi zamiast app.run()
-    # Przykład dla gunicorn: gunicorn --bind 0.0.0.0:{port} your_module_name:app
+    # Przykład dla gunicorn: gunicorn --bind 0.0.0.0:{port} verify_server:app  (jeśli plik nazywa się verify_server.py)
     app.run(host='0.0.0.0', port=port, debug=debug_mode)
