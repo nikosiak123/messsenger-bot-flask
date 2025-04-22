@@ -22,7 +22,7 @@ app = Flask(__name__)
 VERIFY_TOKEN = "KOLAGEN" # Twój token weryfikacyjny FB
 
 # !!! WAŻNE: Zastąp poniższe wartości swoimi !!!
-PAGE_ACCESS_TOKEN = "TWOJ_PAGE_ACCESS_TOKEN_WKLEJ_TUTAJ" # Wklej swój prawdziwy token!
+PAGE_ACCESS_TOKEN = "EACNAHFzEhkUBO7nbFAtYvfPWbEht1B3chQqWLx76Ljg2ekdbJYoOrnpjATqhS0EZC8S0q8a49hEZBaZByZCaj5gr1z62dAaMgcZA1BqFOruHfFo86EWTbI3S9KL59oxFWfZCfCjwbQra9lY5of1JVnj2c9uFJDhIpWlXxLLao9Cv8JKssgs3rEDxIJBRr26HgUewZDZD # Wklej swój prawdziwy token!
 PROJECT_ID = "linear-booth-450221-k1"  # Twoje Google Cloud Project ID
 LOCATION = "us-central1"  # Region GCP dla Vertex AI (sprawdź, czy ten działa)
 MODEL_ID = "gemini-2.0-flash-001" # Używamy modelu wskazanego przez użytkownika
