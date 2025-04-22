@@ -23,10 +23,10 @@ app = Flask(__name__)
 VERIFY_TOKEN = "KOLAGEN" # Twój token weryfikacyjny FB
 
 # Używamy Page Access Token podanego wcześniej przez użytkownika
-PAGE_ACCESS_TOKEN = "EACNAHFzEhkUBO7nbFAtYvfPWbEht1B3chQqWLx76Ljg2ekdbJYoOrnpjATqhS0EZC8S0q8a49hEZBaZByZCaj5gr1z62dAaMgcZA1BqFOruHfFo86EWTbI3S9KL59oxFWfZCfCjwbQra9lY5of1JVnj2c9uFJDhIpWlXxLLao9Cv8JKssgs3rEDxIJBRr26HgUewZDZD" # Token dostępu do strony FB
+PAGE_ACCESS_TOKEN = "EACNAHFzEhkUBO7nbFAtYvfPWbEht1B3chQqWLx76Ljg2ekdbJYoOrnpjATqhS0EZC8S0q8a49hEZBaZByZCaj5gr1z62dAaMgcZA1BqFOruHfFo86EWTbI3S9KL59oxFWfZCfCjwbQra9lY5of1JVnj2c9uFJDhIpWlXxLLao9Cv8JKssgs3rEDxIJBRr26HgUewZDZD" # Przykładowy Token dostępu do strony FB
 PROJECT_ID = "linear-booth-450221-k1"  # Twoje Google Cloud Project ID
-LOCATION = "us-central1"  # Region GCP dla Vertex AI (zmień, jeśli ten nie działa)
-MODEL_ID = "gemini-1.5-flash-preview-0514" # Model Gemini do użycia (zmień, jeśli inny działał)
+LOCATION = "us-central1"  # Region GCP dla Vertex AI (sprawdź, czy ten działa)
+MODEL_ID = "gemini-2.0-flash-001" # Model wskazany przez użytkownika - PRZYWRÓCONY
 
 # Adres URL API Facebook Graph do wysyłania wiadomości
 FACEBOOK_GRAPH_API_URL = f"https://graph.facebook.com/v19.0/me/messages" # Użyj stabilnej wersji API
@@ -112,6 +112,9 @@ try:
     print("Model załadowany pomyślnie.")
 except Exception as e:
     print(f"!!! KRYTYCZNY BŁĄD podczas inicjalizacji Vertex AI lub ładowania modelu: {e} !!!")
+    print(f"    Sprawdź, czy model '{MODEL_ID}' istnieje i jest dostępny w regionie '{LOCATION}' dla projektu '{PROJECT_ID}'.")
+    print("    Upewnij się, że masz odpowiednie uprawnienia IAM i Access Scopes dla VM.")
+
 
 # --- Funkcja send_message ---
 def send_message(recipient_id, message_text):
@@ -158,7 +161,7 @@ def get_gemini_response_with_history(user_psid, current_user_message):
     # 3. Stwórz listę Content dla tej tury (historia + nowa wiadomość usera)
     current_turn_history = history + [user_content]
 
-    # 4. Przycinanie historii (działamy na current_turn_history)
+    # 4. Przycinanie historii
     history_to_send = current_turn_history # Domyślnie wysyłamy całą historię tej tury
     if len(current_turn_history) > MAX_HISTORY_TURNS * 2:
         relevant_history = [msg for msg in current_turn_history if msg.role in ("user", "model")]
@@ -194,11 +197,9 @@ Ważne zasady:
 Twoim zadaniem jest efektywne pozyskiwanie klientów poprzez profesjonalną i perswazyjną rozmowę."""
 
     # Tworzymy listę Content do wysłania: Instrukcja jako pierwsza wiadomość 'user', potem historia
-    # To jest obejście braku dedykowanej roli 'system' w niektórych modelach/SDK
     prompt_content_with_instruction = [Content(role="user", parts=[Part.from_text(system_instruction_text)])] + history_to_send
 
     print(f"--- Generowanie odpowiedzi Gemini ({MODEL_ID}) z historią i instrukcją dla PSID {user_psid} ---")
-    # Logujemy tylko ostatnią rzeczywistą wiadomość użytkownika
     print(f"Ostatnia wiadomość użytkownika w prompcie: {prompt_content_with_instruction[-1]}")
     # print(f"Pełny prompt wysyłany do Gemini (content): {prompt_content_with_instruction}") # Odkomentuj do debugowania
 
@@ -228,8 +229,8 @@ Twoim zadaniem jest efektywne pozyskiwanie klientów poprzez profesjonalną i pe
             generated_text = response.candidates[0].content.parts[0].text
             print(f"Wygenerowany tekst: {generated_text}")
 
-            # 6. Przygotuj historię do zapisu (TYLKO rozmowa user/model, BEZ instrukcji systemowej)
-            # Dodajemy ODPOWIEDŹ AI do historii użytej jako podstawa promptu (history_to_send)
+            # 6. Przygotuj historię do zapisu (TYLKO rozmowa user/model)
+            #    Dodajemy ODPOWIEDŹ AI do historii użytej jako podstawa promptu (history_to_send)
             final_history_to_save = history_to_send + [Content(role="model", parts=[Part.from_text(generated_text)])]
             # Ponownie przytnij na wszelki wypadek
             if len(final_history_to_save) > MAX_HISTORY_TURNS * 2:
