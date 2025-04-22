@@ -4,7 +4,7 @@ from flask import Flask, request, Response
 import os
 import json
 import requests # Do wysyłania wiadomości do FB API
-import time     # Potrzebne do opóźnienia między wiadomościami
+import time     # Potrzebne do opóźnienia między wiadomościami ORAZ do symulacji pisania
 # math is imported but not used directly in splitting logic, can be removed if not needed elsewhere
 # import math
 import vertexai # Do komunikacji z Vertex AI
@@ -39,7 +39,13 @@ FACEBOOK_GRAPH_API_URL = f"https://graph.facebook.com/v19.0/me/messages" # Użyj
 HISTORY_DIR = "conversation_store" # Nazwa katalogu do przechowywania historii
 MAX_HISTORY_TURNS = 5 # Ile ostatnich par (user+model) wiadomości przechowywać (liczone jako wiadomości, nie tury)
 MESSAGE_CHAR_LIMIT = 1990 # Maksymalna długość pojedynczej wiadomości (trochę mniej niż 2000 dla bezpieczeństwa)
-MESSAGE_DELAY_SECONDS = 1.5 # Opóźnienie między wysyłaniem kolejnych części wiadomości
+MESSAGE_DELAY_SECONDS = 1.5 # Opóźnienie między wysyłaniem KOLEJNYCH CZĘŚCI wiadomości
+
+# --- Konfiguracja Symulacji Pisania ---
+ENABLE_TYPING_DELAY = True # Ustaw na False, aby wyłączyć symulację pisania
+MIN_TYPING_DELAY_SECONDS = 0.8 # Minimalne opóźnienie nawet dla krótkich wiadomości
+MAX_TYPING_DELAY_SECONDS = 3.5 # Maksymalne opóźnienie, aby nie czekać za długo
+TYPING_CHARS_PER_SECOND = 30   # Szacowana szybkość "pisania" (znaków na sekundę)
 
 # --- Funkcja do bezpiecznego tworzenia katalogu ---
 def ensure_dir(directory):
@@ -270,6 +276,7 @@ def send_message(recipient_id, full_message_text):
                 break # Przerwij wysyłanie, jeśli jeden fragment się nie powiedzie
             send_success_count += 1
             # Opóźnienie między wiadomościami, oprócz ostatniej
+            # Ten delay jest między *fragmentami* długiej wiadomości
             if i < num_chunks - 1:
                 print(f"[{recipient_id}] Oczekiwanie {MESSAGE_DELAY_SECONDS}s przed następnym fragmentem...")
                 time.sleep(MESSAGE_DELAY_SECONDS)
@@ -296,9 +303,10 @@ Przebieg rozmowy (elastyczny przewodnik):
     *   Klasa 4 LO/Technikum (podstawa): 70 zł
     *   Klasa 4 LO/Technikum (rozszerzenie): 75 zł
 6.  Po podaniu ceny, aktywnie zachęcaj do umówienia pierwszej lekcji. Podkreśl, że to świetna okazja do poznania korepetytora i sprawdzenia naszej metodyki nauczania online. Wspomnij, że lekcja jest płatna zgodnie z cennikiem.
-7.  Informacje o formie zajęć (wyłącznie online przez MS Teams - link, bez instalacji) podaj, gdy klient wykaże zainteresowanie lub zapyta
+7.  Informacje o formie zajęć (np. online przez MS Teams - link, bez instalacji) podaj, gdy klient wykaże zainteresowanie lub zapyta.
 8.  Jeśli pojawią się obawy co do formy online, wyjaśnij różnicę między lekcjami 1-na-1 a zdalną nauką szkolną, podkreślając indywidualne podejście i przygotowanie naszych korepetytorów.
 9.  Jeśli jeszcze raz odmówią powiedz, że zawsze warto spróbować, jeśli wspomnij o tym że już próbowali korepetycje online to powiedz że korepetytor korepetytorowi nie równy.
+
 Ważne zasady:
 *   **NAJWAŻNIEJSZE: Kontynuacja po przerwie!** Jeśli użytkownik odpisze po jakimś czasie lub po Twojej wiadomości sugerującej zastanowienie się (np. po "proszę się zastanowić"), **ZAWSZE** dokładnie przeanalizuj dostarczoną historię konwersacji i kontynuuj rozmowę od miejsca, w którym została przerwana. **NIE WOLNO** rozpoczynać wywiadu od nowa, jeśli informacje (np. o przedmiocie, klasie) zostały już wcześniej podane w historii. Odnieś się do ostatniego tematu rozmowy.
 *   Staraj się kontynuować konwersację z historii a nie zaczynać od nowa, nawet gdy ktoś napisze "Dzień dobry" kontynuuj rozmowę a nie pytaj o początku o wszystko.
@@ -313,7 +321,8 @@ Ważne zasady:
 *   Jeśli nie znasz odpowiedzi na konkretne pytanie (np. o dostępność nauczyciela w danym terminie), powiedz: "To szczegółowa informacja, którą muszę sprawdzić w naszym systemie. Proszę o chwilę cierpliwości, zaraz wrócę z odpowiedzią." lub "Najaktualniejsze informacje o dostępności terminów możemy ustalić po wstępnym zapisie, skontaktuje się wtedy z Państwem nasz koordynator." Nie wymyślaj informacji.
 *   Odpowiadaj zawsze w języku polskim.
 *   Nie udzielaj porad ani informacji niezwiązanych z ofertą korepetycji firmy 'Zakręcone Korepetycje'.
-*   Nie używaj słowa "wyłącznie" jeśli mówisz o korepetycjach online
+*   Nie używaj słowa "wyłącznie" jeśli mówisz o korepetycjach online (punkt 7 w przebiegu rozmowy został zaktualizowany).
+
 Twoim zadaniem jest efektywne pozyskiwanie klientów poprzez profesjonalną i perswazyjną rozmowę."""
 
 
@@ -525,17 +534,34 @@ def webhook_handle():
                             # Generuj odpowiedź Gemini z historią
                             response_text = get_gemini_response_with_history(sender_id, message_text)
 
+                            # --- DODANO: Symulacja opóźnienia pisania ---
+                            if ENABLE_TYPING_DELAY and response_text: # Tylko jeśli włączone i jest co wysłać
+                                response_len = len(response_text)
+                                # Oblicz podstawowe opóźnienie na podstawie długości
+                                calculated_delay = response_len / TYPING_CHARS_PER_SECOND
+                                # Dodaj minimalny czas i ogranicz do maksimum
+                                final_delay = min(MAX_TYPING_DELAY_SECONDS, calculated_delay + MIN_TYPING_DELAY_SECONDS)
+                                # Upewnij się, że nie jest ujemne (choć nie powinno być)
+                                final_delay = max(0, final_delay)
+
+                                print(f"[{sender_id}] Symulowanie pisania... Opóźnienie: {final_delay:.2f}s (długość: {response_len})")
+                                time.sleep(final_delay)
+                            # --- KONIEC: Symulacja opóźnienia pisania ---
+
                             # Wyślij odpowiedź (z dzieleniem w razie potrzeby)
                             send_message(sender_id, response_text)
 
                         elif "attachments" in message_data:
                              attachment_type = message_data['attachments'][0].get('type', 'nieznany')
                              print(f"[{sender_id}] Odebrano wiadomość z załącznikiem typu: {attachment_type}.")
+                             # Można dodać opóźnienie również tutaj, jeśli chcesz
+                             # if ENABLE_TYPING_DELAY: time.sleep(MIN_TYPING_DELAY_SECONDS)
                              send_message(sender_id, "Przepraszam, obecnie nie przetwarzam załączników. Proszę opisz, co chciałeś/chciałaś przekazać.")
 
                         else:
                             print(f"[{sender_id}] Odebrano wiadomość bez tekstu lub załączników.")
-                            # Można wysłać wiadomość lub zignorować
+                            # Można dodać opóźnienie również tutaj
+                            # if ENABLE_TYPING_DELAY: time.sleep(MIN_TYPING_DELAY_SECONDS)
                             send_message(sender_id, "Przepraszam, rozumiem tylko wiadomości tekstowe.")
 
                     # Obsługa kliknięć przycisków (postback)
@@ -550,6 +576,17 @@ def webhook_handle():
 
                          # Wywołaj Gemini z historią, traktując kliknięcie jak nową wiadomość
                          response_text = get_gemini_response_with_history(sender_id, prompt_for_button)
+
+                         # --- DODANO: Symulacja opóźnienia pisania ---
+                         if ENABLE_TYPING_DELAY and response_text:
+                             response_len = len(response_text)
+                             calculated_delay = response_len / TYPING_CHARS_PER_SECOND
+                             final_delay = min(MAX_TYPING_DELAY_SECONDS, calculated_delay + MIN_TYPING_DELAY_SECONDS)
+                             final_delay = max(0, final_delay)
+                             print(f"[{sender_id}] Symulowanie pisania (postback)... Opóźnienie: {final_delay:.2f}s (długość: {response_len})")
+                             time.sleep(final_delay)
+                         # --- KONIEC: Symulacja opóźnienia pisania ---
+
                          send_message(sender_id, response_text)
 
                     # Opcjonalnie: Obsługa innych zdarzeń (read, delivery)
@@ -598,6 +635,9 @@ if __name__ == '__main__':
     print(f"  Projekt Vertex AI: {PROJECT_ID}")
     print(f"  Lokalizacja Vertex AI: {LOCATION}")
     print(f"  Model Vertex AI: {MODEL_ID}") # Wyświetla używany model
+    print(f"  Symulacja pisania włączona: {ENABLE_TYPING_DELAY}")
+    if ENABLE_TYPING_DELAY:
+        print(f"    Parametry symulacji: Min={MIN_TYPING_DELAY_SECONDS}s, Max={MAX_TYPING_DELAY_SECONDS}s, CPS={TYPING_CHARS_PER_SECOND}")
     # Nie loguj tokenów dostępu w produkcji!
     # print(f"  FB Verify Token: {VERIFY_TOKEN}")
 
