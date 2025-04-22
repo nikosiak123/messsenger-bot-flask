@@ -37,7 +37,7 @@ FACEBOOK_GRAPH_API_URL = f"https://graph.facebook.com/v19.0/me/messages" # Użyj
 
 # --- Konfiguracja Przechowywania Historii i Wiadomości ---
 HISTORY_DIR = "conversation_store" # Nazwa katalogu do przechowywania historii
-MAX_HISTORY_TURNS = 5 # Ile ostatnich par (user+model) wiadomości przechowywać (liczone jako wiadomości, nie tury)
+MAX_HISTORY_TURNS = 15 # Ile ostatnich par (user+model) wiadomości przechowywać (liczone jako wiadomości, nie tury)
 MESSAGE_CHAR_LIMIT = 1990 # Maksymalna długość pojedynczej wiadomości (trochę mniej niż 2000 dla bezpieczeństwa)
 MESSAGE_DELAY_SECONDS = 1.5 # Opóźnienie między wysyłaniem KOLEJNYCH CZĘŚCI wiadomości
 
