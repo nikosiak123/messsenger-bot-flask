@@ -27,9 +27,8 @@ VERIFY_TOKEN = "KOLAGEN" # Twój token weryfikacyjny FB
 # Używamy Page Access Token podanego wcześniej przez użytkownika
 PAGE_ACCESS_TOKEN = "EACNAHFzEhkUBO7nbFAtYvfPWbEht1B3chQqWLx76Ljg2ekdbJYoOrnpjATqhS0EZC8S0q8a49hEZBaZByZCaj5gr1z62dAaMgcZA1BqFOruHfFo86EWTbI3S9KL59oxFWfZCfCjwbQra9lY5of1JVnj2c9uFJDhIpWlXxLLao9Cv8JKssgs3rEDxIJBRr26HgUewZDZD" # Przykładowy Token dostępu do strony FB
 PROJECT_ID = "linear-booth-450221-k1"  # Twoje Google Cloud Project ID
-LOCATION = "us-central1"  # Region GCP dla Vertex AI (zmień, jeśli ten nie działa)
-# Używamy modelu, który wcześniej dawał błędy uprawnień, ale nie 'not found'
-MODEL_ID = "gemini-1.5-pro-preview-0409" # Model Gemini do użycia
+LOCATION = "us-central1"  # Region GCP dla Vertex AI
+MODEL_ID = "gemini-2.0-flash-001" # Model wskazany przez użytkownika
 
 # Adres URL API Facebook Graph do wysyłania wiadomości
 FACEBOOK_GRAPH_API_URL = f"https://graph.facebook.com/v19.0/me/messages" # Użyj stabilnej wersji API
@@ -171,18 +170,15 @@ def send_message(recipient_id, full_message_text):
                 break # Koniec
             else:
                 split_index = -1
-                # Sprawdź podwójne nowe linie
                 temp_index = remaining_text.rfind('\n\n', 0, MESSAGE_CHAR_LIMIT)
                 if temp_index != -1: split_index = temp_index + 2
                 else:
-                    # Sprawdź pojedyncze nowe linie
                     temp_index = remaining_text.rfind('\n', 0, MESSAGE_CHAR_LIMIT)
                     if temp_index != -1: split_index = temp_index + 1
                     else:
-                        # Sprawdź ostatnią spację
                         temp_index = remaining_text.rfind(' ', 0, MESSAGE_CHAR_LIMIT)
                         if temp_index != -1: split_index = temp_index + 1
-                        else: split_index = MESSAGE_CHAR_LIMIT # Cięcie na twardo
+                        else: split_index = MESSAGE_CHAR_LIMIT
 
                 chunk = remaining_text[:split_index]
                 chunks.append(chunk)
@@ -210,24 +206,17 @@ def get_gemini_response_with_history(user_psid, current_user_message):
     if not gemini_model:
         return "Przepraszam, mam problem z połączeniem z AI (model niezaładowany)."
 
-    # 1. Odczytaj historię z pliku
     history = load_history(user_psid)
-
-    # 2. Stwórz nową wiadomość użytkownika jako obiekt Content
     user_content = Content(role="user", parts=[Part.from_text(current_user_message)])
-
-    # 3. Stwórz listę Content dla tej tury (historia + nowa wiadomość usera)
     current_turn_history = history + [user_content]
 
-    # 4. Przycinanie historii
-    history_to_send = current_turn_history # Domyślnie wysyłamy całą historię tej tury
+    history_to_send = current_turn_history
     if len(current_turn_history) > MAX_HISTORY_TURNS * 2:
         relevant_history = [msg for msg in current_turn_history if msg.role in ("user", "model")]
         if len(relevant_history) > MAX_HISTORY_TURNS * 2:
             history_to_send = relevant_history[-(MAX_HISTORY_TURNS * 2):]
             print(f"Historia przycięta dla PSID {user_psid}")
 
-    # *** 5. Przygotuj Instrukcję Systemową ***
     system_instruction_text = """Jesteś profesjonalnym i uprzejmym asystentem obsługi klienta reprezentującym 'Zakręcone Korepetycje' - centrum specjalizujące się w wysokiej jakości korepetycjach online z matematyki, języka angielskiego i języka polskiego. Obsługujemy uczniów od 4 klasy szkoły podstawowej aż do klasy maturalnej, oferując zajęcia zarówno na poziomie podstawowym, jak i rozszerzonym.
 
 Twoim głównym celem jest aktywne zachęcanie klientów (uczniów lub ich rodziców) do skorzystania z naszych usług i umówienia się na pierwszą lekcję. Prezentuj ofertę rzeczowo, podkreślając korzyści płynące z nauki z naszymi doświadczonymi korepetytorami online (np. lepsze wyniki, zdana matura, większa pewność siebie).
@@ -254,22 +243,15 @@ Ważne zasady:
 
 Twoim zadaniem jest efektywne pozyskiwanie klientów poprzez profesjonalną i perswazyjną rozmowę."""
 
-    # Tworzymy listę Content do wysłania: Instrukcja jako pierwsza wiadomość 'user', potem historia
     prompt_content_with_instruction = [Content(role="user", parts=[Part.from_text(system_instruction_text)])] + history_to_send
 
     print(f"--- Generowanie odpowiedzi Gemini ({MODEL_ID}) z historią i instrukcją dla PSID {user_psid} ---")
     print(f"Ostatnia wiadomość użytkownika w prompcie: {prompt_content_with_instruction[-1]}")
-    # print(f"Pełny prompt wysyłany do Gemini (content): {prompt_content_with_instruction}") # Odkomentuj do debugowania
 
     try:
-        # Konfiguracja generowania
         generation_config = GenerationConfig(
-            max_output_tokens=2048,
-            temperature=0.8,
-            top_p=1.0,
-            top_k=32
+            max_output_tokens=2048, temperature=0.8, top_p=1.0, top_k=32
         )
-        # Konfiguracja bezpieczeństwa
         safety_settings = {
             HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
             HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
@@ -277,12 +259,9 @@ Twoim zadaniem jest efektywne pozyskiwanie klientów poprzez profesjonalną i pe
             HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
         }
 
-        # Wywołanie modelu
         response = gemini_model.generate_content(
-            prompt_content_with_instruction, # Wysyłamy historię z instrukcją na początku
-            generation_config=generation_config,
-            safety_settings=safety_settings,
-            stream=False,
+            prompt_content_with_instruction,
+            generation_config=generation_config, safety_settings=safety_settings, stream=False
         )
 
         print("\n--- Odpowiedź Gemini ---")
@@ -290,28 +269,22 @@ Twoim zadaniem jest efektywne pozyskiwanie klientów poprzez profesjonalną i pe
             generated_text = response.candidates[0].content.parts[0].text
             print(f"Wygenerowany tekst (pełna długość): {len(generated_text)}")
 
-            # 6. Przygotuj historię do zapisu (TYLKO rozmowa user/model)
-            #    Dodajemy ODPOWIEDŹ AI do historii użytej jako podstawa promptu (history_to_send)
             final_history_to_save = history_to_send + [Content(role="model", parts=[Part.from_text(generated_text)])]
-            # Ponownie przytnij na wszelki wypadek
             if len(final_history_to_save) > MAX_HISTORY_TURNS * 2:
                  relevant_final_history = [msg for msg in final_history_to_save if msg.role in ("user", "model")]
                  if len(relevant_final_history) > MAX_HISTORY_TURNS * 2:
                      final_history_to_save = relevant_final_history[-(MAX_HISTORY_TURNS * 2):]
-
-            # 7. Zapisz ostateczną historię (bez instrukcji systemowej) do pliku
             save_history(user_psid, final_history_to_save)
             print(f"Zaktualizowano i zapisano historię dla PSID {user_psid}")
-
-            return generated_text # Zwracamy *cały* wygenerowany tekst do funkcji send_message
+            return generated_text
         else:
             finish_reason = response.candidates[0].finish_reason if response.candidates else "UNKNOWN"; safety_ratings = response.candidates[0].safety_ratings if response.candidates else []; print(f"Odpowiedź Gemini pusta/zablokowana. Powód: {finish_reason}, Oceny: {safety_ratings}"); print(f"Cała odpowiedź: {response}")
-            save_history(user_psid, history_to_send) # Zapisz historię do tego momentu
+            save_history(user_psid, history_to_send)
             return "Hmm, nie mogłem wygenerować odpowiedzi."
 
     except Exception as e:
         print(f"!!! BŁĄD podczas generowania treści przez Gemini ({MODEL_ID}): {e} !!!")
-        save_history(user_psid, history_to_send) # Zapisz historię do tego momentu
+        save_history(user_psid, history_to_send)
         error_str = str(e).lower()
         if "publisher model" in error_str or "not found" in error_str or "is not available" in error_str or "permission denied" in error_str or "access token scope" in error_str or "content with system role is not supported" in error_str:
              print(f"   >>> Błąd związany z modelem/uprawnieniami: {e}")
