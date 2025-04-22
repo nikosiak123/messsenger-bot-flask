@@ -22,18 +22,17 @@ app = Flask(__name__)
 VERIFY_TOKEN = "KOLAGEN" # Twój token weryfikacyjny FB
 
 # !!! WAŻNE: Zastąp poniższe wartości swoimi !!!
-PAGE_ACCESS_TOKEN = "EACNAHFzEhkUBO7nbFAtYvfPWbEht1B3chQqWLx76Ljg2ekdbJYoOrnpjATqhS0EZC8S0q8a49hEZBaZByZCaj5gr1z62dAaMgcZA1BqFOruHfFo86EWTbI3S9KL59oxFWfZCfCjwbQra9lY5of1JVnj2c9uFJDhIpWlXxLLao9Cv8JKssgs3rEDxIJBRr26HgUewZDZD" # Token dostępu do strony FB - UŻYTO PRZYKŁADOWEGO!
+PAGE_ACCESS_TOKEN = "TWOJ_PAGE_ACCESS_TOKEN_WKLEJ_TUTAJ" # Wklej swój prawdziwy token!
 PROJECT_ID = "linear-booth-450221-k1"  # Twoje Google Cloud Project ID
-LOCATION = "us-central1"  # Region GCP dla Vertex AI (np. us-central1, europe-west1)
-# Użyj modelu, który na pewno działał u Ciebie (np. Flash)
-MODEL_ID = "gemini-1.5-flash-preview-0514" # Model Gemini do użycia
+LOCATION = "us-central1"  # Region GCP dla Vertex AI (sprawdź, czy ten działa)
+MODEL_ID = "gemini-2.0-flash-001" # Używamy modelu wskazanego przez użytkownika
 
 # Adres URL API Facebook Graph do wysyłania wiadomości
 FACEBOOK_GRAPH_API_URL = f"https://graph.facebook.com/v19.0/me/messages" # Użyj stabilnej wersji API
 
 # --- Magazyn Historii (Słownik w Pamięci - TYLKO DO DEMO!) ---
 conversation_history = {}
-MAX_HISTORY_TURNS = 5 # Ile ostatnich par (user+model) wiadomości przechowywać (zmniejszone dla testów)
+MAX_HISTORY_TURNS = 5 # Ile ostatnich par (user+model) wiadomości przechowywać
 
 # --- Inicjalizacja Vertex AI ---
 gemini_model = None # Zmienna globalna na model
@@ -42,18 +41,12 @@ try:
     vertexai.init(project=PROJECT_ID, location=LOCATION)
     print("Inicjalizacja Vertex AI pomyślna.")
     print(f"Ładowanie modelu: {MODEL_ID}")
-    # Dodatkowe ustawienia systemowe dla modelu (opcjonalne)
-    # system_instruction_text = "Jesteś pomocnym asystentem o nazwie Bot, rozmawiającym po polsku."
-    # model_config = {"system_instruction": system_instruction_text} # Nowsze SDK mogą wspierać to bezpośrednio
-    gemini_model = GenerativeModel(
-        MODEL_ID,
-        # system_instruction=system_instruction_text # Sprawdź dokumentację SDK dla tej opcji
-        )
+    gemini_model = GenerativeModel(MODEL_ID)
     print("Model załadowany pomyślnie.")
 except Exception as e:
     print(f"!!! KRYTYCZNY BŁĄD podczas inicjalizacji Vertex AI lub ładowania modelu: {e} !!!")
-    print("   Sprawdź PROJECT_ID, LOCATION, uprawnienia konta usługi VM i czy API Vertex AI jest włączone.")
-    print(f"   Upewnij się również, że model '{MODEL_ID}' jest poprawną i dostępną nazwą.")
+    print(f"    Sprawdź, czy model '{MODEL_ID}' istnieje i jest dostępny w regionie '{LOCATION}' dla projektu '{PROJECT_ID}'.")
+    print("    Upewnij się, że masz odpowiednie uprawnienia IAM i Access Scopes dla VM.")
 
 # --- Funkcja do wysyłania wiadomości do Messengera ---
 def send_message(recipient_id, message_text):
@@ -67,13 +60,13 @@ def send_message(recipient_id, message_text):
     payload = {
         "recipient": {"id": recipient_id},
         "message": {"text": message_text},
-        "messaging_type": "RESPONSE"
+        "messaging_type": "RESPONSE" # Ważne dla zgodności z polityką FB
     }
     print(f"Wysyłane dane (payload): {json.dumps(payload, indent=2)}")
 
     try:
         r = requests.post(FACEBOOK_GRAPH_API_URL, params=params, json=payload)
-        r.raise_for_status()
+        r.raise_for_status() # Sprawdza błędy HTTP
         response_json = r.json()
         print(f"Odpowiedź z Facebook API: {response_json}")
         print(f"--- Wiadomość wysłana pomyślnie do {recipient_id} ---")
@@ -85,49 +78,42 @@ def send_message(recipient_id, message_text):
             except json.JSONDecodeError:
                 print(f"Odpowiedź serwera FB (błąd, nie JSON): {e.response.text}")
 
-# --- Funkcja do generowania odpowiedzi przez Gemini z Historią ---
+# --- Funkcja do generowania odpowiedzi przez Gemini z Historią i po Polsku ---
 def get_gemini_response_with_history(user_psid, current_user_message):
-    """Generuje odpowiedź Gemini, uwzględniając historię rozmowy."""
+    """Generuje odpowiedź Gemini, uwzględniając historię rozmowy, odpowiadając po polsku."""
     if not gemini_model:
-        return "Przepraszam, mam problem z połączeniem z AI."
+        print("!!! BŁĄD: Model Gemini nie został załadowany. Nie można wygenerować odpowiedzi. !!!")
+        return "Przepraszam, mam problem z połączeniem z AI (model niezaładowany)."
 
-    # 1. Pobierz historię dla użytkownika (lista obiektów Content)
-    #    Używamy .copy(), aby nie modyfikować globalnego słownika bezpośrednio w tej turze
+    # Pobieramy historię, używając .copy(), aby uniknąć modyfikacji oryginału przed zapisem
     history = conversation_history.get(user_psid, []).copy()
 
-    # 2. Dodaj nową wiadomość użytkownika do lokalnej kopii historii
+    # Dodajemy nową wiadomość użytkownika do bieżącej tury
     history.append(Content(role="user", parts=[Part.from_text(current_user_message)]))
 
-    # 3. Zarządzaj długością historii (przycinanie)
-    #    Zachowaj tylko MAX_HISTORY_TURNS * 2 ostatnich wiadomości (para user+model)
+    # Przycinamy historię, jeśli jest zbyt długa
     if len(history) > MAX_HISTORY_TURNS * 2:
-        # Bierzemy pod uwagę tylko wiadomości użytkownika i modelu
         relevant_history = [msg for msg in history if msg.role in ("user", "model")]
         if len(relevant_history) > MAX_HISTORY_TURNS * 2:
-            # Przytnij tylko historię user/model, zachowując najnowsze
             history = relevant_history[-(MAX_HISTORY_TURNS * 2):]
-        print(f"Historia przycięta do (maks) {MAX_HISTORY_TURNS * 2} ostatnich tur dla PSID {user_psid}")
+        print(f"Historia przycięta dla PSID {user_psid}")
 
-    # 4. Przygotuj prompt dla Gemini - użyjemy bezpośrednio listy `history`
-    #    Instrukcję o języku polskim dodamy jako osobny komunikat systemowy (jeśli model to wspiera)
-    #    lub model powinien sam wykryć język z kontekstu.
-    prompt_content = history # Używamy bieżącej (potencjalnie przyciętej) historii
+    # Tworzymy prompt z instrukcją systemową i historią
+    # Instrukcja systemowa może nie być wspierana przez wszystkie modele/wersje SDK w ten sposób
+    prompt_content = [Content(role="system", parts=[Part.from_text("Jesteś pomocnym asystentem. Odpowiadaj zawsze w języku polskim.")])] + history
 
-    # Opcjonalna instrukcja systemowa (sprawdź czy działa z Twoim modelem/SDK)
-    system_instruction = Content(role="system", parts=[Part.from_text("Jesteś pomocnym asystentem. Odpowiadaj zawsze w języku polskim.")])
-    # prompt_content = [system_instruction] + history # Odkomentuj, aby przetestować instrukcję systemową
-
-
-    print(f"--- Generowanie odpowiedzi Gemini z historią dla PSID {user_psid} ---")
+    print(f"--- Generowanie odpowiedzi Gemini ({MODEL_ID}) z historią dla PSID {user_psid} ---")
     print(f"Pełny prompt wysyłany do Gemini (content): {prompt_content}")
 
     try:
+        # Konfiguracja generowania
         generation_config = GenerationConfig(
             max_output_tokens=2048,
-            temperature=0.8,
+            temperature=0.8, # Można eksperymentować
             top_p=1.0,
             top_k=32
         )
+        # Konfiguracja bezpieczeństwa
         safety_settings = {
             HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
             HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
@@ -135,11 +121,9 @@ def get_gemini_response_with_history(user_psid, current_user_message):
             HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
         }
 
-        # Wywołanie modelu z listą obiektów Content
-        # Uwaga: Starsze modele Gemini mogły oczekiwać `history` jako osobnego parametru
-        # Sprawdź dokumentację, jeśli poniższe nie działa:
+        # Wywołanie modelu
         response = gemini_model.generate_content(
-            prompt_content, # Przekazujemy całą przygotowaną listę Content
+            prompt_content,
             generation_config=generation_config,
             safety_settings=safety_settings,
             stream=False,
@@ -150,25 +134,20 @@ def get_gemini_response_with_history(user_psid, current_user_message):
             generated_text = response.candidates[0].content.parts[0].text
             print(f"Wygenerowany tekst: {generated_text}")
 
-            # 5. Dodaj odpowiedź bota do GŁÓWNEJ historii (przechowywanej globalnie)
-            #    Najpierw pobierz aktualną globalną historię, na wypadek gdyby zmieniła się w międzyczasie (mało prawdopodobne w Flasku bez async)
-            global_history = conversation_history.get(user_psid, []).copy()
-            global_history.append(Content(role="user", parts=[Part.from_text(current_user_message)])) # Dodajemy wiadomość usera
-            global_history.append(Content(role="model", parts=[Part.from_text(generated_text)]))     # Dodajemy odpowiedź AI
-
-            # Przytnij globalną historię przed zapisaniem
-            if len(global_history) > MAX_HISTORY_TURNS * 2:
-                 relevant_global_history = [msg for msg in global_history if msg.role in ("user", "model")]
-                 if len(relevant_global_history) > MAX_HISTORY_TURNS * 2:
-                     global_history = relevant_global_history[-(MAX_HISTORY_TURNS * 2):]
-
-            # Zapisz zaktualizowaną globalną historię
-            conversation_history[user_psid] = global_history
+            # Zapisz zaktualizowaną historię (wiadomość usera + odpowiedź AI) do globalnego słownika
+            # Używamy `history`, które już zawiera wiadomość usera z tej tury
+            history.append(Content(role="model", parts=[Part.from_text(generated_text)]))
+            # Upewniamy się, że zapisywana historia nie przekracza limitu
+            if len(history) > MAX_HISTORY_TURNS * 2:
+                 relevant_history = [msg for msg in history if msg.role in ("user", "model")]
+                 if len(relevant_history) > MAX_HISTORY_TURNS * 2:
+                     history = relevant_history[-(MAX_HISTORY_TURNS * 2):]
+            conversation_history[user_psid] = history # Zapisujemy ostateczną historię
             print(f"Zaktualizowano globalną historię dla PSID {user_psid}, długość: {len(conversation_history[user_psid])}")
 
             return generated_text
         else:
-            # Obsługa sytuacji, gdy odpowiedź jest pusta lub zablokowana
+            # Logowanie problemu z odpowiedzią
             finish_reason = response.candidates[0].finish_reason if response.candidates else "UNKNOWN"
             safety_ratings = response.candidates[0].safety_ratings if response.candidates else []
             print(f"Odpowiedź Gemini była pusta lub zablokowana. Powód zakończenia: {finish_reason}, Oceny bezpieczeństwa: {safety_ratings}")
@@ -176,8 +155,14 @@ def get_gemini_response_with_history(user_psid, current_user_message):
             return "Hmm, nie mogłem wygenerować odpowiedzi lub została zablokowana."
 
     except Exception as e:
-        print(f"!!! BŁĄD podczas generowania treści przez Gemini: {e} !!!")
-        return "Wystąpił błąd podczas myślenia."
+        print(f"!!! BŁĄD podczas generowania treści przez Gemini ({MODEL_ID}): {e} !!!")
+        # Lepsze logowanie błędu dostępu do modelu
+        error_str = str(e).lower()
+        if "publisher model" in error_str or "not found" in error_str or "is not available" in error_str or "permission denied" in error_str or "access token scope" in error_str:
+             print(f"   >>> Wygląda na to, że występuje problem z dostępem do modelu '{MODEL_ID}' w regionie '{LOCATION}'.")
+             print("   >>> Sprawdź: 1) Poprawność nazwy modelu. 2) Dostępność w regionie. 3) Uprawnienia IAM ('Vertex AI User') i Access Scopes ('cloud-platform') dla konta usługi VM. 4) Czy API Vertex AI jest włączone.")
+             return f"Nie mogę użyć modułu AI '{MODEL_ID}'. Sprawdź konfigurację."
+        return "Wystąpił błąd podczas myślenia. Spróbuj zadać pytanie inaczej."
 
 
 # --- Obsługa Weryfikacji Webhooka (metoda GET) ---
@@ -204,21 +189,19 @@ def webhook_handle():
     data = None
     try:
         data = request.get_json()
-        # print("Odebrane dane JSON:") # Odkomentuj w razie potrzeby debugowania
+        # print("Odebrane dane JSON:") # Można odkomentować do debugowania
         # print(json.dumps(data, indent=2))
 
         if data and data.get("object") == "page":
             for entry in data.get("entry", []):
                 for messaging_event in entry.get("messaging", []):
-                    # Sprawdzamy czy zdarzenie ma nadawcę - niektóre systemowe mogą nie mieć
                     if "sender" not in messaging_event:
                         print("Pominięto zdarzenie bez sender.id:", messaging_event)
-                        continue # Przejdź do następnego zdarzenia
+                        continue
 
-                    sender_id = messaging_event["sender"]["id"] # PSID użytkownika
+                    sender_id = messaging_event["sender"]["id"]
 
-                    if messaging_event.get("message"): # Czy to wiadomość?
-                        # Ignoruj echa wiadomości wysłanych przez bota
+                    if messaging_event.get("message"):
                         if messaging_event["message"].get("is_echo"):
                             print(f"Pominięto echo wiadomości dla PSID {sender_id}")
                             continue
@@ -226,38 +209,29 @@ def webhook_handle():
                         if "text" in messaging_event["message"]:
                             message_text = messaging_event["message"]["text"]
                             print(f"Odebrano wiadomość tekstową '{message_text}' od użytkownika {sender_id}")
-                            # Wywołanie Gemini z uwzględnieniem historii
                             response_text = get_gemini_response_with_history(sender_id, message_text)
-                            send_message(sender_id, response_text) # Wyślij odpowiedź
+                            send_message(sender_id, response_text)
                         else:
                             print(f"Odebrano wiadomość bez tekstu od użytkownika {sender_id}")
                             send_message(sender_id, "Przepraszam, rozumiem tylko wiadomości tekstowe.")
 
-                    elif messaging_event.get("postback"): # Czy to kliknięcie przycisku?
+                    elif messaging_event.get("postback"):
                          payload = messaging_event["postback"]["payload"]
                          print(f"Odebrano postback z payload '{payload}' od użytkownika {sender_id}")
-                         # Można też przekazać historię do obsługi postbacków, ale na razie prosty prompt
-                         prompt_for_button = f"Użytkownik kliknął przycisk oznaczony jako: {payload}. Odpowiedz na to krótko po polsku."
-                         # Użyjemy funkcji z historią, ale prompt nie zawiera historii
-                         # Lepszym rozwiązaniem byłoby dodanie informacji o kliknięciu do historii
+                         prompt_for_button = f"Użytkownik kliknął przycisk oznaczony jako: {payload}."
+                         # Wywołujemy z historią, ale przekazujemy informację o kliknięciu jako 'wiadomość'
                          response_text = get_gemini_response_with_history(sender_id, prompt_for_button)
                          send_message(sender_id, response_text)
                     else:
-                        # Loguje inne, nieobsługiwane typy zdarzeń
                         print("Odebrano inne zdarzenie messaging:", messaging_event)
     except Exception as e:
         print(f"!!! BŁĄD podczas przetwarzania webhooka POST: {e} !!!")
-        # Ważne: Odpowiedz 200 OK, aby Facebook nie próbował wysłać ponownie
         return Response("EVENT_PROCESSING_ERROR", status=200)
 
-    # Zawsze odpowiada 200 OK na końcu, potwierdzając odbiór
-    # print("Odpowiadam 200 OK (koniec przetwarzania).") # Można odkomentować
-    # print("------------------------------------------\n")
     return Response("EVENT_RECEIVED", status=200)
 
 # --- Uruchomienie Serwera ---
 if __name__ == '__main__':
     port = 8080
-    print(f"Uruchamianie serwera Flask z integracją Gemini (z historią w pamięci) na porcie {port}...")
-    # Wyłącz debug=True w środowisku produkcyjnym!
+    print(f"Uruchamianie serwera Flask z integracją Gemini (model: {MODEL_ID}) na porcie {port}...")
     app.run(host='0.0.0.0', port=port, debug=True)
