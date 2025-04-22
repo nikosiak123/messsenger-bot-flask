@@ -42,78 +42,7 @@ def send_message(recipient_id, message_text):
     pass # Placeholder - wklej tu poprzednią implementację
 
 # --- Funkcja do generowania odpowiedzi przez Gemini z Historią ---
-def get_gemini_response_with_history(user_psid, current_user_message):
-    """Generuje odpowiedź Gemini, uwzględniając historię rozmowy."""
-    if not gemini_model:
-        return "Przepraszam, mam problem z połączeniem z AI."
-
-    # 1. Pobierz historię dla użytkownika
-    history = conversation_history.get(user_psid, [])
-
-    # 2. Dodaj nową wiadomość użytkownika do historii (jako obiekt Content)
-    #    Format roli: 'user' dla użytkownika, 'model' dla odpowiedzi AI
-    history.append(Content(role="user", parts=[Part.from_text(current_user_message)]))
-
-    # 3. Zarządzaj długością historii (przycinanie)
-    #    Zachowaj tylko MAX_HISTORY_TURNS * 2 ostatnich wiadomości (para user+model)
-    if len(history) > MAX_HISTORY_TURNS * 2:
-        history = history[-(MAX_HISTORY_TURNS * 2):]
-        print(f"Historia przycięta do {len(history)} wiadomości dla PSID {user_psid}")
-
-    # 4. Sformatuj prompt dla Gemini (dodaj instrukcję o języku)
-    #    Systemowa instrukcja na początku może pomóc
-    system_instruction = Part.from_text("Jesteś pomocnym asystentem. Odpowiadaj zawsze w języku polskim.")
-    # Łączymy instrukcję z historią
-    prompt_content = [system_instruction] + history
-
-    print(f"--- Generowanie odpowiedzi Gemini z historią dla PSID {user_psid} ---")
-    print(f"Pełny prompt wysyłany do Gemini (content): {prompt_content}")
-
-    try:
-        generation_config = GenerationConfig(
-            max_output_tokens=2048,
-            temperature=0.8,
-            top_p=1.0,
-            top_k=32
-        )
-        # Definicja poziomów bezpieczeństwa
-        safety_settings = {
-            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-        }
-
-        # Wywołanie modelu z listą obiektów Content
-        response = gemini_model.generate_content(
-            prompt_content, # Przekazujemy całą przygotowaną listę
-            generation_config=generation_config,
-            safety_settings=safety_settings,
-            stream=False,
-        )
-
-        print("\n--- Odpowiedź Gemini ---")
-        if response.candidates and response.candidates[0].content.parts:
-            generated_text = response.candidates[0].content.parts[0].text
-            print(f"Wygenerowany tekst: {generated_text}")
-
-            # 5. Dodaj odpowiedź bota do historii
-            history.append(Content(role="model", parts=[Part.from_text(generated_text)]))
-            # Zapisz zaktualizowaną (i potencjalnie przyciętą) historię
-            conversation_history[user_psid] = history
-            print(f"Zaktualizowano historię dla PSID {user_psid}, długość: {len(history)}")
-
-            return generated_text
-        else:
-            print("Odpowiedź Gemini była pusta lub zablokowana.")
-            print(f"Cała odpowiedź: {response}")
-            # Nie dodajemy tej odpowiedzi do historii
-            return "Hmm, nie wiem co odpowiedzieć."
-
-    except Exception as e:
-        print(f"!!! BŁĄD podczas generowania treści przez Gemini: {e} !!!")
-        # Można dodać bardziej szczegółową obsługę błędów
-        return "Wystąpił błąd podczas myślenia."
+from vertexai.generative_models import GenerativeModel, Part, Content, GenerationConfig, SafetySetting, HarmCategory, HarmBlockThreshold
 
 # --- Obsługa Weryfikacji Webhooka (metoda GET) ---
 # (Bez zmian)
