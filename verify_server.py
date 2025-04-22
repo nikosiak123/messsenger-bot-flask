@@ -20,14 +20,13 @@ import errno # Potrzebne do bezpiecznego tworzenia katalogu
 app = Flask(__name__)
 
 # --- Konfiguracja ---
-VERIFY_TOKEN = "KOLAGEN" # Twój token weryfikacyjny FB
+VERIFY_TOKEN = "KOLAGEN" # Token weryfikacyjny FB
 
 # Używamy Page Access Token podanego wcześniej przez użytkownika
-PAGE_ACCESS_TOKEN = "EACNAHFzEhkUBO7nbFAtYvfPWbEht1B3chQqWLx76Ljg2ekdbJYoOrnpjATqhS0EZC8S0q8a49hEZBaZByZCaj5gr1z62dAaMgcZA1BqFOruHfFo86EWTbI3S9KL59oxFWfZCfCjwbQra9lY5of1JVnj2c9uFJDhIpWlXxLLao9Cv8JKssgs3rEDxIJBRr26HgUewZDZD" # Token dostępu do strony FB
-PROJECT_ID = "linear-booth-450221-k1"  # Twoje Google Cloud Project ID
-LOCATION = "us-central1"  # Region GCP dla Vertex AI (zmień, jeśli ten nie działa)
-# Użyj modelu, który na pewno działał u Ciebie (np. Flash)
-MODEL_ID = "gemini-1.5-flash-preview-0514" # Model Gemini do użycia (zmień, jeśli inny działał)
+PAGE_ACCESS_TOKEN = "EACNAHFzEhkUBO7nbFAtYvfPWbEht1B3chQqWLx76Ljg2ekdbJYoOrnpjATqhS0EZC8S0q8a49hEZBaZByZCaj5gr1z62dAaMgcZA1BqFOruHfFo86EWTbI3S9KL59oxFWfZCfCjwbQra9lY5of1JVnj2c9uFJDhIpWlXxLLao9Cv8JKssgs3rEDxIJBRr26HgUewZDZD" # Przykładowy Token dostępu do strony FB
+PROJECT_ID = "linear-booth-450221-k1"  # Google Cloud Project ID
+LOCATION = "us-central1"  # Region GCP dla Vertex AI
+MODEL_ID = "gemini-2.0-flash-001" # Model wskazany przez użytkownika
 
 # Adres URL API Facebook Graph do wysyłania wiadomości
 FACEBOOK_GRAPH_API_URL = f"https://graph.facebook.com/v19.0/me/messages" # Użyj stabilnej wersji API
@@ -147,7 +146,7 @@ def send_message(recipient_id, message_text):
             except json.JSONDecodeError:
                 print(f"Odpowiedź serwera FB (błąd, nie JSON): {e.response.text}")
 
-# --- Funkcja do generowania odpowiedzi przez Gemini z Historią i po Polsku - POPRAWIONA ---
+# --- Funkcja do generowania odpowiedzi przez Gemini z Historią i po Polsku ---
 def get_gemini_response_with_history(user_psid, current_user_message):
     """Generuje odpowiedź Gemini, używając historii zapisanej w pliku JSON, odpowiadając po polsku."""
     if not gemini_model:
@@ -156,10 +155,9 @@ def get_gemini_response_with_history(user_psid, current_user_message):
     # 1. Odczytaj historię z pliku
     history = load_history(user_psid)
 
-    # 2. Przygotuj nową wiadomość użytkownika
-    #    Dodajemy instrukcję językową do treści, jeśli to pierwsza wiadomość
+    # 2. Przygotuj nową wiadomość użytkownika z instrukcją o języku (jeśli to pierwsza wiadomość)
     formatted_user_message = current_user_message
-    is_first_message = not bool(history) # Sprawdź czy historia była pusta PRZED dodaniem nowej wiadomości
+    is_first_message = not bool(history)
     if is_first_message:
         formatted_user_message = f"Odpowiedz na poniższe pytanie lub polecenie w języku polskim.\n\nPytanie: {current_user_message}"
         print("Dodano instrukcję językową do treści pierwszej wiadomości.")
@@ -170,20 +168,17 @@ def get_gemini_response_with_history(user_psid, current_user_message):
     # 3. Stwórz listę Content dla tej tury (historia + nowa wiadomość)
     current_turn_history = history + [user_content]
 
-    # 4. Przycinanie historii (działamy na current_turn_history)
+    # 4. Przycinanie historii
     prompt_content = current_turn_history # Domyślnie używamy całej historii tej tury
     if len(current_turn_history) > MAX_HISTORY_TURNS * 2:
         relevant_history = [msg for msg in current_turn_history if msg.role in ("user", "model")]
         if len(relevant_history) > MAX_HISTORY_TURNS * 2:
-            prompt_content = relevant_history[-(MAX_HISTORY_TURNS * 2):] # Przytnij tylko historię user/model
+            prompt_content = relevant_history[-(MAX_HISTORY_TURNS * 2):]
             print(f"Historia przycięta dla PSID {user_psid}")
-        # else: # Jeśli po odfiltrowaniu nadal nie przekracza limitu, użyj całej historii tej tury
-             # prompt_content = current_turn_history # Już ustawione domyślnie
 
     print(f"--- Generowanie odpowiedzi Gemini ({MODEL_ID}) z historią dla PSID {user_psid} ---")
-    # Logujemy tylko część promptu, żeby nie zaśmiecać logów długą historią
     print(f"Ostatnia wiadomość w prompcie: {prompt_content[-1]}")
-    # print(f"Pełny prompt wysyłany do Gemini (content): {prompt_content}") # Odkomentuj w razie potrzeby pełnego debugowania
+    # print(f"Pełny prompt wysyłany do Gemini (content): {prompt_content}") # Odkomentuj w razie potrzeby
 
     try:
         # Konfiguracja generowania
@@ -203,7 +198,7 @@ def get_gemini_response_with_history(user_psid, current_user_message):
 
         # Wywołanie modelu
         response = gemini_model.generate_content(
-            prompt_content, # Używamy listy Content (pełnej lub przyciętej)
+            prompt_content,
             generation_config=generation_config,
             safety_settings=safety_settings,
             stream=False,
@@ -214,8 +209,7 @@ def get_gemini_response_with_history(user_psid, current_user_message):
             generated_text = response.candidates[0].content.parts[0].text
             print(f"Wygenerowany tekst: {generated_text}")
 
-            # 5. Przygotuj ZAKTUALIZOWANĄ historię do zapisu
-            #    Dodajemy odpowiedź AI do historii użytej jako prompt
+            # 5. Przygotuj historię do zapisu (prompt + odpowiedź AI)
             final_history_to_save = prompt_content + [Content(role="model", parts=[Part.from_text(generated_text)])]
             # Ponownie przytnij na wszelki wypadek
             if len(final_history_to_save) > MAX_HISTORY_TURNS * 2:
@@ -233,17 +227,22 @@ def get_gemini_response_with_history(user_psid, current_user_message):
             safety_ratings = response.candidates[0].safety_ratings if response.candidates else []
             print(f"Odpowiedź Gemini była pusta lub zablokowana. Powód zakończenia: {finish_reason}, Oceny bezpieczeństwa: {safety_ratings}")
             print(f"Cała odpowiedź: {response}")
-            # Zapisz historię do tego momentu (bez odpowiedzi AI)
             save_history(user_psid, prompt_content)
             return "Hmm, nie mogłem wygenerować odpowiedzi lub została zablokowana."
 
     except Exception as e:
         print(f"!!! BŁĄD podczas generowania treści przez Gemini ({MODEL_ID}): {e} !!!")
-        # Zapisz historię do tego momentu (bez odpowiedzi AI)
-        save_history(user_psid, prompt_content)
+        save_history(user_psid, prompt_content) # Zapisz historię do tego momentu
         error_str = str(e).lower()
-        # ... (obsługa błędów modelu jak poprzednio) ...
-        return "Wystąpił błąd podczas myślenia."
+        if "publisher model" in error_str or "not found" in error_str or "is not available" in error_str or "permission denied" in error_str or "access token scope" in error_str or "content with system role is not supported" in error_str:
+             print(f"   >>> Wystąpił błąd związany z modelem lub uprawnieniami: {e}")
+             print(f"   >>> Sprawdź model '{MODEL_ID}' w regionie '{LOCATION}' oraz konfigurację uprawnień.")
+             return f"Nie mogę użyć modułu AI '{MODEL_ID}'. Sprawdź konfigurację."
+        # Dodajmy obsługę błędu "Deadline Exceeded", który może się zdarzyć
+        elif "deadline exceeded" in error_str:
+             print(f"   >>> Przekroczono limit czasu oczekiwania na odpowiedź z Gemini ({MODEL_ID}).")
+             return "Hmm, myślenie zajęło mi zbyt dużo czasu. Spróbuj ponownie."
+        return "Wystąpił błąd podczas myślenia. Spróbuj zadać pytanie inaczej."
 
 
 # --- Obsługa Weryfikacji Webhooka (metoda GET) ---
