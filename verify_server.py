@@ -28,9 +28,8 @@ VERIFY_TOKEN = "KOLAGEN" # Twój token weryfikacyjny FB
 PAGE_ACCESS_TOKEN = "EACNAHFzEhkUBO7nbFAtYvfPWbEht1B3chQqWLx76Ljg2ekdbJYoOrnpjATqhS0EZC8S0q8a49hEZBaZByZCaj5gr1z62dAaMgcZA1BqFOruHfFo86EWTbI3S9KL59oxFWfZCfCjwbQra9lY5of1JVnj2c9uFJDhIpWlXxLLao9Cv8JKssgs3rEDxIJBRr26HgUewZDZD" # Przykładowy Token dostępu do strony FB
 PROJECT_ID = "linear-booth-450221-k1"  # Twoje Google Cloud Project ID
 LOCATION = "us-central1"  # Region GCP dla Vertex AI (zmień, jeśli ten nie działa)
-# Użyj modelu, który na pewno działał u Ciebie (np. Flash)
-# MODEL_ID = "gemini-1.5-flash-preview-0514" # Model Gemini do użycia (zmień, jeśli inny działał)
-MODEL_ID = "gemini-1.5-pro-preview-0409" # Spróbujmy Pro, może ma mniej ograniczeń?
+# Używamy modelu, który wcześniej dawał błędy uprawnień, ale nie 'not found'
+MODEL_ID = "gemini-1.5-pro-preview-0409" # Model Gemini do użycia
 
 # Adres URL API Facebook Graph do wysyłania wiadomości
 FACEBOOK_GRAPH_API_URL = f"https://graph.facebook.com/v19.0/me/messages" # Użyj stabilnej wersji API
@@ -118,6 +117,8 @@ try:
     print("Model załadowany pomyślnie.")
 except Exception as e:
     print(f"!!! KRYTYCZNY BŁĄD podczas inicjalizacji Vertex AI lub ładowania modelu: {e} !!!")
+    print(f"    Sprawdź, czy model '{MODEL_ID}' istnieje i jest dostępny w regionie '{LOCATION}' dla projektu '{PROJECT_ID}'.")
+    print("    Upewnij się, że masz odpowiednie uprawnienia IAM i Access Scopes dla VM.")
 
 
 # --- Funkcja POMOCNICZA do wysyłania JEDNEJ wiadomości ---
@@ -130,7 +131,6 @@ def _send_single_message(recipient_id, message_text):
         "message": {"text": message_text},
         "messaging_type": "RESPONSE"
     }
-    # print(f"Wysyłane dane (payload): {json.dumps(payload, indent=2)}") # Mniej gadatliwe logowanie
 
     try:
         r = requests.post(FACEBOOK_GRAPH_API_URL, params=params, json=payload)
@@ -158,11 +158,9 @@ def send_message(recipient_id, full_message_text):
     print(f"Całkowita długość wiadomości do wysłania: {message_len} znaków.")
 
     if message_len <= MESSAGE_CHAR_LIMIT:
-        # Wiadomość mieści się w limicie, wysyłamy jako całość
         print("Wiadomość mieści się w limicie, wysyłanie jako całość.")
         _send_single_message(recipient_id, full_message_text)
     else:
-        # Wiadomość jest za długa, trzeba podzielić
         chunks = []
         remaining_text = full_message_text
         print(f"Wiadomość za długa (limit: {MESSAGE_CHAR_LIMIT}). Dzielenie na fragmenty...")
@@ -170,53 +168,43 @@ def send_message(recipient_id, full_message_text):
         while remaining_text:
             if len(remaining_text) <= MESSAGE_CHAR_LIMIT:
                 chunks.append(remaining_text)
-                remaining_text = "" # Koniec
+                break # Koniec
             else:
-                # Szukamy najlepszego miejsca do podziału (ostatnia spacja przed limitem)
                 split_index = -1
-                # Sprawdź podwójne nowe linie (akapity)
+                # Sprawdź podwójne nowe linie
                 temp_index = remaining_text.rfind('\n\n', 0, MESSAGE_CHAR_LIMIT)
-                if temp_index != -1:
-                    split_index = temp_index + 2 # +2 aby zachować nową linię na końcu
+                if temp_index != -1: split_index = temp_index + 2
                 else:
                     # Sprawdź pojedyncze nowe linie
                     temp_index = remaining_text.rfind('\n', 0, MESSAGE_CHAR_LIMIT)
-                    if temp_index != -1:
-                         split_index = temp_index + 1
+                    if temp_index != -1: split_index = temp_index + 1
                     else:
-                         # Sprawdź ostatnią spację
-                         temp_index = remaining_text.rfind(' ', 0, MESSAGE_CHAR_LIMIT)
-                         if temp_index != -1:
-                              split_index = temp_index + 1 # Dzielimy po spacji
-                         else:
-                              # Brak spacji/nowej linii - tniemy "na twardo"
-                              split_index = MESSAGE_CHAR_LIMIT
+                        # Sprawdź ostatnią spację
+                        temp_index = remaining_text.rfind(' ', 0, MESSAGE_CHAR_LIMIT)
+                        if temp_index != -1: split_index = temp_index + 1
+                        else: split_index = MESSAGE_CHAR_LIMIT # Cięcie na twardo
 
                 chunk = remaining_text[:split_index]
                 chunks.append(chunk)
-                remaining_text = remaining_text[split_index:] #.lstrip() - nie usuwamy spacji na początku następnego
+                remaining_text = remaining_text[split_index:]
 
         num_chunks = len(chunks)
         print(f"Podzielono wiadomość na {num_chunks} fragmentów.")
 
         for i, chunk in enumerate(chunks):
-            # Opcjonalnie: Dodaj wskaźnik (np. "[1/3] ...")
-            # chunk_to_send = f"[{i+1}/{num_chunks}] {chunk}"
-            # Pamiętaj, że to zmniejsza dostępny limit znaków! Na razie bez wskaźnika.
             chunk_to_send = chunk
             print(f"Wysyłanie fragmentu {i+1}/{num_chunks} (długość: {len(chunk_to_send)})...")
             if not _send_single_message(recipient_id, chunk_to_send):
                 print(f"!!! Anulowano wysyłanie pozostałych fragmentów z powodu błędu przy fragmencie {i+1} !!!")
-                break # Przerwij wysyłanie, jeśli wystąpił błąd
+                break
             if i < num_chunks - 1:
                 print(f"Oczekiwanie {MESSAGE_DELAY_SECONDS}s przed następnym fragmentem...")
-                time.sleep(MESSAGE_DELAY_SECONDS) # Opóźnienie między wiadomościami
+                time.sleep(MESSAGE_DELAY_SECONDS)
 
         print(f"--- Zakończono wysyłanie {num_chunks} fragmentów wiadomości do {recipient_id} ---")
 
 
 # --- Funkcja do generowania odpowiedzi przez Gemini z Historią i Instrukcją ---
-# (Implementacja jak w poprzedniej odpowiedzi - używa historii, instrukcji, modelu)
 def get_gemini_response_with_history(user_psid, current_user_message):
     """Generuje odpowiedź Gemini, używając historii zapisanej w pliku JSON, odpowiadając po polsku."""
     if not gemini_model:
@@ -225,7 +213,7 @@ def get_gemini_response_with_history(user_psid, current_user_message):
     # 1. Odczytaj historię z pliku
     history = load_history(user_psid)
 
-    # 2. Przygotuj nową wiadomość użytkownika jako obiekt Content
+    # 2. Stwórz nową wiadomość użytkownika jako obiekt Content
     user_content = Content(role="user", parts=[Part.from_text(current_user_message)])
 
     # 3. Stwórz listę Content dla tej tury (historia + nowa wiadomość usera)
@@ -239,92 +227,174 @@ def get_gemini_response_with_history(user_psid, current_user_message):
             history_to_send = relevant_history[-(MAX_HISTORY_TURNS * 2):]
             print(f"Historia przycięta dla PSID {user_psid}")
 
-    # *** 5. Przygotuj Instrukcję Systemową (jak poprzednio) ***
-    system_instruction_text = """Jesteś profesjonalnym i uprzejmym asystentem... (pełna instrukcja jak wcześniej)"""
+    # *** 5. Przygotuj Instrukcję Systemową ***
+    system_instruction_text = """Jesteś profesjonalnym i uprzejmym asystentem obsługi klienta reprezentującym 'Zakręcone Korepetycje' - centrum specjalizujące się w wysokiej jakości korepetycjach online z matematyki, języka angielskiego i języka polskiego. Obsługujemy uczniów od 4 klasy szkoły podstawowej aż do klasy maturalnej, oferując zajęcia zarówno na poziomie podstawowym, jak i rozszerzonym.
 
-    # Tworzymy listę Content do wysłania: Instrukcja + historia
+Twoim głównym celem jest aktywne zachęcanie klientów (uczniów lub ich rodziców) do skorzystania z naszych usług i umówienia się na pierwszą lekcję. Prezentuj ofertę rzeczowo, podkreślając korzyści płynące z nauki z naszymi doświadczonymi korepetytorami online (np. lepsze wyniki, zdana matura, większa pewność siebie).
+
+Przebieg rozmowy:
+1. Najpierw ustal, jakiego przedmiotu, dla której klasy i na jakim poziomie (podstawowy/rozszerzony) klient potrzebuje korepetycji.
+2. Następnie przedstaw odpowiednią cenę za 60-minutową lekcję:
+    * Klasy 4-8 SP: 60 zł
+    * Klasy 1-3 LO/Technikum (podstawa): 65 zł
+    * Klasy 1-3 LO/Technikum (rozszerzenie): 70 zł
+    * Klasa 4 LO/Technikum (podstawa): 70 zł
+    * Klasa 4 LO/Technikum (rozszerzenie): 75 zł
+3. Aktywnie zachęcaj do umówienia się na pierwszą lekcję, aby uczeń mógł poznać korepetytora i sprawdzić naszą skuteczną formę zajęć online. Wspomnij przy tym krótko, że jest to lekcja zgodna z cennikiem.
+4. Informację o tym, że zajęcia odbywają się wyłącznie online przez platformę Teams (bez konieczności pobierania, przez link), podaj w dalszej części rozmowy, gdy klient wykaże już zainteresowanie.
+5. Jeśli klient wyrazi obawy dotyczące formy online, wyjaśnij, że nasze lekcje 1-na-1 znacząco różnią się od nauki zdalnej w szkole podczas pandemii, a nasi korepetytorzy są doskonale przygotowani do efektywnej pracy w tym trybie. Podkreśl wygodę i indywidualne podejście.
+
+Ważne zasady:
+* Bądź zawsze grzeczny i profesjonalny, ale komunikuj się w sposób przystępny i budujący relację.
+* Staraj się być przekonujący i konsekwentnie dąż do umówienia pierwszej lekcji. Bądź lekko asertywny w prezentowaniu korzyści.
+* Jeśli klient zaczyna wyrażać irytację lub zdecydowanie odmawia, odpuść dalsze namawianie w tej konkretnej wiadomości. Zamiast kończyć rozmowę stwierdzeniem o braku współpracy, powiedz np. "Rozumiem, dziękuję za informację. Gdyby zmienili Państwo zdanie lub mieli inne pytania, jestem do dyspozycji. Proszę się jeszcze spokojnie zastanowić." Nigdy nie zamykaj definitywnie drzwi do przyszłej współpracy.
+* Jeśli nie znasz odpowiedzi na konkretne pytanie (np. o dostępność nauczyciela w danym terminie), powiedz: "To szczegółowa informacja, którą muszę sprawdzić w naszym systemie. Proszę o chwilę cierpliwości, zaraz wrócę z odpowiedzią." lub "Najaktualniejsze informacje o dostępności terminów możemy ustalić po wstępnym zapisie, skontaktuje się wtedy z Państwem nasz koordynator." Nie wymyślaj informacji.
+* Odpowiadaj zawsze w języku polskim.
+* Nie udzielaj porad ani informacji niezwiązanych z ofertą korepetycji firmy 'Zakręcone Korepetycje'.
+
+Twoim zadaniem jest efektywne pozyskiwanie klientów poprzez profesjonalną i perswazyjną rozmowę."""
+
+    # Tworzymy listę Content do wysłania: Instrukcja jako pierwsza wiadomość 'user', potem historia
     prompt_content_with_instruction = [Content(role="user", parts=[Part.from_text(system_instruction_text)])] + history_to_send
 
     print(f"--- Generowanie odpowiedzi Gemini ({MODEL_ID}) z historią i instrukcją dla PSID {user_psid} ---")
     print(f"Ostatnia wiadomość użytkownika w prompcie: {prompt_content_with_instruction[-1]}")
+    # print(f"Pełny prompt wysyłany do Gemini (content): {prompt_content_with_instruction}") # Odkomentuj do debugowania
 
     try:
-        generation_config = GenerationConfig(...) # Jak poprzednio
-        safety_settings = {...} # Jak poprzednio
+        # Konfiguracja generowania
+        generation_config = GenerationConfig(
+            max_output_tokens=2048,
+            temperature=0.8,
+            top_p=1.0,
+            top_k=32
+        )
+        # Konfiguracja bezpieczeństwa
+        safety_settings = {
+            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+        }
 
-        response = gemini_model.generate_content(...) # Jak poprzednio
+        # Wywołanie modelu
+        response = gemini_model.generate_content(
+            prompt_content_with_instruction, # Wysyłamy historię z instrukcją na początku
+            generation_config=generation_config,
+            safety_settings=safety_settings,
+            stream=False,
+        )
 
         print("\n--- Odpowiedź Gemini ---")
         if response.candidates and response.candidates[0].content.parts:
             generated_text = response.candidates[0].content.parts[0].text
-            print(f"Wygenerowany tekst (pełna długość): {len(generated_text)}") # Logujemy długość
+            print(f"Wygenerowany tekst (pełna długość): {len(generated_text)}")
 
             # 6. Przygotuj historię do zapisu (TYLKO rozmowa user/model)
-            final_history_to_save = history_to_send + [Content(role="model", parts=[Part.from_text(generated_text)])] # Uwaga: Zapisujemy *całą* odpowiedź AI
+            #    Dodajemy ODPOWIEDŹ AI do historii użytej jako podstawa promptu (history_to_send)
+            final_history_to_save = history_to_send + [Content(role="model", parts=[Part.from_text(generated_text)])]
+            # Ponownie przytnij na wszelki wypadek
             if len(final_history_to_save) > MAX_HISTORY_TURNS * 2:
-                 # ... przycinanie final_history_to_save ...
-                 pass # Uzupełnij logikę przycinania
+                 relevant_final_history = [msg for msg in final_history_to_save if msg.role in ("user", "model")]
+                 if len(relevant_final_history) > MAX_HISTORY_TURNS * 2:
+                     final_history_to_save = relevant_final_history[-(MAX_HISTORY_TURNS * 2):]
 
-            # 7. Zapisz ostateczną historię do pliku
+            # 7. Zapisz ostateczną historię (bez instrukcji systemowej) do pliku
             save_history(user_psid, final_history_to_save)
             print(f"Zaktualizowano i zapisano historię dla PSID {user_psid}")
 
-            return generated_text # Zwracamy *cały* wygenerowany tekst
+            return generated_text # Zwracamy *cały* wygenerowany tekst do funkcji send_message
         else:
-             # ... obsługa pustej/zablokowanej odpowiedzi jak poprzednio ...
-             # Zapisz historię bez odpowiedzi AI
-             save_history(user_psid, history_to_send)
-             return "Hmm, nie mogłem wygenerować odpowiedzi."
+            finish_reason = response.candidates[0].finish_reason if response.candidates else "UNKNOWN"; safety_ratings = response.candidates[0].safety_ratings if response.candidates else []; print(f"Odpowiedź Gemini pusta/zablokowana. Powód: {finish_reason}, Oceny: {safety_ratings}"); print(f"Cała odpowiedź: {response}")
+            save_history(user_psid, history_to_send) # Zapisz historię do tego momentu
+            return "Hmm, nie mogłem wygenerować odpowiedzi."
 
     except Exception as e:
         print(f"!!! BŁĄD podczas generowania treści przez Gemini ({MODEL_ID}): {e} !!!")
-        # Zapisz historię do tego momentu
-        save_history(user_psid, history_to_send)
-        # ... obsługa błędów modelu ...
+        save_history(user_psid, history_to_send) # Zapisz historię do tego momentu
+        error_str = str(e).lower()
+        if "publisher model" in error_str or "not found" in error_str or "is not available" in error_str or "permission denied" in error_str or "access token scope" in error_str or "content with system role is not supported" in error_str:
+             print(f"   >>> Błąd związany z modelem/uprawnieniami: {e}")
+             return f"Nie mogę użyć modułu AI '{MODEL_ID}'."
+        elif "deadline exceeded" in error_str:
+             print(f"   >>> Przekroczono limit czasu Gemini ({MODEL_ID}).")
+             return "Hmm, myślenie zajęło mi zbyt dużo czasu."
         return "Wystąpił błąd podczas myślenia."
 
 
 # --- Obsługa Weryfikacji Webhooka (metoda GET) ---
 @app.route('/webhook', methods=['GET'])
 def webhook_verification():
-    # ... (pełna implementacja jak w poprzedniej wersji) ...
-    pass # Placeholder
+    print("!!! FUNKCJA webhook_verification WYWOŁANA !!!")
+    print("--- Otrzymano żądanie GET weryfikacyjne ---")
+    hub_mode = request.args.get('hub.mode')
+    hub_token = request.args.get('hub.verify_token')
+    hub_challenge = request.args.get('hub.challenge')
+    print(f"Mode: {hub_mode}, Token: {hub_token}, Challenge: {hub_challenge}")
+    if hub_mode == 'subscribe' and hub_token == VERIFY_TOKEN:
+        print("Weryfikacja GET udana!")
+        return Response(hub_challenge, status=200, mimetype='text/plain')
+    else:
+        print("Weryfikacja GET nieudana.")
+        return Response("Verification failed", status=403, mimetype='text/plain')
 
 # --- Obsługa Odbioru Wiadomości (metoda POST) - Z Historią ---
 @app.route('/webhook', methods=['POST'])
 def webhook_handle():
-    # ... (logika odbioru jak poprzednio, ale wywołuje NOWĄ funkcję send_message) ...
-    # Przykład kluczowej części:
+    print("\n------------------------------------------")
+    print("!!! FUNKCJA webhook_handle WYWOŁANA (POST) !!!")
+    data = None
     try:
-        # ... (pętle po entry i messaging_event) ...
-        if messaging_event.get("message"):
-            if not messaging_event["message"].get("is_echo"):
-                 if "text" in messaging_event["message"]:
-                      message_text = messaging_event["message"]["text"]
-                      print(f"Odebrano wiadomość tekstową '{message_text}' od użytkownika {sender_id}")
-                      response_text = get_gemini_response_with_history(sender_id, message_text)
-                      send_message(sender_id, response_text) # <--- Wywołanie nowej funkcji send_message
-                 else:
-                      # ... (obsługa wiadomości bez tekstu) ...
-                      send_message(sender_id, "Przepraszam, rozumiem tylko tekst.")
-        elif messaging_event.get("postback"):
-             # ... (obsługa postback, też wywołuje send_message) ...
-             payload = messaging_event["postback"]["payload"]
-             prompt_for_button = f"Użytkownik kliknął przycisk {payload}."
-             response_text = get_gemini_response_with_history(sender_id, prompt_for_button)
-             send_message(sender_id, response_text)
-        # ...
+        data = request.get_json()
+        # print("Odebrane dane JSON:", json.dumps(data, indent=2)) # Odkomentuj w razie potrzeby debugowania
+
+        if data and data.get("object") == "page":
+            for entry in data.get("entry", []):
+                for messaging_event in entry.get("messaging", []):
+                    if "sender" not in messaging_event:
+                        print("Pominięto zdarzenie bez sender.id:", messaging_event)
+                        continue
+
+                    sender_id = messaging_event["sender"]["id"]
+
+                    if messaging_event.get("message"):
+                        if messaging_event["message"].get("is_echo"):
+                            print(f"Pominięto echo wiadomości dla PSID {sender_id}")
+                            continue
+
+                        if "text" in messaging_event["message"]:
+                            message_text = messaging_event["message"]["text"]
+                            print(f"Odebrano wiadomość tekstową '{message_text}' od użytkownika {sender_id}")
+                            # Wywołanie Gemini z uwzględnieniem historii i instrukcji
+                            response_text = get_gemini_response_with_history(sender_id, message_text)
+                            send_message(sender_id, response_text) # Wywołanie funkcji z dzieleniem
+                        else:
+                            print(f"Odebrano wiadomość bez tekstu od użytkownika {sender_id}")
+                            send_message(sender_id, "Przepraszam, rozumiem tylko wiadomości tekstowe.")
+
+                    elif messaging_event.get("postback"):
+                         payload = messaging_event["postback"]["payload"]
+                         print(f"Odebrano postback z payload '{payload}' od użytkownika {sender_id}")
+                         # Tworzymy prompt informujący o kliknięciu przycisku
+                         prompt_for_button = f"Użytkownik kliknął przycisk oznaczony jako: {payload}."
+                         # Wywołujemy Gemini z historią, traktując kliknięcie jak nową wiadomość
+                         response_text = get_gemini_response_with_history(sender_id, prompt_for_button)
+                         send_message(sender_id, response_text) # Wywołanie funkcji z dzieleniem
+                    else:
+                        print("Odebrano inne zdarzenie messaging:", messaging_event)
     except Exception as e:
         print(f"!!! BŁĄD podczas przetwarzania webhooka POST: {e} !!!")
+        # Ważne: Odpowiedz 200 OK, aby Facebook nie próbował wysłać ponownie
         return Response("EVENT_PROCESSING_ERROR", status=200)
 
+    # Zawsze odpowiada 200 OK na końcu, potwierdzając odbiór
     return Response("EVENT_RECEIVED", status=200)
-
 
 # --- Uruchomienie Serwera ---
 if __name__ == '__main__':
+    # Upewnij się, że katalog na historię istnieje przy starcie
     ensure_dir(HISTORY_DIR)
-    # Uzupełnij brakujące implementacje (np. w get_gemini_response_with_history)
     port = 8080
     print(f"Uruchamianie serwera Flask z integracją Gemini (model: {MODEL_ID}, historia w JSON, dzielenie wiadomości) na porcie {port}...")
+    # Wyłącz debug=True w środowisku produkcyjnym!
     app.run(host='0.0.0.0', port=port, debug=True)
