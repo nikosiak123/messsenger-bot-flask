@@ -29,7 +29,8 @@ VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "KOLAGEN") # Twój token weryfi
 PAGE_ACCESS_TOKEN = os.environ.get("FB_PAGE_ACCESS_TOKEN", "EACNAHFzEhkUBO7nbFAtYvfPWbEht1B3chQqWLx76Ljg2ekdbJYoOrnpjATqhS0EZC8S0q8a49hEZBaZByZCaj5gr1z62dAaMgcZA1BqFOruHfFo86EWTbI3S9KL59oxFWfZCfCjwbQra9lY5of1JVnj2c9uFJDhIpWlXxLLao9Cv8JKssgs3rEDxIJBRr26HgUewZDZD") # Token dostępu do strony FB
 PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "linear-booth-450221-k1")  # Twoje Google Cloud Project ID
 LOCATION = os.environ.get("GCP_LOCATION", "us-central1")  # Region GCP dla Vertex AI
-MODEL_ID = os.environ.get("VERTEX_MODEL_ID", "gemini-1.5-flash-001") # Zalecany model, można wrócić do gemini-1.5-flash-001 jeśli potrzebne
+# --- ZASADA 1: Użycie modelu wskazanego przez użytkownika ---
+MODEL_ID = os.environ.get("VERTEX_MODEL_ID", "gemini-2.0-flash-001") # Model wskazany przez użytkownika
 
 # Adres URL API Facebook Graph do wysyłania wiadomości
 FACEBOOK_GRAPH_API_URL = f"https://graph.facebook.com/v19.0/me/messages" # Użyj stabilnej wersji API
@@ -163,7 +164,7 @@ try:
     print(f"Inicjalizowanie Vertex AI dla projektu: {PROJECT_ID}, lokalizacja: {LOCATION}")
     vertexai.init(project=PROJECT_ID, location=LOCATION)
     print("Inicjalizacja Vertex AI pomyślna.")
-    print(f"Ładowanie modelu: {MODEL_ID}")
+    print(f"Ładowanie modelu: {MODEL_ID}") # Używa MODEL_ID zdefiniowanego wyżej
     # Można tu dodać system_instruction jeśli model i biblioteka to wspierają
     # system_instruction_content = Content(role="system", parts=[Part.from_text(SYSTEM_INSTRUCTION_TEXT)])
     # gemini_model = GenerativeModel(MODEL_ID, system_instruction=system_instruction_content)
@@ -394,11 +395,11 @@ def get_gemini_response_with_history(user_psid, current_user_message):
             generated_text = response.candidates[0].content.parts[0].text
             print(f"[{user_psid}] Wygenerowany tekst (pełna długość): {len(generated_text)}")
 
-            # --- POPRAWKA TUTAJ ---
+            # --- POPRAWKA f-string ---
             # Wykonaj replace i skracanie przed f-stringiem
             text_preview = generated_text[:150].replace('\n', '\\n')
             print(f"[{user_psid}] Fragment wygenerowanego tekstu: '{text_preview}...'")
-            # --- KONIEC POPRAWKI ---
+            # --- KONIEC POPRAWKI f-string ---
 
             # --- KROK 9: Aktualizacja i zapis PEŁNEJ (ale przyciętej do zapisu) historii ---
             # Dodajemy odpowiedź modelu do *pełnej* historii z bieżącą wiadomością użytkownika
@@ -596,7 +597,7 @@ if __name__ == '__main__':
     print(f"  Katalog historii: {HISTORY_DIR}")
     print(f"  Projekt Vertex AI: {PROJECT_ID}")
     print(f"  Lokalizacja Vertex AI: {LOCATION}")
-    print(f"  Model Vertex AI: {MODEL_ID}")
+    print(f"  Model Vertex AI: {MODEL_ID}") # Wyświetla używany model
     # Nie loguj tokenów dostępu w produkcji!
     # print(f"  FB Verify Token: {VERIFY_TOKEN}")
 
