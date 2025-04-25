@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# verify_server.py (połączony kod z logiką "proponuj-jeden-dostosuj")
+# verify_server.py (połączony kod z natychmiastowym proponowaniem kolejnego terminu)
 
 from flask import Flask, request, Response
 import os
@@ -30,7 +30,7 @@ VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "KOLAGEN")
 PAGE_ACCESS_TOKEN = os.environ.get("FB_PAGE_ACCESS_TOKEN", "EACNAHFzEhkUBO7nbFAtYvfPWbEht1B3chQqWLx76Ljg2ekdbJYoOrnpjATqhS0EZC8S0q8a49hEZBaZByZCaj5gr1z62dAaMgcZA1BqFOruHfFo86EWTbI3S9KL59oxFWfZCfCjwbQra9lY5of1JVnj2c9uFJDhIpWlXxLLao9Cv8JKssgs3rEDxIJBRr26HgUewZDZD") # WAŻNE: Podaj swój prawdziwy token!
 PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "linear-booth-450221-k1")
 LOCATION = os.environ.get("GCP_LOCATION", "us-central1")
-MODEL_ID = os.environ.get("VERTEX_MODEL_ID", "gemini-2.0-flash-001") # Przywrócony model
+MODEL_ID = os.environ.get("VERTEX_MODEL_ID", "gemini-2.0-flash-001")
 
 FACEBOOK_GRAPH_API_URL = f"https://graph.facebook.com/v19.0/me/messages"
 
@@ -52,11 +52,9 @@ APPOINTMENT_DURATION_MINUTES = 60
 WORK_START_HOUR = 7
 WORK_END_HOUR = 22
 TARGET_CALENDAR_ID = 'f19e189826b9d6e36950da347ac84d5501ecbd6bed0d76c8641be61a67749c67@group.calendar.google.com'
-# Preferowane godziny startowe
 PREFERRED_WEEKDAY_START_HOUR = 16
 PREFERRED_WEEKEND_START_HOUR = 10
-# MAX_SLOTS_TO_SHOW nie jest już potrzebne
-# QUICK_REPLY_BOOK_PREFIX nie jest już potrzebne
+MAX_SEARCH_DAYS = 14 # Jak daleko w przyszłość szukać kolejnych terminów
 
 # --- Inicjalizacja Zmiennych Globalnych dla Kalendarza ---
 _calendar_service = None
@@ -102,7 +100,6 @@ def get_user_profile(psid):
     except requests.exceptions.RequestException as req_err: print(f"!!! BŁĄD RequestException profilu {psid}: {req_err} !!!"); return None
     except Exception as e: import traceback; print(f"!!! Niespodziewany BŁĄD profilu {psid}: {e} !!!"); traceback.print_exc(); return None
 
-# ZMIANA: load_history odczytuje 'last_proposed_slot_iso'
 def load_history(user_psid):
     filepath = os.path.join(HISTORY_DIR, f"{user_psid}.json"); history = []; context = {}
     if not os.path.exists(filepath): return history, context
@@ -120,19 +117,14 @@ def load_history(user_psid):
                             if isinstance(part_data, dict) and 'text' in part_data and isinstance(part_data['text'], str): text_parts.append(Part.from_text(part_data['text']))
                             else: print(f"Ostrz. [{user_psid}]: Niepoprawna część (idx {i})"); valid_parts = False; break
                         if valid_parts and text_parts: history.append(Content(role=msg_data['role'], parts=text_parts))
-                    # <<< NOWA LOGIKA: Odczyt ostatniego proponowanego slotu >>>
                     elif (isinstance(msg_data, dict) and 'role' in msg_data and msg_data['role'] == 'system' and
                           'type' in msg_data and msg_data['type'] == 'last_proposal' and 'slot_iso' in msg_data):
-                        # Sprawdź czy to najnowszy kontekst systemowy
-                        is_latest_context = True
-                        for j in range(i + 1, len(history_data)):
-                             if isinstance(history_data[j], dict) and history_data[j].get('role') == 'system': is_latest_context = False; break
+                        is_latest_context = all(not (isinstance(history_data[j], dict) and history_data[j].get('role') == 'system') for j in range(i + 1, len(history_data)))
                         if is_latest_context:
                             context['last_proposed_slot_iso'] = msg_data['slot_iso']
                             context['message_index'] = i
                             print(f"[{user_psid}] Odczytano AKTUALNY kontekst: last_proposed_slot_iso (idx {i})")
                         else: print(f"[{user_psid}] Pominięto stary kontekst systemowy na indeksie {i}")
-                    # <<< KONIEC NOWEJ LOGIKI >>>
                     else: print(f"Ostrz. [{user_psid}]: Pominięto niepoprawną wiadomość w historii (idx {i}): {msg_data}")
                 print(f"[{user_psid}] Wczytano historię: {len(history)} wiadomości."); return history, context
             else: print(f"!!! BŁĄD [{user_psid}]: Plik historii nie zawiera listy."); return [], {}
@@ -140,7 +132,6 @@ def load_history(user_psid):
     except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e: print(f"!!! BŁĄD [{user_psid}] parsowania historii: {e}."); return [], {}
     except Exception as e: print(f"!!! BŁĄD [{user_psid}] wczytywania historii: {e} !!!"); return [], {}
 
-# ZMIANA: save_history zapisuje kontekst 'last_proposal'
 def save_history(user_psid, history, context_to_save=None):
     ensure_dir(HISTORY_DIR); filepath = os.path.join(HISTORY_DIR, f"{user_psid}.json"); temp_filepath = f"{filepath}.tmp"
     history_data = []
@@ -155,7 +146,7 @@ def save_history(user_psid, history, context_to_save=None):
              # Nie zapisujemy starych wpisów systemowych
              else: print(f"Ostrz. [{user_psid}]: Pomijanie nieprawidłowego obiektu (zapis): {msg}")
         if context_to_save and isinstance(context_to_save, dict):
-             history_data.append(context_to_save) # Dodaj nowy kontekst na końcu
+             history_data.append(context_to_save)
              print(f"[{user_psid}] Dodano kontekst do zapisu: {context_to_save.get('type')}")
         with open(temp_filepath, 'w', encoding='utf-8') as f: json.dump(history_data, f, ensure_ascii=False, indent=2)
         os.replace(temp_filepath, filepath)
@@ -166,15 +157,15 @@ def save_history(user_psid, history, context_to_save=None):
             try: os.remove(temp_filepath); print(f"    Usunięto {temp_filepath}.")
             except OSError as remove_e: print(f"    Nie można usunąć {temp_filepath}: {remove_e}")
 
-# --- Funkcje Kalendarza (bez zmian, poza usunięciem domyślnej duration) ---
 def _get_timezone():
-    global _tz; # ... (reszta bez zmian)
+    global _tz;
     if _tz is None:
         try: _tz = pytz.timezone(CALENDAR_TIMEZONE)
         except pytz.exceptions.UnknownTimeZoneError: print(f"BŁĄD: Strefa '{CALENDAR_TIMEZONE}' nieznana. Używam UTC."); _tz = pytz.utc
     return _tz
+
 def get_calendar_service():
-    global _calendar_service; # ... (reszta bez zmian)
+    global _calendar_service;
     if _calendar_service: return _calendar_service
     if not os.path.exists(SERVICE_ACCOUNT_FILE): print(f"BŁĄD: Brak pliku klucza: '{SERVICE_ACCOUNT_FILE}'"); return None
     try:
@@ -182,8 +173,8 @@ def get_calendar_service():
         service = build('calendar', 'v3', credentials=creds); print("Utworzono usługę Calendar API."); _calendar_service = service; return service
     except HttpError as error: print(f"Błąd API tworzenia usługi Calendar: {error}"); return None
     except Exception as e: print(f"Błąd tworzenia usługi Calendar: {e}"); return None
+
 def parse_event_time(event_time_data, default_tz):
-    # ... (bez zmian) ...
     if 'dateTime' in event_time_data:
         dt_str = event_time_data['dateTime'];
         try: dt = datetime.datetime.fromisoformat(dt_str)
@@ -199,8 +190,8 @@ def parse_event_time(event_time_data, default_tz):
         try: return datetime.date.fromisoformat(event_time_data['date'])
         except ValueError: print(f"Ostrz.: Nie sparsowano date: {event_time_data['date']}"); return None
     return None
+
 def get_free_slots(calendar_id, start_datetime, end_datetime):
-    # ... (logika wewnętrzna bez zmian, używa APPOINTMENT_DURATION_MINUTES) ...
     service = get_calendar_service(); tz = _get_timezone()
     if not service: print("Błąd: Usługa kalendarza niedostępna w get_free_slots."); return []
     if start_datetime.tzinfo is None: start_datetime = tz.localize(start_datetime)
@@ -213,6 +204,7 @@ def get_free_slots(calendar_id, start_datetime, end_datetime):
         events = events_result.get('items', [])
     except HttpError as error: print(f'Błąd API pobierania wydarzeń: {error}'); return []
     except Exception as e: print(f"Błąd pobierania wydarzeń: {e}"); return []
+
     free_slots_starts = []; current_day = start_datetime.date(); end_day = end_datetime.date()
     appointment_duration = datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
     while current_day <= end_day:
@@ -280,42 +272,27 @@ def book_appointment(calendar_id, start_time, end_time, summary="Rezerwacja wizy
         else: return False, f"Błąd API ({error.resp.status}) rezerwacji."
     except Exception as e: import traceback; print(f"Nieoczekiwany błąd Python rezerwacji: {e}"); traceback.print_exc(); return False, "Błąd systemu rezerwacji."
 
-# --- Funkcja do znalezienia następnego "rozsądnego" slotu ---
-def find_next_reasonable_slot(free_slots, preferred_weekday_hour, preferred_weekend_hour, after_time=None):
-    """Wybiera najlepszy slot z listy, preferując godziny popołudniowe/poranne."""
+def find_next_reasonable_slot(free_slots, after_time=None):
+    """Wybiera pierwszy pasujący slot, preferując godziny popołudniowe/poranne, po określonym czasie."""
     if not free_slots: return None
-
-    # Jeśli szukamy *po* określonym czasie, odfiltruj wcześniejsze sloty
     if after_time:
         free_slots = [slot for slot in free_slots if slot > after_time]
-        if not free_slots: return None # Nie ma nic później
+        if not free_slots: return None
 
     best_slot = None
-    # Sprawdź sloty pasujące do preferencji
     for slot in free_slots:
         weekday = slot.weekday()
-        if weekday < 5: # Dzień roboczy (0-4)
-            if slot.hour >= preferred_weekday_hour:
-                best_slot = slot
-                break # Znaleziono pierwszy pasujący w tygodniu
-        else: # Weekend (5-6)
-            if slot.hour >= preferred_weekend_hour:
-                best_slot = slot
-                break # Znaleziono pierwszy pasujący w weekend
-
-    # Jeśli nie znaleziono "idealnego", weź po prostu pierwszy dostępny z listy (po after_time, jeśli było podane)
-    if not best_slot:
-        best_slot = free_slots[0]
-
+        preferred_hour = PREFERRED_WEEKDAY_START_HOUR if weekday < 5 else PREFERRED_WEEKEND_START_HOUR
+        if slot.hour >= preferred_hour:
+            best_slot = slot; break # Znaleziono pierwszy "rozsądny"
+    if not best_slot: best_slot = free_slots[0] # Jak nie ma, to weź pierwszy z brzegu
     return best_slot
 
-# --- Funkcja formatująca slot dla użytkownika ---
 def format_slot_for_user(slot_start):
-    """Formatuje obiekt datetime na czytelny string po polsku."""
+    """Formatuje datetime na string: Polski Dzień, DD.MM.RRRR o G:MM."""
     if not isinstance(slot_start, datetime.datetime): return ""
-    day_index = slot_start.weekday()
-    day_name = POLISH_WEEKDAYS[day_index]
-    hour_str = str(slot_start.hour) # Godzina bez wiodącego zera
+    day_index = slot_start.weekday(); day_name = POLISH_WEEKDAYS[day_index]
+    hour_str = str(slot_start.hour)
     return f"{day_name}, {slot_start.strftime(f'%d.%m.%Y o {hour_str}:%M')}"
 
 # --- Inicjalizacja Vertex AI ---
@@ -370,7 +347,7 @@ def send_message(recipient_id, full_message_text):
             if i < num_chunks - 1: print(f"[{recipient_id}] Oczekiwanie {MESSAGE_DELAY_SECONDS}s..."); time.sleep(MESSAGE_DELAY_SECONDS)
         print(f"--- [{recipient_id}] Zakończono wysyłanie {send_success_count}/{num_chunks} fragm. ---")
 
-# --- INSTRUKCJA SYSTEMOWA (Z usuniętym [ACTION: FIND_SLOTS]) ---
+# --- INSTRUKCJA SYSTEMOWA ---
 SYSTEM_INSTRUCTION_TEXT = """Jesteś profesjonalnym i uprzejmym asystentem obsługi klienta reprezentującym centrum 'Zakręcone Korepetycje', specjalizujące się w korepetycjach online z matematyki, języka angielskiego i języka polskiego dla uczniów od 4 klasy SP do matury (poziom podstawowy i rozszerzony).
 
 Twoim głównym celem jest zachęcanie do skorzystania z naszych usług i **umówienia się na pierwszą lekcję próbną** (płatną zgodnie z cennikiem).
@@ -381,15 +358,15 @@ Przebieg rozmowy (elastyczny):
 3.  Ustal klasę.
 4.  Dla szkoły średniej ustal poziom (podst./rozsz.).
 5.  Podaj cenę za 60 min lekcji (cennik poniżej).
-6.  **Jeśli użytkownik wyrazi zainteresowanie umówieniem terminu (np. powie "tak", "ok", "chcę spróbować"), potwierdź to i poinformuj, że sprawdzisz najbliższy dostępny termin.** Nie używaj już specjalnych znaczników.
+6.  **Jeśli użytkownik wyrazi zainteresowanie umówieniem terminu (np. powie "tak", "ok", "chcę spróbować"), potwierdź to i poinformuj, że sprawdzisz najbliższy dostępny termin.** Nie używaj specjalnych znaczników.
 7.  Informuj o formie online (MS Teams, bez instalacji) na życzenie.
 
 Cennik (60 min): 4-8 SP: 60 zł; 1-3 LO/Tech (podst.): 65 zł; 1-3 LO/Tech (rozsz.): 70 zł; 4 LO/Tech (podst.): 70 zł; 4 LO/Tech (rozsz.): 75 zł.
 
 **Obsługa Feedbacku do Terminu:**
 *   Gdy system zaproponuje konkretny termin, a użytkownik odpowie, przeanalizuj jego odpowiedź.
-*   Jeśli użytkownik akceptuje termin (np. "tak", "pasuje", "ok"), odpowiedz krótko potwierdzając, np. "Świetnie!" lub "Doskonale!". System zajmie się resztą.
-*   Jeśli użytkownik odrzuca termin i prosi o inny (np. "nie pasuje", "za wcześnie", "później", "inny dzień"), odpowiedz krótko, np. "Rozumiem, sprawdzę inny termin." lub "Jasne, poszukam czegoś innego.". System znajdzie kolejną propozycję.
+*   Jeśli użytkownik akceptuje termin (np. "tak", "pasuje", "ok"), odpowiedz krótko potwierdzając, np. "Świetnie!". System zajmie się resztą.
+*   Jeśli użytkownik odrzuca termin i prosi o inny (np. "nie pasuje", "za wcześnie", "później", "inny dzień"), odpowiedz krótko, np. "Rozumiem, sprawdzę inny termin.". System znajdzie kolejną propozycję.
 *   Jeśli użytkownik nie jest zdecydowany lub zadaje dodatkowe pytania, odpowiedz na nie.
 
 **Ważne zasady:**
@@ -402,7 +379,7 @@ Cennik (60 min): 4-8 SP: 60 zł; 1-3 LO/Tech (podst.): 65 zł; 1-3 LO/Tech (rozs
 """
 # ---------------------------------------------------------------------
 
-# --- Funkcja interakcji z Gemini (Teraz nie zwraca akcji) ---
+# --- Funkcja interakcji z Gemini ---
 def get_gemini_response(user_psid, current_user_message, history):
     if not gemini_model: print(f"!!! BŁĄD [{user_psid}]: Model Gemini niezaładowany!"); return "Przepraszam, błąd AI."
     user_content = Content(role="user", parts=[Part.from_text(current_user_message)])
@@ -411,7 +388,7 @@ def get_gemini_response(user_psid, current_user_message, history):
     if len(history) > max_messages_to_send: print(f"[{user_psid}] Historia przycięta DO WYSLANIA: {len(history_to_send)} wiad.")
     prompt_content_with_instruction = [
         Content(role="user", parts=[Part.from_text(SYSTEM_INSTRUCTION_TEXT)]),
-        Content(role="model", parts=[Part.from_text("Rozumiem. Będę prowadził rozmowę zgodnie z wytycznymi i informował o chęci umówienia terminu.")]) # Zaktualizowane potwierdzenie
+        Content(role="model", parts=[Part.from_text("Rozumiem. Będę prowadził rozmowę zgodnie z wytycznymi.")])
     ] + history_to_send + [user_content]
     print(f"\n--- [{user_psid}] Zawartość do Gemini ({MODEL_ID}) ---");
     # for i, content in enumerate(prompt_content_with_instruction): role = content.role; raw_text = content.parts[0].text; text_fragment = raw_text[:80].replace('\n', '\\n'); text_to_log = text_fragment + "..." if len(raw_text) > 80 else text_fragment; print(f"  [{i}] R:{role}, T:'{text_to_log}'")
@@ -424,20 +401,19 @@ def get_gemini_response(user_psid, current_user_message, history):
         if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
             generated_text = response.candidates[0].content.parts[0].text.strip()
             print(f"[{user_psid}] Wygenerowany tekst (dł: {len(generated_text)})"); text_preview = generated_text[:150].replace('\n', '\\n'); print(f"   Fragment: '{text_preview}...'")
-            return generated_text # Zwróć normalny tekst
-        else: # Obsługa błędów/blokad
+            return generated_text
+        else:
             finish_reason = "UNKNOWN"; safety_ratings = [];
             if response.candidates: finish_reason_obj = response.candidates[0].finish_reason; finish_reason = finish_reason_obj.name if hasattr(finish_reason_obj, 'name') else str(finish_reason_obj); safety_ratings = response.candidates[0].safety_ratings if response.candidates[0].safety_ratings else []
             print(f"!!! [{user_psid}] Odp. Gemini pusta/zablokowana. Powód: {finish_reason}, Oceny: {safety_ratings} !!!")
             if finish_reason == 'SAFETY': return "Przepraszam, treść narusza zasady."
             elif finish_reason == 'RECITATION': return "Moje źródła są ograniczone."
             else: return "Hmm, błąd generowania odpowiedzi."
-    except Exception as e: # Obsługa wyjątków
+    except Exception as e:
         import traceback; print(f"!!! KRYTYCZNY BŁĄD Gemini ({MODEL_ID}) dla PSID {user_psid}: {e} !!!"); traceback.print_exc()
         error_str = str(e).lower();
         if "permission denied" in error_str: return "Błąd: Brak uprawnień AI."
-        elif "model" in error_str and "not found" in error_str: return f"Błąd: Model AI ('{MODEL_ID}') niedostępny."
-        # ... (inne komunikaty błędów)
+        # ... (inne komunikaty błędów) ...
         return "Wystąpił błąd techniczny."
 
 # --- Obsługa Weryfikacji Webhooka (GET) ---
@@ -463,10 +439,11 @@ def webhook_handle():
                     sender_id = messaging_event["sender"]["id"]; print(f"  -> PSID: {sender_id}")
                     history, context = load_history(sender_id)
                     last_proposed_slot_iso = context.get('last_proposed_slot_iso')
-                    is_context_current = last_proposed_slot_iso and context.get('message_index', -1) == len(history) - 1
+                    # Sprawdź, czy kontekst jest aktualny (czy ostatnia wiadomość w historii to systemowa propozycja)
+                    is_context_current = last_proposed_slot_iso and context.get('message_index', -1) == len(history) -1
 
                     if is_context_current: print(f"    Aktywny kontekst 'last_proposed_slot_iso'.")
-                    elif last_proposed_slot_iso: print(f"    Kontekst 'last_proposal' stary. Reset."); last_proposed_slot_iso = None # Zignoruj stary
+                    elif last_proposed_slot_iso: print(f"    Kontekst 'last_proposal' stary. Reset."); last_proposed_slot_iso = None
 
                     if messaging_event.get("message"):
                         message_data = messaging_event["message"]; message_id = message_data.get("mid"); print(f"    Msg (ID:{message_id})")
@@ -474,32 +451,30 @@ def webhook_handle():
                         user_input_text = None;
                         if "text" in message_data: user_input_text = message_data["text"]; print(f"      Txt: '{user_input_text}'")
 
-                        # --- ZMIENIONA LOGIKA: Najpierw sprawdź, czy jesteśmy w trybie proponowania ---
+                        # --- Logika Obsługi Feedbacku do Proponowanego Terminu ---
                         if is_context_current and user_input_text:
-                            print(f"      Oczekiwano na feedback do propozycji: {last_proposed_slot_iso}")
+                            print(f"      Oczekiwano na feedback. Analiza: '{user_input_text}'")
                             lower_text = user_input_text.lower()
-                            action = None # Co zrobić z propozycją: 'accept', 'reject_propose_next', 'clarify'
+                            action = 'clarify' # Domyślnie nie wiemy
 
-                            # Proste parsowanie feedbacku
-                            if any(word in lower_text for word in ["tak", " pasuje", "ok", "zgadzam", "świetnie", "dobrze"]):
+                            # 1. Sprawdź akceptację
+                            if any(word in lower_text for word in ["tak", " pasuje", "ok", "zgadzam", "świetnie", "dobrze", "super", "może być"]):
                                 action = 'accept'
-                            elif any(word in lower_text for word in ["nie", "inny", "inne", "dalej", "następn", "więcej", "odpada", "zły", "zła"]):
+                            # 2. Sprawdź odrzucenie / prośbę o inny
+                            elif any(word in lower_text for word in ["nie", "inny", "inne", "dalej", "następn", "więcej", "odpada", "zły", "zła", "żaden"]):
                                 action = 'reject_propose_next'
                             elif any(word in lower_text for word in ["wcześniej", "wczesn"]):
-                                action = 'reject_propose_earlier' # Możemy spróbować to zaimplementować
+                                action = 'reject_propose_earlier'
                             elif any(word in lower_text for word in ["później", "pozniej", "późno"]):
                                 action = 'reject_propose_later'
                             elif any(word in lower_text for word in ["dzień", "dnia", "dat", "jutro", "poniedziałek", "wtorek", "środ", "czwartek", "piątek", "sobota", "niedziel"]):
-                                action = 'reject_propose_next_day' # Prośba o inny dzień
-                            else:
-                                action = 'clarify' # Nie wiadomo, co użytkownik miał na myśli
+                                action = 'reject_propose_next_day'
 
-                            # --- Wykonaj akcję na podstawie feedbacku ---
+                            # --- Wykonaj akcję ---
                             if action == 'accept':
-                                print(f"      Akcja: Akceptacja slotu {last_proposed_slot_iso}")
+                                print(f"      Akcja: Akceptacja {last_proposed_slot_iso}")
                                 try:
-                                    tz = _get_timezone(); start_time = datetime.datetime.fromisoformat(last_proposed_slot_iso).astimezone(tz)
-                                    end_time = start_time + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+                                    tz = _get_timezone(); start_time = datetime.datetime.fromisoformat(last_proposed_slot_iso).astimezone(tz); end_time = start_time + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
                                     user_profile = get_user_profile(sender_id); user_name = user_profile.get('first_name', '') if user_profile else ''
                                     if ENABLE_TYPING_DELAY: time.sleep(MIN_TYPING_DELAY_SECONDS)
                                     success, message_to_user = book_appointment(TARGET_CALENDAR_ID, start_time, end_time, summary=f"Rezerwacja FB", description=f"PSID:{sender_id}\nImię:{user_name}", user_name=user_name)
@@ -507,92 +482,100 @@ def webhook_handle():
                                     user_content = Content(role="user", parts=[Part.from_text(user_input_text)]); model_content = Content(role="model", parts=[Part.from_text(message_to_user)])
                                     save_history(sender_id, history + [user_content, model_content]) # Zapisz bez kontekstu
                                 except Exception as book_err: print(f"!!! BŁĄD rezerwacji: {book_err} !!!"); send_message(sender_id, "Błąd rezerwacji.")
-                            elif action in ['reject_propose_next', 'reject_propose_later', 'reject_propose_next_day', 'reject_propose_earlier']:
-                                print(f"      Akcja: Odrzucenie, szukanie kolejnego (typ: {action})")
+                            elif action.startswith('reject_propose'):
+                                print(f"      Akcja: Odrzucenie/Zmiana ({action})")
                                 try:
                                     tz = _get_timezone(); last_proposed_dt = datetime.datetime.fromisoformat(last_proposed_slot_iso).astimezone(tz)
                                     search_start = None
+                                    # Ustal nowy początek szukania na podstawie feedbacku
                                     if action == 'reject_propose_earlier':
-                                        # Szukanie WCZEŚNIEJ jest trudne, na razie zaproponujmy po prostu następny PO
-                                        print("      (Uwaga: Szukanie 'wcześniej' - na razie proponuję następny dostępny)")
-                                        search_start = last_proposed_dt + datetime.timedelta(minutes=1) # Zacznij tuż po
+                                        # Na razie szukamy po prostu następnego po ostatnim proponowanym
+                                        print("      (Info: Szukanie 'wcześniej' - proponuję następny dostępny)")
+                                        search_start = last_proposed_dt + datetime.timedelta(minutes=1)
                                     elif action == 'reject_propose_next_day':
-                                        search_start = tz.localize(datetime.datetime.combine(last_proposed_dt.date() + datetime.timedelta(days=1), datetime.time(0,0))) # Początek następnego dnia
-                                    else: # Domyślnie (later, next) szukaj od końca ostatniego proponowanego
-                                        search_start = last_proposed_dt + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+                                        search_start = tz.localize(datetime.datetime.combine(last_proposed_dt.date() + datetime.timedelta(days=1), datetime.time(0,0)))
+                                    else: # 'reject_propose_next' or 'reject_propose_later'
+                                        search_start = last_proposed_dt + datetime.timedelta(minutes=1) # Zacznij szukać tuż po ostatnim
 
-                                    search_end_date = (search_start + datetime.timedelta(days=7)).date() # Szukaj na 7 dni wprzód
+                                    search_end_date = (search_start + datetime.timedelta(days=MAX_SEARCH_DAYS)).date()
                                     search_end = tz.localize(datetime.datetime.combine(search_end_date, datetime.time(23, 59, 59)))
-                                    if ENABLE_TYPING_DELAY: time.sleep(MIN_TYPING_DELAY_SECONDS)
+                                    if ENABLE_TYPING_DELAY: print(f"      Szukanie kolejnego..."); time.sleep(MIN_TYPING_DELAY_SECONDS)
                                     free_slots = get_free_slots(TARGET_CALENDAR_ID, search_start, search_end)
-                                    next_slot = find_next_reasonable_slot(free_slots, PREFERRED_WEEKDAY_START_HOUR, PREFERRED_WEEKEND_START_HOUR) # Znajdź jeden następny
+                                    next_slot = find_next_reasonable_slot(free_slots) # Znajdź jeden rozsądny
 
                                     if next_slot:
                                         formatted_slot = format_slot_for_user(next_slot)
-                                        proposal_message = f"Rozumiem. W takim razie proponuję termin: {formatted_slot}. Czy ten pasuje?"
+                                        proposal_message = f"Rozumiem. Kolejna propozycja to: {formatted_slot}. Pasuje?" # Krócej
                                         send_message(sender_id, proposal_message)
                                         user_content = Content(role="user", parts=[Part.from_text(user_input_text)])
                                         model_content = Content(role="model", parts=[Part.from_text(proposal_message)])
                                         context_to_save = {'role': 'system', 'type': 'last_proposal', 'slot_iso': next_slot.isoformat()}
-                                        save_history(sender_id, history + [user_content, model_content], context_to_save=context_to_save)
+                                        save_history(sender_id, history + [user_content, model_content], context_to_save=context_to_save) # Zapisz nowy kontekst
                                     else:
-                                        send_message(sender_id, "Niestety, nie znalazłem kolejnych wolnych terminów w najbliższym czasie. Spróbuj ponownie później lub skontaktuj się z nami.")
-                                        user_content = Content(role="user", parts=[Part.from_text(user_input_text)])
-                                        model_content = Content(role="model", parts=[Part.from_text("Brak kolejnych terminów.")])
-                                        save_history(sender_id, history + [user_content, model_content]) # Zapisz bez kontekstu
-                                except Exception as find_err: print(f"!!! BŁĄD szukania kolejnego slotu: {find_err} !!!"); send_message(sender_id, "Błąd podczas szukania kolejnego terminu.")
-                            elif action == 'clarify': # Nie wiadomo co użytkownik chce
-                                print(f"      Akcja: Niejasna odpowiedź. Proszenie o sprecyzowanie.")
-                                clarification_msg = "Nie jestem pewien, co masz na myśli. Czy proponowany termin pasuje (tak/nie)? A może wolisz inny dzień lub godzinę?"
-                                send_message(sender_id, clarification_msg)
-                                user_content = Content(role="user", parts=[Part.from_text(user_input_text)])
-                                model_content = Content(role="model", parts=[Part.from_text(clarification_msg)])
-                                # Zapisz z tym samym (starym) kontekstem, bo nadal się do niego odnosimy
-                                save_history(sender_id, history + [user_content, model_content], context_to_save={'role':'system', 'type':'last_proposal', 'slot_iso': last_proposed_slot_iso})
-
-                        # --- Jeśli NIE oczekiwano na wybór terminu LUB nie było tekstu -> Gemini ---
-                        elif user_input_text:
-                            print(f"      -> Gemini...");
-                            # Przekazujemy historię bez kontekstu systemowego
-                            gemini_response = get_gemini_response(sender_id, user_input_text, [h for h in history if not (isinstance(h, dict) and h.get('role') == 'system')])
-
-                            # --- ZMIANA: Prostsza obsługa, Python decyduje o szukaniu slotów ---
-                            trigger_keywords = ["umówić", "termin", "wolne", "kiedy", "zapisać", "kalendarz", "rezerw"]
-                            user_wants_to_schedule = any(keyword in user_input_text.lower() for keyword in trigger_keywords)
-
-                            if user_wants_to_schedule:
-                                print(f"      Wykryto intencję umówienia. Szukanie pierwszego slotu...")
-                                tz = _get_timezone(); now = datetime.datetime.now(tz); search_start = now
-                                search_end_date = (now + datetime.timedelta(days=7)).date(); search_end = tz.localize(datetime.datetime.combine(search_end_date, datetime.time(23, 59, 59)))
-                                if ENABLE_TYPING_DELAY: time.sleep(MIN_TYPING_DELAY_SECONDS)
-                                free_slots = get_free_slots(TARGET_CALENDAR_ID, search_start, search_end)
-                                first_slot = find_next_reasonable_slot(free_slots, PREFERRED_WEEKDAY_START_HOUR, PREFERRED_WEEKEND_START_HOUR)
-
-                                if first_slot:
-                                    formatted_slot = format_slot_for_user(first_slot)
-                                    proposal_message = f"Jasne! Wstępnie proponuję termin: {formatted_slot}. Czy taki termin by odpowiadał? Ewentualnie mogę poszukać innego dnia lub godziny."
-                                    send_message(sender_id, proposal_message)
+                                        send_message(sender_id, "Niestety, nie znalazłem kolejnych wolnych terminów. Skontaktuj się z nami bezpośrednio.")
+                                        user_content = Content(role="user", parts=[Part.from_text(user_input_text)]); model_content = Content(role="model", parts=[Part.from_text("Brak kolejnych terminów.")])
+                                        save_history(sender_id, history + [user_content, model_content]) # Bez kontekstu
+                                except Exception as find_err: print(f"!!! BŁĄD szukania kolejnego slotu: {find_err} !!!"); send_message(sender_id, "Błąd szukania terminu.")
+                            else: # action == 'clarify'
+                                print(f"      Akcja: Niejasna odpowiedź. Pytanie Gemini o reakcję.")
+                                # W tym przypadku poproś Gemini o interpretację i odpowiedź
+                                gemini_response = get_gemini_response(sender_id, user_input_text, [h for h in history if not (isinstance(h, dict) and h.get('role') == 'system')])
+                                if isinstance(gemini_response, str) and gemini_response:
+                                    if ENABLE_TYPING_DELAY: time.sleep(MIN_TYPING_DELAY_SECONDS)
+                                    send_message(sender_id, gemini_response)
+                                    user_content = Content(role="user", parts=[Part.from_text(user_input_text)]); model_content = Content(role="model", parts=[Part.from_text(gemini_response)])
+                                    # Zapisz z poprzednim kontekstem, bo nadal może być potrzebny
+                                    save_history(sender_id, history + [user_content, model_content], context_to_save={'role':'system', 'type':'last_proposal', 'slot_iso': last_proposed_slot_iso})
+                                else: # Błąd Gemini
+                                    send_message(sender_id, "Przepraszam, mam problem z przetworzeniem odpowiedzi.")
                                     user_content = Content(role="user", parts=[Part.from_text(user_input_text)])
-                                    model_content = Content(role="model", parts=[Part.from_text(proposal_message)])
-                                    context_to_save = {'role': 'system', 'type': 'last_proposal', 'slot_iso': first_slot.isoformat()}
-                                    save_history(sender_id, history + [user_content, model_content], context_to_save=context_to_save)
-                                else:
-                                    print(f"      Brak slotów przy pierwszym szukaniu."); send_message(sender_id, "Niestety, aktualnie brak wolnych terminów w najbliższym czasie. Spróbuj ponownie później.")
-                                    user_content = Content(role="user", parts=[Part.from_text(user_input_text)]); model_content = Content(role="model", parts=[Part.from_text("Brak terminów.")])
-                                    save_history(sender_id, history + [user_content, model_content])
-                            elif isinstance(gemini_response, str) and gemini_response: # Normalna odpowiedź Gemini
-                                print(f"      <- Gemini Odp.");
-                                if ENABLE_TYPING_DELAY:
-                                    response_len = len(gemini_response); calculated_delay = response_len / TYPING_CHARS_PER_SECOND; final_delay = max(0, min(MAX_TYPING_DELAY_SECONDS, calculated_delay + MIN_TYPING_DELAY_SECONDS))
-                                    if final_delay > 0: print(f"      Pisanie... {final_delay:.2f}s"); time.sleep(final_delay)
-                                user_content = Content(role="user", parts=[Part.from_text(user_input_text)]); model_content = Content(role="model", parts=[Part.from_text(gemini_response)])
-                                save_history(sender_id, history + [user_content, model_content])
-                                send_message(sender_id, gemini_response)
-                            else: # Błąd z Gemini
-                                print(f"!!! [{sender_id}] Błąd z get_gemini_response."); user_content = Content(role="user", parts=[Part.from_text(user_input_text)])
-                                save_history(sender_id, history + [user_content]); send_message(sender_id, gemini_response or "Błąd.")
+                                    save_history(sender_id, history + [user_content]) # Zapisz tylko usera
 
-                        # ... (reszta obsługi załączników i nieznanych wiadomości bez zmian) ...
+                        # --- Jeśli NIE oczekiwano na feedback -> Normalne przetwarzanie przez Gemini ---
+                        elif user_input_text:
+                             print(f"      -> Gemini...");
+                             gemini_response = get_gemini_response(sender_id, user_input_text, [h for h in history if not (isinstance(h, dict) and h.get('role') == 'system')])
+
+                             # --- ZMIANA: Python decyduje o szukaniu slotów ---
+                             trigger_keywords = ["umówić", "termin", "wolne", "kiedy", "zapisać", "kalendarz", "rezerw", "dostępn"]
+                             user_wants_to_schedule = any(keyword in user_input_text.lower() for keyword in trigger_keywords)
+                             # Dodatkowy warunek: sprawdź, czy Gemini POTWIERDZIŁ chęć umówienia
+                             confirm_keywords = ["oczywiście", "jasne", "proszę", "sprawdz", "termin"]
+                             gemini_confirms_scheduling = isinstance(gemini_response, str) and any(keyword in gemini_response.lower() for keyword in confirm_keywords)
+
+                             if user_wants_to_schedule or gemini_confirms_scheduling:
+                                 print(f"      Wykryto intencję umówienia LUB Gemini potwierdził. Szukanie pierwszego slotu...")
+                                 tz = _get_timezone(); now = datetime.datetime.now(tz); search_start = now
+                                 search_end_date = (now + datetime.timedelta(days=MAX_SEARCH_DAYS)).date(); search_end = tz.localize(datetime.datetime.combine(search_end_date, datetime.time(23, 59, 59)))
+                                 if ENABLE_TYPING_DELAY: time.sleep(MIN_TYPING_DELAY_SECONDS)
+                                 free_slots = get_free_slots(TARGET_CALENDAR_ID, search_start, search_end)
+                                 first_slot = find_next_reasonable_slot(free_slots, after_time=now) # Znajdź pierwszy rozsądny od teraz
+
+                                 if first_slot:
+                                     formatted_slot = format_slot_for_user(first_slot)
+                                     proposal_message = f"Dobrze, sprawdziłem. Najbliższy dostępny termin to: {formatted_slot}. Czy taki by odpowiadał?"
+                                     send_message(sender_id, proposal_message)
+                                     user_content = Content(role="user", parts=[Part.from_text(user_input_text)])
+                                     model_content = Content(role="model", parts=[Part.from_text(proposal_message)])
+                                     context_to_save = {'role': 'system', 'type': 'last_proposal', 'slot_iso': first_slot.isoformat()}
+                                     save_history(sender_id, history + [user_content, model_content], context_to_save=context_to_save) # Zapisz z kontekstem
+                                 else:
+                                     print(f"      Brak slotów przy pierwszym szukaniu."); send_message(sender_id, "Niestety, aktualnie brak wolnych terminów. Spróbuj ponownie później.")
+                                     user_content = Content(role="user", parts=[Part.from_text(user_input_text)]); model_content = Content(role="model", parts=[Part.from_text("Brak terminów.")])
+                                     save_history(sender_id, history + [user_content, model_content])
+                             elif isinstance(gemini_response, str) and gemini_response: # Normalna odpowiedź Gemini
+                                 print(f"      <- Gemini Odp.");
+                                 if ENABLE_TYPING_DELAY:
+                                     response_len = len(gemini_response); calculated_delay = response_len / TYPING_CHARS_PER_SECOND; final_delay = max(0, min(MAX_TYPING_DELAY_SECONDS, calculated_delay + MIN_TYPING_DELAY_SECONDS))
+                                     if final_delay > 0: print(f"      Pisanie... {final_delay:.2f}s"); time.sleep(final_delay)
+                                 user_content = Content(role="user", parts=[Part.from_text(user_input_text)]); model_content = Content(role="model", parts=[Part.from_text(gemini_response)])
+                                 save_history(sender_id, history + [user_content, model_content])
+                                 send_message(sender_id, gemini_response)
+                             else: # Błąd z Gemini
+                                  print(f"!!! [{sender_id}] Błąd z get_gemini_response."); user_content = Content(role="user", parts=[Part.from_text(user_input_text)])
+                                  save_history(sender_id, history + [user_content]); send_message(sender_id, gemini_response or "Błąd.")
+
+                        # ... (reszta obsługi załączników i nieznanych wiadomości) ...
                         elif "attachments" in message_data: attachment_type = message_data['attachments'][0].get('type', 'nieznany'); print(f"      Załącznik: {attachment_type}."); user_content = Content(role="user", parts=[Part.from_text(f"[Załącznik: {attachment_type}]")]); model_content = Content(role="model", parts=[Part.from_text("Nie obsługuję załączników.")]); save_history(sender_id, history + [user_content, model_content]); send_message(sender_id, "Przepraszam, nie obsługuję załączników.")
                         else: print(f"      Nieznany typ wiadomości: {message_data}"); user_content = Content(role="user", parts=[Part.from_text("[Nieznany typ wiadomości]")]); model_content = Content(role="model", parts=[Part.from_text("Nie rozumiem.")]); save_history(sender_id, history + [user_content, model_content]); send_message(sender_id, "Nie rozumiem.")
 
