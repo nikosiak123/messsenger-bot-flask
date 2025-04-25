@@ -19,8 +19,8 @@ SERVICE_ACCOUNT_FILE = 'kalendarzklucz.json' # <<< ZAKTUALIZOWANA NAZWA PLIKU
 # Znajdź odpowiednią dla siebie, np. 'Europe/Warsaw', 'UTC', itp.
 TIMEZONE = 'Europe/Warsaw'
 # Definicja godzin pracy (do sprawdzania wolnych slotów)
-WORK_START_HOUR = 9
-WORK_END_HOUR = 17 # Koniec o 17:00 (sloty do 16:00-17:00)
+WORK_START_HOUR = 7
+WORK_END_HOUR = 22 # Koniec o 17:00 (sloty do 16:00-17:00)
 # --- Koniec Konfiguracji ---
 
 # --- Funkcja get_calendar_service używająca konta usługi ---
