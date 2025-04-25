@@ -2,21 +2,19 @@ import datetime
 import os.path
 import pytz # Dla lepszej obsługi stref czasowych
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+# Używamy bibliotek dla konta usługi
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 # --- Konfiguracja ---
 # ID kalendarza do sprawdzenia
 CALENDAR_ID = 'f19e189826b9d6e36950da347ac84d5501ecbd6bed0d76c8641be61a67749c67@group.calendar.google.com'
-# Zakresy uprawnień - wystarczy odczyt
+# Zakresy uprawnień - nadal potrzebne, by określić, co chcemy robić
 SCOPES = ['https://www.googleapis.com/auth/calendar.readonly']
-# Nazwa pliku z danymi uwierzytelniającymi pobranymi z Google Cloud Console
-CREDENTIALS_FILE = 'credentials.json'
-# Plik do przechowywania tokenu autoryzacji (tworzony automatycznie)
-TOKEN_FILE = 'token.json'
+# Nazwa pliku klucza JSON pobranego z Google Cloud Console dla konta usługi
+SERVICE_ACCOUNT_FILE = 'kalendarzklucz.json' # <<< ZAKTUALIZOWANA NAZWA PLIKU
+
 # Strefa czasowa (ważne dla poprawnego porównywania czasów)
 # Znajdź odpowiednią dla siebie, np. 'Europe/Warsaw', 'UTC', itp.
 TIMEZONE = 'Europe/Warsaw'
@@ -25,67 +23,38 @@ WORK_START_HOUR = 9
 WORK_END_HOUR = 17 # Koniec o 17:00 (sloty do 16:00-17:00)
 # --- Koniec Konfiguracji ---
 
+# --- Funkcja get_calendar_service używająca konta usługi ---
 def get_calendar_service():
-    """Tworzy lub odświeża dane uwierzytelniające i buduje obiekt usługi API."""
+    """Tworzy obiekt usługi API używając danych uwierzytelniających konta usługi."""
     creds = None
-    # Plik token.json przechowuje tokeny dostępu i odświeżania użytkownika.
-    # Jest tworzony automatycznie podczas pierwszego zakończenia przepływu autoryzacji.
-    if os.path.exists(TOKEN_FILE):
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-    # Jeśli nie ma (ważnych) danych uwierzytelniających, pozwól użytkownikowi się zalogować.
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-            except Exception as e:
-                print(f"Błąd odświeżania tokenu: {e}")
-                print("Usuwanie starego pliku token.json i ponowna autoryzacja.")
-                os.remove(TOKEN_FILE)
-                # Rekurencja, aby spróbować ponownie po usunięciu tokenu
-                return get_calendar_service()
-        else:
-            if not os.path.exists(CREDENTIALS_FILE):
-                print(f"BŁĄD: Nie znaleziono pliku '{CREDENTIALS_FILE}'.")
-                print("Pobierz plik JSON z danymi uwierzytelniającymi OAuth 2.0 z Google Cloud Console.")
-                return None
-            flow = InstalledAppFlow.from_client_secrets_file(
-                CREDENTIALS_FILE, SCOPES)
+    try:
+        if not os.path.exists(SERVICE_ACCOUNT_FILE):
+             print(f"BŁĄD: Nie znaleziono pliku klucza konta usługi: '{SERVICE_ACCOUNT_FILE}'")
+             print("Upewnij się, że plik klucza JSON znajduje się w tym samym katalogu co skrypt.")
+             print("Pobierz plik klucza JSON z Google Cloud Console (IAM i administracja -> Konta usług -> Klucze).")
+             return None
 
-            # --- ZMIANA TUTAJ: Użycie przepływu konsolowego ---
-            # Zamiast uruchamiać serwer i otwierać przeglądarkę, użyj przepływu konsolowego
-            # Poinformuj użytkownika, aby ręcznie otworzył URL autoryzacji
-            auth_url, _ = flow.authorization_url(prompt='consent') # Użyj prompt='consent' by zawsze pytał o zgodę przy autoryzacji
-            print('Aby autoryzować dostęp, przejdź pod ten adres URL:')
-            print(auth_url)
-            print('\nPo autoryzacji w przeglądarce, Google wyświetli kod.')
-            print('Skopiuj ten kod i wklej go tutaj:')
+        # Ładuj dane uwierzytelniające z pliku klucza konta usługi
+        creds = service_account.Credentials.from_service_account_file(
+            SERVICE_ACCOUNT_FILE, scopes=SCOPES)
 
-            # Poproś użytkownika o wklejenie kodu autoryzacyjnego z przeglądarki
-            code = input('Wpisz kod autoryzacyjny: ').strip()
-
-            try:
-                 # Wymień kod autoryzacyjny na tokeny dostępu
-                flow.fetch_token(code=code)
-                creds = flow.credentials # Pobierz utworzone dane uwierzytelniające
-            except Exception as e:
-                 print(f"Błąd podczas wymiany kodu na token: {e}")
-                 print("Sprawdź, czy kod został poprawnie skopiowany i wklejony.")
-                 return None
-            # --- KONIEC ZMIANY ---
-
-        # Zapisz dane uwierzytelniające na następny raz
-        with open(TOKEN_FILE, 'w') as token:
-            token.write(creds.to_json())
+    except Exception as e:
+        print(f"Błąd podczas ładowania danych uwierzytelniających konta usługi z pliku '{SERVICE_ACCOUNT_FILE}': {e}")
+        return None
 
     try:
+        # Buduj usługę API kalendarza
         service = build('calendar', 'v3', credentials=creds)
+        print("Pomyślnie utworzono usługę Calendar API przy użyciu konta usługi.")
         return service
     except HttpError as error:
-        print(f'Wystąpił błąd podczas tworzenia usługi: {error}')
+        print(f'Wystąpił błąd podczas tworzenia usługi API: {error}')
         return None
     except Exception as e:
-        print(f'Wystąpił nieoczekiwany błąd: {e}')
+        print(f'Wystąpił nieoczekiwany błąd podczas tworzenia usługi: {e}')
         return None
+# --- Koniec funkcji get_calendar_service ---
+
 
 def get_week_range(start_date, tz):
     """Oblicza początek bieżącego tygodnia (poniedziałek) i koniec następnego (niedziela)."""
@@ -110,11 +79,10 @@ def parse_event_time(event_time_data, default_tz):
         try:
             dt = datetime.datetime.fromisoformat(dt_str)
         except ValueError:
-            # Czasami brakuje sekund w formacie ISO
+            # Czasami brakuje sekund w formacie ISO lub inne drobne różnice
             try:
                 dt = datetime.datetime.strptime(dt_str, '%Y-%m-%dT%H:%M:%S%z')
             except ValueError:
-                 # Jeszcze inny możliwy format bez sekundy i z 'Z'
                  try:
                      dt = datetime.datetime.strptime(dt_str, '%Y-%m-%dT%H:%M%z')
                  except ValueError:
@@ -135,15 +103,14 @@ def parse_event_time(event_time_data, default_tz):
         # Wydarzenie całodniowe - API zwraca tylko datę
         date_str = event_time_data['date']
         date_obj = datetime.date.fromisoformat(date_str)
-        # Dla porównań, traktujmy początek jako 00:00, koniec jako koniec dnia w danej strefie
-        # Funkcja wywołująca musi zdecydować, czy traktować to jako 'start' czy 'end'
-        # Zwracamy datę, aby można było ją odpowiednio zinterpretować
+        # Zwracamy obiekt daty, funkcja wywołująca zdecyduje jak go interpretować
         return date_obj
     return None # Nieznany format
 
 def find_free_slots(service, calendar_id, start_dt, end_dt, tz):
     """Pobiera wydarzenia i znajduje wolne przedziały czasowe."""
-    print(f"Pobieranie wydarzeń od {start_dt.strftime('%Y-%m-%d %H:%M')} do {end_dt.strftime('%Y-%m-%d %H:%M')}...")
+    print(f"Pobieranie wydarzeń z kalendarza '{calendar_id}'")
+    print(f"Zakres czasu: od {start_dt.strftime('%Y-%m-%d %H:%M %Z')} do {end_dt.strftime('%Y-%m-%d %H:%M %Z')}")
     try:
         events_result = service.events().list(
             calendarId=calendar_id,
@@ -154,13 +121,14 @@ def find_free_slots(service, calendar_id, start_dt, end_dt, tz):
         ).execute()
         events = events_result.get('items', [])
     except HttpError as error:
-        print(f'Wystąpił błąd API: {error}')
-        # Sprawdź, czy błąd dotyczy dostępu do kalendarza
+        print(f'Wystąpił błąd API podczas pobierania wydarzeń: {error}')
         if error.resp.status == 404:
              print(f"BŁĄD: Nie znaleziono kalendarza o ID: {calendar_id}")
         elif error.resp.status == 403:
              print(f"BŁĄD: Brak uprawnień do odczytu kalendarza: {calendar_id}")
-             print("Upewnij się, że konto użyte do autoryzacji ma dostęp.")
+             print(f"Upewnij się, że konto usługi (którego klucz jest w '{SERVICE_ACCOUNT_FILE}')")
+             print("zostało dodane do ustawień udostępniania tego kalendarza")
+             print("z uprawnieniem 'Widzi wszystkie szczegóły wydarzenia'.")
         return
     except Exception as e:
         print(f'Wystąpił nieoczekiwany błąd podczas pobierania wydarzeń: {e}')
@@ -183,7 +151,13 @@ def find_free_slots(service, calendar_id, start_dt, end_dt, tz):
         #     current_day += datetime.timedelta(days=1)
         #     continue
 
-        print(f"\n--- {current_day.strftime('%Y-%m-%d, %A')} ---")
+        # Użyj strftime z lokalizacją, jeśli system to obsługuje poprawnie
+        try:
+            day_name = current_day.strftime('%A')
+        except UnicodeEncodeError: # Na niektórych systemach może być problem z polskimi znakami
+            day_name = ["Poniedziałek", "Wtorek", "Środa", "Czwartek", "Piątek", "Sobota", "Niedziela"][current_day.weekday()]
+
+        print(f"\n--- {current_day.strftime('%Y-%m-%d')}, {day_name} ---")
 
         # Definiowanie początku i końca dnia pracy w lokalnej strefie czasowej
         day_start_time = tz.localize(datetime.datetime.combine(current_day, datetime.time(WORK_START_HOUR, 0)))
@@ -204,28 +178,25 @@ def find_free_slots(service, calendar_id, start_dt, end_dt, tz):
                  if start == current_day:
                       # Zablokuj cały dzień roboczy
                       day_events.append({'start': day_start_time, 'end': day_end_time})
-                      # Możemy przerwać pętlę dla tego dnia, bo jest cały zajęty
-                      # (ale bezpieczniej przetworzyć resztę na wypadek nakładania się)
-                      # break
+                      # Można by przerwać, ale bezpieczniej przetworzyć resztę
                  continue # Przejdź do następnego wydarzenia
 
             # Obsługa normalnych wydarzeń czasowych
-            elif isinstance(start, datetime.datetime):
+            elif isinstance(start, datetime.datetime) and isinstance(end, datetime.datetime):
                 event_start_dt = start
                 event_end_dt = end
 
                 # Sprawdź, czy wydarzenie (nawet częściowo) przypada na bieżący dzień roboczy
-                # Warunek: koniec wydarzenia jest po początku dnia pracy ORAZ początek wydarzenia jest przed końcem dnia pracy
                 if event_end_dt > day_start_time and event_start_dt < day_end_time:
-                     # Przytnij czas wydarzenia do granic dnia pracy, jeśli wychodzi poza nie
+                     # Przytnij czas wydarzenia do granic dnia pracy
                      effective_start = max(event_start_dt, day_start_time)
                      effective_end = min(event_end_dt, day_end_time)
-                     # Dodaj tylko jeśli przycięty czas jest sensowny (start przed końcem)
                      if effective_start < effective_end:
                          day_events.append({'start': effective_start, 'end': effective_end})
             else:
-                # Pomiń jeśli nie udało się sparsować czasu startowego
-                print(f"Pomijam wydarzenie z nierozpoznanym czasem startu: {event.get('summary', 'Brak tytułu')}")
+                # Pomiń jeśli nie udało się sparsować czasu startowego lub końcowego
+                event_summary = event.get('summary', 'Brak tytułu')
+                print(f"Pomijam wydarzenie '{event_summary}' z nierozpoznanym czasem startu/końca.")
                 continue
 
 
@@ -278,11 +249,11 @@ if __name__ == '__main__':
     # Uzyskaj zakres dat: bieżący i następny tydzień
     start_range, end_range = get_week_range(today, tz)
 
-    # Pobierz usługę kalendarza
+    # Pobierz usługę kalendarza używając konta usługi
     service = get_calendar_service()
 
     if service:
         # Znajdź i wypisz wolne sloty
         find_free_slots(service, CALENDAR_ID, start_range, end_range, tz)
     else:
-        print("Nie udało się uzyskać dostępu do usługi Google Calendar. Zakończono.")
+        print("Nie udało się uzyskać dostępu do usługi Google Calendar przy użyciu konta usługi. Zakończono.")
