@@ -49,9 +49,7 @@ TYPING_CHARS_PER_SECOND = 30
 SERVICE_ACCOUNT_FILE = 'kalendarzklucz.json' # Nazwa pliku klucza konta usługi
 CALENDAR_SCOPES = ['https://www.googleapis.com/auth/calendar.readonly', 'https://www.googleapis.com/auth/calendar.events']
 CALENDAR_TIMEZONE = 'Europe/Warsaw'
-# <<< POPRAWIONA DEFINICJA >>>
-APPOINTMENT_DURATION_MINUTES = 60 # Długość wizyty w minutach
-# ----------------------------
+APPOINTMENT_DURATION_MINUTES = 60 # Długość wizyty w minutach (zdefiniowana bezpośrednio)
 WORK_START_HOUR = 7
 WORK_END_HOUR = 22
 TARGET_CALENDAR_ID = 'f19e189826b9d6e36950da347ac84d5501ecbd6bed0d76c8641be61a67749c67@group.calendar.google.com'
@@ -106,8 +104,8 @@ def get_user_profile(psid):
 
 # --- Funkcja do odczytu historii z pliku JSON ---
 def load_history(user_psid):
-    filepath = os.path.join(HISTORY_DIR, f"{user_psid}.json"); history = []
-    if not os.path.exists(filepath): return history
+    filepath = os.path.join(HISTORY_DIR, f"{user_psid}.json"); history = []; context = {}
+    if not os.path.exists(filepath): return history, context # Zwracamy też pusty kontekst
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
             history_data = json.load(f)
@@ -118,17 +116,23 @@ def load_history(user_psid):
                         text_parts = []; valid_parts = True
                         for part_data in msg_data['parts']:
                             if isinstance(part_data, dict) and 'text' in part_data and isinstance(part_data['text'], str): text_parts.append(Part.from_text(part_data['text']))
-                            else: print(f"Ostrz. [{user_psid}]: Niepoprawna część w historii (idx {i}): {part_data}."); valid_parts = False; break
+                            else: print(f"Ostrz. [{user_psid}]: Niepoprawna część (idx {i})"); valid_parts = False; break
                         if valid_parts and text_parts: history.append(Content(role=msg_data['role'], parts=text_parts))
+                    elif (isinstance(msg_data, dict) and 'role' in msg_data and msg_data['role'] == 'system' and
+                          'type' in msg_data and msg_data['type'] == 'presented_slots' and 'slots' in msg_data):
+                        context['presented_slots'] = msg_data['slots']
+                        context['message_index'] = i
+                        print(f"[{user_psid}] Odczytano kontekst: {len(context['presented_slots'])} slotów (idx {i}).")
                     else: print(f"Ostrz. [{user_psid}]: Pominięto niepoprawną wiadomość w historii (idx {i}): {msg_data}")
-                print(f"[{user_psid}] Wczytano historię: {len(history)} wiadomości."); return history
-            else: print(f"!!! BŁĄD [{user_psid}]: Plik historii nie zawiera listy."); return []
-    except FileNotFoundError: print(f"[{user_psid}] Plik historii nie istnieje."); return []
-    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e: print(f"!!! BŁĄD [{user_psid}] parsowania historii: {e}. Plik: {filepath}."); return []
-    except Exception as e: print(f"!!! BŁĄD [{user_psid}] wczytywania historii: {e} !!!"); return []
+                print(f"[{user_psid}] Wczytano historię: {len(history)} wiadomości."); return history, context
+            else: print(f"!!! BŁĄD [{user_psid}]: Plik historii nie zawiera listy."); return [], {}
+    except FileNotFoundError: print(f"[{user_psid}] Plik historii nie istnieje."); return [], {}
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e: print(f"!!! BŁĄD [{user_psid}] parsowania historii: {e}."); return [], {}
+    except Exception as e: print(f"!!! BŁĄD [{user_psid}] wczytywania historii: {e} !!!"); return [], {}
+
 
 # --- Funkcja do zapisu historii do pliku JSON ---
-def save_history(user_psid, history):
+def save_history(user_psid, history, context_to_save=None): # Dodano context_to_save
     ensure_dir(HISTORY_DIR); filepath = os.path.join(HISTORY_DIR, f"{user_psid}.json"); temp_filepath = f"{filepath}.tmp"
     history_data = []
     try:
@@ -136,21 +140,26 @@ def save_history(user_psid, history):
         history_to_process = history[-max_messages_to_save:] if len(history) > max_messages_to_save else history
         if len(history) > max_messages_to_save: print(f"[{user_psid}] Historia przycięta DO ZAPISU: {len(history_to_process)} wiad.")
         for msg in history_to_process:
-            if isinstance(msg, Content) and hasattr(msg, 'role') and msg.role in ('user', 'model') and hasattr(msg, 'parts') and isinstance(msg.parts, list):
+             if isinstance(msg, Content) and hasattr(msg, 'role') and msg.role in ('user', 'model') and hasattr(msg, 'parts') and isinstance(msg.parts, list):
                 parts_data = [{'text': part.text} for part in msg.parts if isinstance(part, Part) and hasattr(part, 'text')]
                 if parts_data: history_data.append({'role': msg.role, 'parts': parts_data})
                 else: print(f"Ostrz. [{user_psid}]: Pomijanie wiad. bez części (zapis, Rola: {msg.role})")
-            else: print(f"Ostrz. [{user_psid}]: Pomijanie nieprawidłowego obiektu (zapis): {msg}")
+             elif isinstance(msg, dict) and msg.get('role') == 'system': # Zachowaj istniejący kontekst
+                 history_data.append(msg)
+             else: print(f"Ostrz. [{user_psid}]: Pomijanie nieprawidłowego obiektu (zapis): {msg}")
+        if context_to_save and isinstance(context_to_save, dict): # Dodaj nowy kontekst
+             history_data.append(context_to_save)
+             print(f"[{user_psid}] Dodano nowy kontekst do zapisu: {context_to_save.get('type')}")
         with open(temp_filepath, 'w', encoding='utf-8') as f: json.dump(history_data, f, ensure_ascii=False, indent=2)
         os.replace(temp_filepath, filepath)
-        print(f"[{user_psid}] Zapisano historię ({len(history_data)} wiad.) do: {filepath}")
+        print(f"[{user_psid}] Zapisano historię/kontekst ({len(history_data)} wpisów) do: {filepath}")
     except Exception as e:
-        print(f"!!! BŁĄD [{user_psid}] zapisu historii: {e} !!! Plik: {filepath}")
+        print(f"!!! BŁĄD [{user_psid}] zapisu historii/kontekstu: {e} !!! Plik: {filepath}")
         if os.path.exists(temp_filepath):
             try: os.remove(temp_filepath); print(f"    Usunięto {temp_filepath}.")
             except OSError as remove_e: print(f"    Nie można usunąć {temp_filepath}: {remove_e}")
 
-# --- Funkcje Kalendarza (wcześniej w calendar_utils.py) ---
+# --- Funkcje Kalendarza ---
 
 def _get_timezone():
     global _tz
@@ -186,8 +195,7 @@ def parse_event_time(event_time_data, default_tz):
         except ValueError: print(f"Ostrz.: Nie sparsowano date: {event_time_data['date']}"); return None
     return None
 
-def get_free_slots(calendar_id, start_datetime, end_datetime): # Usunięto domyślny duration
-    """Znajduje wolne sloty używając APPOINTMENT_DURATION_MINUTES z konfiguracji."""
+def get_free_slots(calendar_id, start_datetime, end_datetime):
     service = get_calendar_service(); tz = _get_timezone()
     if not service: print("Błąd: Usługa kalendarza niedostępna w get_free_slots."); return []
     if start_datetime.tzinfo is None: start_datetime = tz.localize(start_datetime)
@@ -204,7 +212,7 @@ def get_free_slots(calendar_id, start_datetime, end_datetime): # Usunięto domy�
     except Exception as e: print(f"Błąd pobierania wydarzeń: {e}"); return []
 
     free_slots_starts = []; current_day = start_datetime.date(); end_day = end_datetime.date()
-    appointment_duration = datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES) # Użyj wartości z konfiguracji
+    appointment_duration = datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
 
     while current_day <= end_day:
         day_start_limit = tz.localize(datetime.datetime.combine(current_day, datetime.time(WORK_START_HOUR, 0)))
@@ -289,7 +297,7 @@ gemini_model = None
 try:
     print(f"Inicjalizowanie Vertex AI: Projekt={PROJECT_ID}, Lokalizacja={LOCATION}")
     vertexai.init(project=PROJECT_ID, location=LOCATION); print("Inicjalizacja Vertex AI OK.")
-    print(f"Ładowanie modelu: {MODEL_ID}")
+    print(f"Ładowanie modelu: {MODEL_ID}") # Używa przywróconego ID
     gemini_model = GenerativeModel(MODEL_ID); print("Model załadowany OK.")
 except Exception as e: print(f"!!! KRYTYCZNY BŁĄD inicjalizacji Vertex AI: {e} !!!")
 
@@ -360,7 +368,7 @@ def send_quick_replies(recipient_id, text, quick_replies_list):
         return False
     except Exception as e: print(f"!!! Niespodziewany BŁĄD wysyłania QR do {recipient_id}: {e} !!!"); return False
 
-# --- INSTRUKCJA SYSTEMOWA (Przywrócona wersja bez ograniczenia emotek) ---
+# --- INSTRUKCJA SYSTEMOWA (Przywrócona wersja bez ograniczenia emotek, ale z akcją kalendarza) ---
 # TODO: Zmień [Nazwa Firmy], [Twój Numer], [Twój Email]
 SYSTEM_INSTRUCTION_TEXT = """Jesteś profesjonalnym i uprzejmym asystentem obsługi klienta reprezentującym centrum 'Zakręcone Korepetycje', specjalizujące się w korepetycjach online z matematyki, języka angielskiego i języka polskiego dla uczniów od 4 klasy SP do matury (poziom podstawowy i rozszerzony).
 
@@ -372,19 +380,20 @@ Przebieg rozmowy (elastyczny):
 3.  Ustal klasę.
 4.  Dla szkoły średniej ustal poziom (podst./rozsz.).
 5.  Podaj cenę za 60 min lekcji (cennik poniżej).
-6.  Aktywnie zachęcaj do umówienia pierwszej lekcji.
+6.  **Po podaniu ceny, jeśli rozmowa naturalnie zmierza ku umówieniu terminu lub użytkownik pyta o terminy, użyj akcji FIND_SLOTS.**
 7.  Informuj o formie online (MS Teams, bez instalacji) na życzenie.
 
 Cennik (60 min): 4-8 SP: 60 zł; 1-3 LO/Tech (podst.): 65 zł; 1-3 LO/Tech (rozsz.): 70 zł; 4 LO/Tech (podst.): 70 zł; 4 LO/Tech (rozsz.): 75 zł.
 
 **Obsługa Umawiania Terminów:**
-*   Jeśli użytkownik pyta o terminy, rezerwację, kalendarz (np. "Chcę umówić wizytę", "Kiedy macie wolne?"), **NIE pytaj o datę**, odpowiedz **TYLKO** znacznikiem: `[ACTION: FIND_SLOTS]`
+*   Jeśli użytkownik pyta o terminy, rezerwację, kalendarz, dostępność LUB rozmowa logicznie prowadzi do pytania o termin, **NIE pytaj o datę**, odpowiedz **TYLKO** znacznikiem: `[ACTION: FIND_SLOTS]`
 *   Nawet jeśli poda preferencje, odpowiedz tylko `[ACTION: FIND_SLOTS]`.
 *   Używaj znacznika **TYLKO** w tym kontekście.
+*   Po tym jak system zaproponuje terminy (np. 1, 2, 3), a użytkownik odpowie wybierając numer, Twoim zadaniem będzie tylko potwierdzenie, czy rezerwacja się udała (jeśli system Cię o tym poinformuje) lub obsługa ewentualnych dalszych pytań użytkownika.
 
 **Ważne zasady:**
 *   **Kontynuacja po przerwie:** **ZAWSZE** analizuj historię i kontynuuj od miejsca przerwania. **NIE ZACZYNAJ OD NOWA**.
-*   Preferuj formy bezosobowe lub "Państwo" zamiast "Pan/Pani".
+*   Preferuj formy bezosobowe lub "Państwo".
 *   Rozdzielaj wywiad na krótsze wiadomości.
 *   Bądź perswazyjny, ale nie nachalny. Po odmowie zaproponuj zastanowienie się.
 *   Jeśli nie znasz odpowiedzi, poinformuj i podaj kontakt: tel. [Twój Numer], email: [Twój Email].
@@ -393,18 +402,17 @@ Cennik (60 min): 4-8 SP: 60 zł; 1-3 LO/Tech (podst.): 65 zł; 1-3 LO/Tech (rozs
 # ---------------------------------------------------------------------
 
 # --- Funkcja interakcji z Gemini (z obsługą akcji) ---
-def get_gemini_response_or_action(user_psid, current_user_message):
+def get_gemini_response_or_action(user_psid, current_user_message, history):
     if not gemini_model: print(f"!!! BŁĄD [{user_psid}]: Model Gemini niezaładowany!"); return "Przepraszam, błąd AI."
-    history = load_history(user_psid); user_content = Content(role="user", parts=[Part.from_text(current_user_message)])
-    full_conversation_for_save = history + [user_content]
+    user_content = Content(role="user", parts=[Part.from_text(current_user_message)])
     max_messages_to_send = MAX_HISTORY_TURNS * 2
-    history_to_send = full_conversation_for_save[-max_messages_to_send:] if len(full_conversation_for_save) > max_messages_to_send else full_conversation_for_save
-    if len(full_conversation_for_save) > max_messages_to_send: print(f"[{user_psid}] Historia przycięta DO WYSLANIA: {len(history_to_send)} wiad.")
+    history_to_send = history[-max_messages_to_send:] if len(history) > max_messages_to_send else history
+    if len(history) > max_messages_to_send: print(f"[{user_psid}] Historia przycięta DO WYSLANIA: {len(history_to_send)} wiad.")
     prompt_content_with_instruction = [
         Content(role="user", parts=[Part.from_text(SYSTEM_INSTRUCTION_TEXT)]),
         Content(role="model", parts=[Part.from_text("Rozumiem. Pomogę zgodnie z wytycznymi, inicjując sprawdzanie terminów znacznikiem [ACTION: FIND_SLOTS].")])
-    ] + history_to_send
-    print(f"\n--- [{user_psid}] Zawartość do Gemini ({MODEL_ID}) ---"); # Logowanie (skrócone dla przejrzystości)
+    ] + history_to_send + [user_content]
+    print(f"\n--- [{user_psid}] Zawartość do Gemini ({MODEL_ID}) ---"); # Logowanie
     # for i, content in enumerate(prompt_content_with_instruction): role = content.role; raw_text = content.parts[0].text; text_fragment = raw_text[:80].replace('\n', '\\n'); text_to_log = text_fragment + "..." if len(raw_text) > 80 else text_fragment; print(f"  [{i}] R:{role}, T:'{text_to_log}'")
     print(f"--- Koniec zawartości {user_psid} ---\n")
     try:
@@ -414,23 +422,21 @@ def get_gemini_response_or_action(user_psid, current_user_message):
         generated_text = ""
         if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
             generated_text = response.candidates[0].content.parts[0].text.strip()
-            # <<< Sprawdzenie ZAWARTOSCI znacznika >>>
+            # Sprawdzenie ZAWARTOSCI znacznika
             if "[ACTION: FIND_SLOTS]" in generated_text:
-                print(f"[{user_psid}] Gemini -> Tekst zawiera akcję FIND_SLOTS: '{generated_text}'"); save_history(user_psid, full_conversation_for_save); return "[ACTION: FIND_SLOTS]"
+                print(f"[{user_psid}] Gemini -> Tekst zawiera akcję FIND_SLOTS: '{generated_text}'")
+                return "[ACTION: FIND_SLOTS]" # Zwróć TYLKO znacznik
             print(f"[{user_psid}] Wygenerowany tekst (dł: {len(generated_text)})"); text_preview = generated_text[:150].replace('\n', '\\n'); print(f"   Fragment: '{text_preview}...'")
-            model_content = Content(role="model", parts=[Part.from_text(generated_text)]); final_history_to_save = full_conversation_for_save + [model_content]
-            max_messages_to_save = MAX_HISTORY_TURNS * 2
-            if len(final_history_to_save) > max_messages_to_save: final_history_to_save = final_history_to_save[-max_messages_to_save:]; print(f"[{user_psid}] Historia przycięta DO ZAPISU: {len(final_history_to_save)} wiad.")
-            save_history(user_psid, final_history_to_save); return generated_text
+            return generated_text
         else: # Obsługa błędów/blokad
             finish_reason = "UNKNOWN"; safety_ratings = [];
             if response.candidates: finish_reason_obj = response.candidates[0].finish_reason; finish_reason = finish_reason_obj.name if hasattr(finish_reason_obj, 'name') else str(finish_reason_obj); safety_ratings = response.candidates[0].safety_ratings if response.candidates[0].safety_ratings else []
-            print(f"!!! [{user_psid}] Odp. Gemini pusta/zablokowana. Powód: {finish_reason}, Oceny: {safety_ratings} !!!"); save_history(user_psid, full_conversation_for_save)
+            print(f"!!! [{user_psid}] Odp. Gemini pusta/zablokowana. Powód: {finish_reason}, Oceny: {safety_ratings} !!!")
             if finish_reason == 'SAFETY': return "Przepraszam, treść narusza zasady."
             elif finish_reason == 'RECITATION': return "Moje źródła są ograniczone."
             else: return "Hmm, błąd generowania odpowiedzi."
     except Exception as e: # Obsługa wyjątków
-        import traceback; print(f"!!! KRYTYCZNY BŁĄD Gemini ({MODEL_ID}) dla PSID {user_psid}: {e} !!!"); traceback.print_exc(); save_history(user_psid, full_conversation_for_save)
+        import traceback; print(f"!!! KRYTYCZNY BŁĄD Gemini ({MODEL_ID}) dla PSID {user_psid}: {e} !!!"); traceback.print_exc()
         error_str = str(e).lower();
         if "permission denied" in error_str: return "Błąd: Brak uprawnień AI."
         elif "model" in error_str and "not found" in error_str: return f"Błąd: Model AI ('{MODEL_ID}') niedostępny."
@@ -444,8 +450,8 @@ def get_gemini_response_or_action(user_psid, current_user_message):
 def webhook_verification():
     print("--- GET weryfikacja ---"); hub_mode = request.args.get('hub.mode'); hub_token = request.args.get('hub.verify_token'); hub_challenge = request.args.get('hub.challenge')
     print(f"Mode:{hub_mode},Token:{'OK' if hub_token==VERIFY_TOKEN else 'BŁĄD'},Challenge:{'Jest' if hub_challenge else 'Brak'}")
-    if hub_mode == 'subscribe' and hub_token == VERIFY_TOKEN: print("Weryfikacja OK!"); return Response(hub_challenge, status=200)
-    else: print("Weryfikacja FAILED."); return Response("Verification failed", status=403)
+    if hub_mode == 'subscribe' and hub_token == VERIFY_TOKEN: print("Weryfikacja GET OK!"); return Response(hub_challenge, status=200)
+    else: print("Weryfikacja GET FAILED."); return Response("Verification failed", status=403)
 
 # --- Główna Obsługa Webhooka (POST) ---
 @app.route('/webhook', methods=['POST'])
@@ -456,68 +462,116 @@ def webhook_handle():
         data = json.loads(raw_data)
         if data and data.get("object") == "page":
             for entry in data.get("entry", []):
-                page_id = entry.get("id"); timestamp = entry.get("time"); #print(f" Entry: {page_id}")
+                page_id = entry.get("id"); timestamp = entry.get("time");
                 for messaging_event in entry.get("messaging", []):
                     if "sender" not in messaging_event or "id" not in messaging_event["sender"]: continue
                     sender_id = messaging_event["sender"]["id"]; print(f"  -> PSID: {sender_id}")
+                    history, context = load_history(sender_id) # Ładuj historię i kontekst
+                    presented_slots_context = context.get('presented_slots'); context_message_index = context.get('message_index', -1)
+                    if presented_slots_context and context_message_index != -1 and context_message_index < len(history): print(f"    Kontekst 'presented_slots' stary. Reset."); presented_slots_context = None
+
                     if messaging_event.get("message"): # Wiadomość
                         message_data = messaging_event["message"]; message_id = message_data.get("mid"); print(f"    Msg (ID:{message_id})")
                         if message_data.get("is_echo"): print("      Echo."); continue
                         user_input_text = None; quick_reply_payload = None
-                        if "quick_reply" in message_data:
-                            quick_reply_payload = message_data["quick_reply"].get("payload"); user_input_text = message_data.get("text", quick_reply_payload); print(f"      QR: P='{quick_reply_payload}', T='{user_input_text}'")
-                        elif "text" in message_data: user_input_text = message_data["text"]; print(f"      Txt: '{user_input_text}'")
+                        if "text" in message_data: user_input_text = message_data["text"]; print(f"      Txt: '{user_input_text}'")
 
-                        # <<< Logika Rezerwacji >>>
-                        if quick_reply_payload and quick_reply_payload.startswith(QUICK_REPLY_BOOK_PREFIX):
-                            slot_iso_string = quick_reply_payload[len(QUICK_REPLY_BOOK_PREFIX):]
-                            try:
-                                tz = _get_timezone(); start_time = datetime.datetime.fromisoformat(slot_iso_string).astimezone(tz); end_time = start_time + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
-                                print(f"      Wybrano slot: {start_time:%Y-%m-%d %H:%M %Z}")
-                                user_profile = get_user_profile(sender_id); user_name = user_profile.get('first_name', '') if user_profile else ''
-                                if ENABLE_TYPING_DELAY: time.sleep(MIN_TYPING_DELAY_SECONDS)
-                                success, message_to_user = book_appointment(TARGET_CALENDAR_ID, start_time, end_time, summary=f"Rezerwacja FB", description=f"PSID:{sender_id}\nImię:{user_name}", user_name=user_name)
-                                send_message(sender_id, message_to_user)
-                            except ValueError as ve: print(f"!!! BŁĄD parsowania ISO QR: {slot_iso_string}. {ve} !!!"); send_message(sender_id, "Błąd terminu.")
-                            except Exception as book_err: print(f"!!! KRYTYCZNY BŁĄD rezerwacji: {book_err} !!!"); import traceback; traceback.print_exc(); send_message(sender_id, "Błąd rezerwacji.")
-                        # <<< Koniec Logiki Rezerwacji >>>
-                        elif user_input_text: # Inny tekst lub QR -> Gemini
-                             print(f"      -> Gemini..."); gemini_output = get_gemini_response_or_action(sender_id, user_input_text)
+                        # --- Logika Wyboru Terminu (jeśli jest kontekst i tekst) ---
+                        if presented_slots_context and user_input_text:
+                            print(f"      Oczekiwano na wybór. Analiza: '{user_input_text}'")
+                            chosen_index = -1; import re
+                            match = re.search(r'\b([1-3])\b', user_input_text)
+                            if match: chosen_index = int(match.group(1)) - 1
+                            else:
+                                if "pierwszy" in user_input_text.lower() or "jedynk" in user_input_text.lower(): chosen_index = 0
+                                elif "drugi" in user_input_text.lower() or "dwójk" in user_input_text.lower(): chosen_index = 1
+                                elif "trzeci" in user_input_text.lower() or "trójk" in user_input_text.lower(): chosen_index = 2
+                            if 0 <= chosen_index < len(presented_slots_context):
+                                selected_iso_slot = presented_slots_context[chosen_index]; print(f"      Wybrano nr {chosen_index + 1} ({selected_iso_slot})")
+                                try:
+                                    tz = _get_timezone(); start_time = datetime.datetime.fromisoformat(selected_iso_slot).astimezone(tz); end_time = start_time + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+                                    user_profile = get_user_profile(sender_id); user_name = user_profile.get('first_name', '') if user_profile else ''
+                                    if ENABLE_TYPING_DELAY: time.sleep(MIN_TYPING_DELAY_SECONDS)
+                                    success, message_to_user = book_appointment(TARGET_CALENDAR_ID, start_time, end_time, summary=f"Rezerwacja FB", description=f"PSID:{sender_id}\nImię:{user_name}", user_name=user_name)
+                                    send_message(sender_id, message_to_user)
+                                    user_content = Content(role="user", parts=[Part.from_text(user_input_text)]); model_content = Content(role="model", parts=[Part.from_text(message_to_user)])
+                                    save_history(sender_id, history + [user_content, model_content]) # Zapisz bez kontekstu
+                                except ValueError as ve: print(f"!!! BŁĄD parsowania ISO z kontekstu: {selected_iso_slot}. {ve} !!!"); send_message(sender_id, "Błąd terminu.")
+                                except Exception as book_err: print(f"!!! KRYTYCZNY BŁĄD rezerwacji z kontekstu: {book_err} !!!"); import traceback; traceback.print_exc(); send_message(sender_id, "Błąd rezerwacji.")
+                            else:
+                                print(f"      Nie sparsowano wyboru z: '{user_input_text}'")
+                                send_message(sender_id, "Nie zrozumiałem wyboru. Podaj numer (1, 2 lub 3).")
+                                user_content = Content(role="user", parts=[Part.from_text(user_input_text)]); model_content = Content(role="model", parts=[Part.from_text("Nie zrozumiałem...")])
+                                save_history(sender_id, history + [user_content, model_content], context_to_save={'role':'system', 'type':'presented_slots', 'slots': presented_slots_context}) # Zapisz z kontekstem
+                        # --- Koniec Logiki Wyboru Terminu ---
+
+                        # --- Jeśli NIE oczekiwano wyboru LUB nie było tekstu -> Normalne przetwarzanie ---
+                        elif user_input_text:
+                             print(f"      -> Gemini...");
+                             # Przekazujemy historię bez kontekstu systemowego
+                             gemini_output = get_gemini_response_or_action(sender_id, user_input_text, [h for h in history if h.role != 'system']) # Wyślij historię bez wpisów systemowych
+
                              # <<< Logika Akcji FIND_SLOTS >>>
                              if gemini_output == "[ACTION: FIND_SLOTS]":
                                  print(f"      Akcja: FIND_SLOTS"); tz = _get_timezone(); now = datetime.datetime.now(tz); search_start = now
                                  search_end_date = (now + datetime.timedelta(days=7)).date(); search_end = tz.localize(datetime.datetime.combine(search_end_date, datetime.time(23, 59, 59)))
                                  if ENABLE_TYPING_DELAY: print(f"      Szukanie..."); time.sleep(MIN_TYPING_DELAY_SECONDS)
-                                 free_slots = get_free_slots(TARGET_CALENDAR_ID, search_start, search_end) # Używa domyślnej długości
+                                 free_slots = get_free_slots(TARGET_CALENDAR_ID, search_start, search_end)
                                  if free_slots:
-                                     replies = []; print(f"      Znaleziono {len(free_slots)} slotów.")
-                                     for slot_start in free_slots[:MAX_SLOTS_TO_SHOW]:
-                                         try: slot_text = slot_start.strftime("%A, %d.%m %H:%M")
-                                         except: day_names = ["Pn", "Wt", "Śr", "Cz", "Pt", "So", "Nd"]; slot_text = f"{day_names[slot_start.weekday()]}, {slot_start.strftime('%d.%m %H:%M')}"
-                                         replies.append({"title": slot_text, "payload": f"{QUICK_REPLY_BOOK_PREFIX}{slot_start.isoformat()}"})
-                                     send_quick_replies(sender_id, "Oto kilka wolnych terminów:", replies)
-                                 else: print(f"      Brak slotów."); send_message(sender_id, "Niestety, brak wolnych terminów w najbliższym tyg.")
+                                     proposed_slots = free_slots[:3]; print(f"      Znaleziono {len(free_slots)}. Proponowanie {len(proposed_slots)}.")
+                                     message_parts = ["Oto propozycje najbliższych wolnych terminów:"]
+                                     proposed_iso_slots = []
+                                     for i, slot_start in enumerate(proposed_slots):
+                                         try: slot_text = slot_start.strftime("%A, %d.%m.%Y o %H:%M")
+                                         except: day_names = ["Pn", "Wt", "Śr", "Cz", "Pt", "So", "Nd"]; slot_text = f"{day_names[slot_start.weekday()]}, {slot_start.strftime('%d.%m.%Y o %H:%M')}"
+                                         message_parts.append(f"{i+1}. {slot_text}")
+                                         proposed_iso_slots.append(slot_start.isoformat())
+                                     message_parts.append("\nProszę wybrać numer terminu (np. odpisując '1').")
+                                     final_message = "\n".join(message_parts); send_message(sender_id, final_message)
+                                     user_content = Content(role="user", parts=[Part.from_text(user_input_text)])
+                                     model_content = Content(role="model", parts=[Part.from_text(final_message)])
+                                     context_to_save = {'role': 'system', 'type': 'presented_slots', 'slots': proposed_iso_slots}
+                                     save_history(sender_id, history + [user_content, model_content], context_to_save=context_to_save) # Zapisz z kontekstem
+                                 else:
+                                     print(f"      Brak slotów."); send_message(sender_id, "Niestety, brak wolnych terminów w najbliższym tyg.")
+                                     user_content = Content(role="user", parts=[Part.from_text(user_input_text)])
+                                     model_content = Content(role="model", parts=[Part.from_text("Niestety, brak wolnych terminów...")])
+                                     save_history(sender_id, history + [user_content, model_content]) # Zapisz bez kontekstu
                              # <<< Koniec Logiki FIND_SLOTS >>>
                              elif isinstance(gemini_output, str) and gemini_output: # Normalna odpowiedź
                                  print(f"      <- Gemini Odp.");
                                  if ENABLE_TYPING_DELAY:
                                      response_len = len(gemini_output); calculated_delay = response_len / TYPING_CHARS_PER_SECOND; final_delay = max(0, min(MAX_TYPING_DELAY_SECONDS, calculated_delay + MIN_TYPING_DELAY_SECONDS))
                                      if final_delay > 0: print(f"      Pisanie... {final_delay:.2f}s"); time.sleep(final_delay)
+                                 user_content = Content(role="user", parts=[Part.from_text(user_input_text)])
+                                 model_content = Content(role="model", parts=[Part.from_text(gemini_output)])
+                                 save_history(sender_id, history + [user_content, model_content]) # Zapisz normalnie
                                  send_message(sender_id, gemini_output)
-                             else: print(f"!!! Błąd Gemini."); send_message(sender_id, gemini_output or "Błąd.")
-                        elif "attachments" in message_data: attachment_type = message_data['attachments'][0].get('type', 'nieznany'); print(f"      Załącznik: {attachment_type}."); send_message(sender_id, "Nie obsługuję załączników.")
-                        else: print(f"      Nieznany typ wiadomości: {message_data}"); send_message(sender_id, "Nie rozumiem tej wiadomości.")
+                             else: # Błąd z Gemini
+                                  print(f"!!! [{sender_id}] Błąd z get_gemini_response_or_action."); user_content = Content(role="user", parts=[Part.from_text(user_input_text)])
+                                  save_history(sender_id, history + [user_content]); send_message(sender_id, gemini_output or "Błąd.")
+                        elif "attachments" in message_data: # Załączniki
+                             attachment_type = message_data['attachments'][0].get('type', 'nieznany'); print(f"      Załącznik: {attachment_type}.");
+                             user_content = Content(role="user", parts=[Part.from_text(f"[Załącznik: {attachment_type}]")]); model_content = Content(role="model", parts=[Part.from_text("Nie obsługuję załączników.")])
+                             save_history(sender_id, history + [user_content, model_content]); send_message(sender_id, "Przepraszam, nie obsługuję załączników.")
+                        else: # Inne
+                            print(f"      Nieznany typ wiadomości: {message_data}")
+                            user_content = Content(role="user", parts=[Part.from_text("[Nieznany typ wiadomości]")]); model_content = Content(role="model", parts=[Part.from_text("Nie rozumiem.")])
+                            save_history(sender_id, history + [user_content, model_content]); send_message(sender_id, "Nie rozumiem.")
+
                     elif messaging_event.get("postback"): # Postback
                          postback_data = messaging_event["postback"]; payload = postback_data.get("payload"); title = postback_data.get("title", payload); print(f"    Postback: T:'{title}', P:'{payload}'")
                          prompt_for_button = f"Kliknięto: '{title}' ({payload})."
-                         response_text = get_gemini_response_or_action(sender_id, prompt_for_button)
+                         response_text = get_gemini_response_or_action(sender_id, prompt_for_button, history)
                          if isinstance(response_text, str) and not response_text.startswith("[ACTION"):
                              if ENABLE_TYPING_DELAY:
                                  response_len = len(response_text); calculated_delay = response_len / TYPING_CHARS_PER_SECOND; final_delay = max(0, min(MAX_TYPING_DELAY_SECONDS, calculated_delay + MIN_TYPING_DELAY_SECONDS))
                                  if final_delay > 0: print(f"      Pisanie (postback)... {final_delay:.2f}s"); time.sleep(final_delay)
+                             user_content = Content(role="user", parts=[Part.from_text(prompt_for_button)]); model_content = Content(role="model", parts=[Part.from_text(response_text)])
+                             save_history(sender_id, history + [user_content, model_content])
                              send_message(sender_id, response_text)
-                         elif response_text == "[ACTION: FIND_SLOTS]": print("Ostrz.: FIND_SLOTS dla postback."); send_message(sender_id, "Otrzymałem akcję.")
-                         else: send_message(sender_id, response_text or "Błąd.")
+                         elif response_text == "[ACTION: FIND_SLOTS]": print("Ostrz.: FIND_SLOTS dla postback."); user_content = Content(role="user", parts=[Part.from_text(prompt_for_button)]); model_content = Content(role="model", parts=[Part.from_text("Akcja nieobsługiwana.")]) ; save_history(sender_id, history + [user_content, model_content]) ; send_message(sender_id, "Akcja nieobsługiwana.")
+                         else: user_content = Content(role="user", parts=[Part.from_text(prompt_for_button)]); save_history(sender_id, history + [user_content]); send_message(sender_id, response_text or "Błąd.")
                     elif messaging_event.get("read"): print(f"    Typ: read.")
                     elif messaging_event.get("delivery"): print(f"    Typ: delivery.")
                     else: print(f"    Inne zdarzenie: {messaging_event}")
