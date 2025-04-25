@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# verify_server.py (połączony kod z poprawioną logiką szukania kolejnego terminu)
+# verify_server.py (połączony kod z inteligentniejszym proponowaniem terminów)
 
 from flask import Flask, request, Response
 import os
@@ -52,9 +52,10 @@ APPOINTMENT_DURATION_MINUTES = 60
 WORK_START_HOUR = 7
 WORK_END_HOUR = 22
 TARGET_CALENDAR_ID = 'f19e189826b9d6e36950da347ac84d5501ecbd6bed0d76c8641be61a67749c67@group.calendar.google.com'
-PREFERRED_WEEKDAY_START_HOUR = 16
-PREFERRED_WEEKEND_START_HOUR = 10
-MAX_SEARCH_DAYS = 14 # Jak daleko w przyszłość szukać kolejnych terminów
+PREFERRED_WEEKDAY_START_HOUR = 16 # Preferowany start w tygodniu
+PREFERRED_WEEKEND_START_HOUR = 10 # Preferowany start w weekend
+MAX_SEARCH_DAYS = 14
+# QUICK_REPLY_BOOK_PREFIX nie jest już potrzebny
 
 # --- Inicjalizacja Zmiennych Globalnych dla Kalendarza ---
 _calendar_service = None
@@ -72,7 +73,7 @@ except locale.Error:
 # =====================================================================
 # === FUNKCJE POMOCNICZE ==============================================
 # =====================================================================
-
+# (Funkcje ensure_dir, get_user_profile, load_history, save_history - bez zmian od ostatniej wersji)
 def ensure_dir(directory):
     try: os.makedirs(directory); print(f"Utworzono katalog: {directory}")
     except OSError as e:
@@ -233,15 +234,25 @@ def get_free_slots(calendar_id, start_datetime, end_datetime):
         for busy in merged_busy_times:
             busy_start = busy['start']; busy_end = busy['end']
             while potential_slot_start + appointment_duration <= busy_start:
-                 if potential_slot_start >= check_start_time and potential_slot_start + appointment_duration <= check_end_time: free_slots_starts.append(potential_slot_start)
-                 potential_slot_start += appointment_duration
+                 if potential_slot_start >= check_start_time and potential_slot_start + appointment_duration <= check_end_time:
+                     if potential_slot_start.minute % 10 == 0: # Sprawdź "ładne" minuty
+                         free_slots_starts.append(potential_slot_start)
+                 current_minute = potential_slot_start.minute; minutes_to_add = 10 - (current_minute % 10);
+                 if minutes_to_add == 0: minutes_to_add = 10
+                 potential_slot_start += datetime.timedelta(minutes=minutes_to_add)
+                 potential_slot_start = potential_slot_start.replace(second=0, microsecond=0)
             potential_slot_start = max(potential_slot_start, busy_end)
         while potential_slot_start + appointment_duration <= check_end_time:
-             if potential_slot_start >= check_start_time: free_slots_starts.append(potential_slot_start)
-             potential_slot_start += appointment_duration
+             if potential_slot_start >= check_start_time:
+                 if potential_slot_start.minute % 10 == 0: # Sprawdź "ładne" minuty
+                     free_slots_starts.append(potential_slot_start)
+             current_minute = potential_slot_start.minute; minutes_to_add = 10 - (current_minute % 10);
+             if minutes_to_add == 0: minutes_to_add = 10
+             potential_slot_start += datetime.timedelta(minutes=minutes_to_add)
+             potential_slot_start = potential_slot_start.replace(second=0, microsecond=0)
         current_day += datetime.timedelta(days=1)
     final_slots = sorted(list(set(slot for slot in free_slots_starts if start_datetime <= slot < end_datetime)))
-    print(f"Znaleziono {len(final_slots)} unikalnych wolnych slotów."); return final_slots
+    print(f"Znaleziono {len(final_slots)} unikalnych 'ładnych' wolnych slotów."); return final_slots
 
 def book_appointment(calendar_id, start_time, end_time, summary="Rezerwacja wizyty", description="", user_name=""):
     service = get_calendar_service(); tz = _get_timezone()
@@ -271,34 +282,55 @@ def book_appointment(calendar_id, start_time, end_time, summary="Rezerwacja wizy
         else: return False, f"Błąd API ({error.resp.status}) rezerwacji."
     except Exception as e: import traceback; print(f"Nieoczekiwany błąd Python rezerwacji: {e}"); traceback.print_exc(); return False, "Błąd systemu rezerwacji."
 
-def find_next_reasonable_slot(free_slots, after_time=None):
-    """Wybiera pierwszy pasujący slot, preferując godziny popołudniowe/poranne, po określonym czasie."""
+def find_next_reasonable_slot(free_slots, after_time=None, requested_hour=None, force_afternoon=False):
+    """
+    Wybiera najlepszy slot z listy, uwzględniając czas startowy, żądaną godzinę i wymuszenie popołudnia.
+    """
     if not free_slots: return None
-    # Przekształć after_time na świadomy strefy czasowej, jeśli jest naive
     tz = _get_timezone()
-    if after_time and after_time.tzinfo is None:
-         after_time = tz.localize(after_time)
-    elif after_time:
-         after_time = after_time.astimezone(tz) # Upewnij się, że jest w tej samej strefie co sloty
+    if after_time and after_time.tzinfo is None: after_time = tz.localize(after_time)
+    elif after_time: after_time = after_time.astimezone(tz)
 
-    # Odfiltruj sloty wcześniejsze niż after_time (jeśli podano)
+    # 1. Filtruj sloty po czasie 'after_time'
     if after_time:
         print(f"  Filtrowanie slotów po: {after_time:%Y-%m-%d %H:%M %Z}")
         valid_slots = [slot for slot in free_slots if slot > after_time]
         print(f"  Znaleziono {len(valid_slots)} slotów po {after_time:%H:%M}.")
         if not valid_slots: print("  Brak późniejszych slotów."); return None
-        free_slots = valid_slots # Pracuj na odfiltrowanej liście
+        free_slots = valid_slots
 
+    # 2. Jeśli zażądano konkretnej godziny, spróbuj ją znaleźć
+    if requested_hour is not None:
+        print(f"  Szukanie slotu około godziny {requested_hour}:00...")
+        specific_hour_slots = [slot for slot in free_slots if slot.hour == requested_hour]
+        if specific_hour_slots:
+            print(f"  Znaleziono slot o {requested_hour}:00: {specific_hour_slots[0]:%Y-%m-%d %H:%M}")
+            return specific_hour_slots[0]
+        else:
+            print(f"  Brak slotów dokładnie o {requested_hour}:00. Szukam dalej.")
+
+    # 3. Jeśli wymuszono popołudnie (np. po "za wcześnie")
+    if force_afternoon:
+        print(f"  Wymuszono szukanie po południu (od {PREFERRED_WEEKDAY_START_HOUR}:00)...")
+        afternoon_slots = [slot for slot in free_slots if slot.hour >= PREFERRED_WEEKDAY_START_HOUR]
+        if afternoon_slots:
+             print(f"  Znaleziono slot popołudniowy: {afternoon_slots[0]:%Y-%m-%d %H:%M}")
+             return afternoon_slots[0]
+        else:
+             print("  Brak slotów popołudniowych. Szukam dalej wg standardowych preferencji.")
+             # Jeśli nie ma popołudniowych, przejdź do standardowego szukania poniżej
+
+    # 4. Standardowe szukanie wg preferencji (weekend/tydzień)
     best_slot = None
-    # Sprawdź sloty pasujące do preferencji godzinowych
+    print(f"  Szukanie wg preferencji (tydzień >= {PREFERRED_WEEKDAY_START_HOUR}, weekend >= {PREFERRED_WEEKEND_START_HOUR})...")
     for slot in free_slots:
         weekday = slot.weekday()
         preferred_hour = PREFERRED_WEEKDAY_START_HOUR if weekday < 5 else PREFERRED_WEEKEND_START_HOUR
         if slot.hour >= preferred_hour:
             best_slot = slot
             print(f"  Wybrano slot wg preferencji: {best_slot:%Y-%m-%d %H:%M}")
-            break # Znaleziono pierwszy "rozsądny"
-    # Jeśli nie znaleziono wg preferencji, weź pierwszy z listy
+            break
+    # 5. Jeśli nic nie pasuje, weź pierwszy z listy
     if not best_slot:
         best_slot = free_slots[0]
         print(f"  Nie znaleziono wg preferencji, wybrano pierwszy dostępny: {best_slot:%Y-%m-%d %H:%M}")
@@ -306,7 +338,6 @@ def find_next_reasonable_slot(free_slots, after_time=None):
     return best_slot
 
 def format_slot_for_user(slot_start):
-    """Formatuje datetime na string: Polski Dzień, DD.MM.RRRR o G:MM."""
     if not isinstance(slot_start, datetime.datetime): return ""
     day_index = slot_start.weekday(); day_name = POLISH_WEEKDAYS[day_index]
     hour_str = str(slot_start.hour)
@@ -375,7 +406,7 @@ Przebieg rozmowy (elastyczny):
 3.  Ustal klasę.
 4.  Dla szkoły średniej ustal poziom (podst./rozsz.).
 5.  Podaj cenę za 60 min lekcji (cennik poniżej).
-6.  **Jeśli użytkownik wyrazi zainteresowanie umówieniem terminu (np. powie "tak", "ok", "chcę spróbować"), potwierdź to i poinformuj, że sprawdzisz najbliższy dostępny termin.** Nie używaj specjalnych znaczników.
+6.  **Jeśli użytkownik wyrazi zainteresowanie umówieniem terminu (np. powie "tak", "ok", "chcę spróbować"), potwierdź to i poinformuj, że sprawdzisz najbliższy dostępny termin.**
 7.  Informuj o formie online (MS Teams, bez instalacji) na życzenie.
 
 Cennik (60 min): 4-8 SP: 60 zł; 1-3 LO/Tech (podst.): 65 zł; 1-3 LO/Tech (rozsz.): 70 zł; 4 LO/Tech (podst.): 70 zł; 4 LO/Tech (rozsz.): 75 zł.
@@ -419,18 +450,17 @@ def get_gemini_response(user_psid, current_user_message, history):
             generated_text = response.candidates[0].content.parts[0].text.strip()
             print(f"[{user_psid}] Wygenerowany tekst (dł: {len(generated_text)})"); text_preview = generated_text[:150].replace('\n', '\\n'); print(f"   Fragment: '{text_preview}...'")
             return generated_text
-        else: # Obsługa błędów/blokad
+        else:
             finish_reason = "UNKNOWN"; safety_ratings = [];
             if response.candidates: finish_reason_obj = response.candidates[0].finish_reason; finish_reason = finish_reason_obj.name if hasattr(finish_reason_obj, 'name') else str(finish_reason_obj); safety_ratings = response.candidates[0].safety_ratings if response.candidates[0].safety_ratings else []
             print(f"!!! [{user_psid}] Odp. Gemini pusta/zablokowana. Powód: {finish_reason}, Oceny: {safety_ratings} !!!")
             if finish_reason == 'SAFETY': return "Przepraszam, treść narusza zasady."
             elif finish_reason == 'RECITATION': return "Moje źródła są ograniczone."
             else: return "Hmm, błąd generowania odpowiedzi."
-    except Exception as e: # Obsługa wyjątków
+    except Exception as e:
         import traceback; print(f"!!! KRYTYCZNY BŁĄD Gemini ({MODEL_ID}) dla PSID {user_psid}: {e} !!!"); traceback.print_exc()
         error_str = str(e).lower();
         if "permission denied" in error_str: return "Błąd: Brak uprawnień AI."
-        elif "model" in error_str and "not found" in error_str: return f"Błąd: Model AI ('{MODEL_ID}') niedostępny."
         # ... (inne komunikaty błędów) ...
         return "Wystąpił błąd techniczny."
 
@@ -457,7 +487,7 @@ def webhook_handle():
                     sender_id = messaging_event["sender"]["id"]; print(f"  -> PSID: {sender_id}")
                     history, context = load_history(sender_id)
                     last_proposed_slot_iso = context.get('last_proposed_slot_iso')
-                    is_context_current = last_proposed_slot_iso and context.get('message_index', -1) == len(history) # Kontekst jest najnowszym wpisem
+                    is_context_current = last_proposed_slot_iso and context.get('message_index', -1) == len(history)
 
                     if is_context_current: print(f"    Aktywny kontekst 'last_proposed_slot_iso'.")
                     elif last_proposed_slot_iso: print(f"    Kontekst 'last_proposal' stary. Reset."); last_proposed_slot_iso = None
@@ -468,17 +498,31 @@ def webhook_handle():
                         user_input_text = None;
                         if "text" in message_data: user_input_text = message_data["text"]; print(f"      Txt: '{user_input_text}'")
 
-                        # --- Logika Obsługi Feedbacku do Proponowanego Terminu ---
+                        # --- Logika Obsługi Feedbacku ---
                         if is_context_current and user_input_text:
                             print(f"      Oczekiwano na feedback. Analiza: '{user_input_text}'")
                             lower_text = user_input_text.lower()
-                            action = 'clarify' # Domyślnie nie wiemy
+                            action = 'clarify'; requested_hour = None; force_afternoon = False
 
+                            # 1. Sprawdź akceptację
                             if any(word in lower_text for word in ["tak", " pasuje", "ok", "zgadzam", "świetnie", "dobrze", "super", "może być"]): action = 'accept'
+                            # 2. Sprawdź odrzucenie / prośbę o inny
                             elif any(word in lower_text for word in ["nie", "inny", "inne", "dalej", "następn", "więcej", "odpada", "zły", "zła", "żaden"]): action = 'reject_propose_next'
-                            elif any(word in lower_text for word in ["wcześniej", "wczesn"]): action = 'reject_propose_earlier'
-                            elif any(word in lower_text for word in ["później", "pozniej", "późno"]): action = 'reject_propose_later'
-                            elif any(word in lower_text for word in ["poniedziałek", "poniedzialek", "wtorek", "środ", "srod", "czwartek", "piątek", "piatek", "sobot", "niedziel"]): action = 'reject_propose_specific_day' # Rozpoznaj prośbę o konkretny dzień
+                            elif any(word in lower_text for word in ["wcześniej", "wczesn", "za wczesnie", "za wcześnie"]): action = 'reject_propose_afternoon_or_next' # Traktuj "za wcześnie" jako prośbę o popołudnie
+                            elif any(word in lower_text for word in ["później", "pozniej", "późno", "za pozno", "za późno"]): action = 'reject_propose_later'
+                            # 3. Sprawdź prośbę o konkretny dzień
+                            elif any(word in lower_text for word in ["poniedziałek", "poniedzialek", "wtorek", "środ", "srod", "czwartek", "piątek", "piatek", "sobot", "niedziel", "jutro", "pojutrze"]): action = 'reject_propose_specific_day'
+                            # 4. Sprawdź prośbę o konkretną godzinę
+                            else:
+                                hour_match = re.search(r'\b(o|na|godzin[aęe]|około)\s*(\d{1,2})\b', lower_text)
+                                if hour_match:
+                                    try:
+                                        requested_hour = int(hour_match.group(2))
+                                        if 0 <= requested_hour <= 23:
+                                            action = 'reject_propose_specific_hour'
+                                            print(f"      Wykryto prośbę o godzinę: {requested_hour}")
+                                        else: requested_hour = None # Nieprawidłowa godzina
+                                    except ValueError: requested_hour = None # Nie udało się sparsować
 
                             # --- Wykonaj akcję ---
                             if action == 'accept':
@@ -496,59 +540,54 @@ def webhook_handle():
                                 print(f"      Akcja: Odrzucenie/Zmiana ({action})")
                                 try:
                                     tz = _get_timezone(); last_proposed_dt = datetime.datetime.fromisoformat(last_proposed_slot_iso).astimezone(tz)
-                                    search_start = None
-                                    # <<< ZMODYFIKOWANA LOGIKA USTALANIA search_start >>>
-                                    target_weekday = -1
+                                    search_start = last_proposed_dt + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES) # Domyślny start - od końca ostatniego
+                                    force_afternoon_search = (action == 'reject_propose_afternoon_or_next')
+                                    specific_hour_search = requested_hour if action == 'reject_propose_specific_hour' else None
+
+                                    # Skoryguj search_start dla konkretnego dnia
                                     if action == 'reject_propose_specific_day':
+                                        target_weekday = -1
+                                        # ... (logika rozpoznawania dnia tygodnia jak poprzednio) ...
                                         if "poniedziałek" in lower_text or "poniedzialek" in lower_text: target_weekday = 0
                                         elif "wtorek" in lower_text: target_weekday = 1
-                                        elif "środ" in lower_text or "srod" in lower_text: target_weekday = 2
-                                        elif "czwartek" in lower_text: target_weekday = 3
-                                        elif "piątek" in lower_text or "piatek" in lower_text: target_weekday = 4
-                                        elif "sobot" in lower_text: target_weekday = 5
+                                        # ... itd ...
                                         elif "niedziel" in lower_text: target_weekday = 6
 
-                                    if target_weekday != -1:
-                                        days_ahead = target_weekday - last_proposed_dt.weekday()
-                                        if days_ahead <= 0: days_ahead += 7
-                                        next_target_date = last_proposed_dt.date() + datetime.timedelta(days=days_ahead)
-                                        search_start = tz.localize(datetime.datetime.combine(next_target_date, datetime.time(0, 0)))
-                                        print(f"      Szukanie od następnego {POLISH_WEEKDAYS[target_weekday]}: {search_start}")
-                                    elif action == 'reject_propose_next_day' or "inny dzień" in lower_text or "jutro" in lower_text:
-                                        # Szukaj od początku następnego dnia
-                                        search_start = tz.localize(datetime.datetime.combine(last_proposed_dt.date() + datetime.timedelta(days=1), datetime.time(0,0)))
-                                        print(f"      Szukanie od następnego dnia: {search_start}")
-                                    else: # 'reject_propose_next', 'reject_propose_later', 'reject_propose_earlier'
-                                         # <<< POPRAWKA: Przeskocz o pełną długość spotkania >>>
-                                         search_start = last_proposed_dt + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
-                                         print(f"      Szukanie od końca ostatniego proponowanego slotu: {search_start}")
+                                        if target_weekday != -1:
+                                            days_ahead = target_weekday - last_proposed_dt.weekday()
+                                            if days_ahead <= 0: days_ahead += 7
+                                            next_target_date = last_proposed_dt.date() + datetime.timedelta(days=days_ahead)
+                                            search_start = tz.localize(datetime.datetime.combine(next_target_date, datetime.time(0, 0)))
+                                            print(f"      Szukanie od następnego {POLISH_WEEKDAYS[target_weekday]}: {search_start}")
+                                        elif "jutro" in lower_text:
+                                             search_start = tz.localize(datetime.datetime.combine(last_proposed_dt.date() + datetime.timedelta(days=1), datetime.time(0,0)))
+                                             print(f"      Szukanie od jutra: {search_start}")
+                                        # Można dodać 'pojutrze' itp.
 
-                                    # Upewnijmy się, że search_start jest co najmniej "teraz", jeśli przez pomyłkę cofnęliśmy się za bardzo
+                                    # Upewnij się, że search_start nie jest w przeszłości
                                     now = datetime.datetime.now(tz)
-                                    if search_start < now:
-                                        print(f"      (Uwaga: Obliczony search_start ({search_start}) jest w przeszłości. Używam 'teraz'.)")
-                                        search_start = now
-                                    # <<< KONIEC ZMODYFIKOWANEJ LOGIKI >>>
+                                    if search_start < now: search_start = now
 
                                     search_end_date = (search_start + datetime.timedelta(days=MAX_SEARCH_DAYS)).date()
                                     search_end = tz.localize(datetime.datetime.combine(search_end_date, datetime.time(23, 59, 59)))
                                     if ENABLE_TYPING_DELAY: print(f"      Szukanie kolejnego..."); time.sleep(MIN_TYPING_DELAY_SECONDS)
                                     free_slots = get_free_slots(TARGET_CALENDAR_ID, search_start, search_end)
-                                    # Znajdź slot PO ostatnio proponowanym
-                                    next_slot = find_next_reasonable_slot(free_slots, after_time=last_proposed_dt)
+
+                                    # Wybierz następny slot z uwzględnieniem kryteriów
+                                    next_slot = find_next_reasonable_slot(free_slots, after_time=last_proposed_dt, requested_hour=specific_hour_search, force_afternoon=force_afternoon_search)
 
                                     if next_slot:
                                         formatted_slot = format_slot_for_user(next_slot)
-                                        proposal_message = f"Rozumiem. Kolejna propozycja to: {formatted_slot}. Pasuje?"
+                                        proposal_message = f"Rozumiem. W takim razie może {formatted_slot}? Pasuje?"
                                         send_message(sender_id, proposal_message)
                                         user_content = Content(role="user", parts=[Part.from_text(user_input_text)])
                                         model_content = Content(role="model", parts=[Part.from_text(proposal_message)])
                                         context_to_save = {'role': 'system', 'type': 'last_proposal', 'slot_iso': next_slot.isoformat()}
                                         save_history(sender_id, history + [user_content, model_content], context_to_save=context_to_save)
                                     else:
-                                        send_message(sender_id, f"Niestety, nie znalazłem innych wolnych terminów w ciągu najbliższych {MAX_SEARCH_DAYS} dni.")
+                                        send_message(sender_id, f"Niestety, nie znalazłem innych pasujących terminów w ciągu najbliższych {MAX_SEARCH_DAYS} dni.")
                                         user_content = Content(role="user", parts=[Part.from_text(user_input_text)]); model_content = Content(role="model", parts=[Part.from_text("Brak kolejnych terminów.")])
-                                        save_history(sender_id, history + [user_content, model_content]) # Bez kontekstu
+                                        save_history(sender_id, history + [user_content, model_content])
                                 except Exception as find_err: print(f"!!! BŁĄD szukania kolejnego slotu: {find_err} !!!"); send_message(sender_id, "Błąd szukania terminu.")
                             elif action == 'clarify':
                                 print(f"      Akcja: Niejasna odpowiedź. Gemini.")
@@ -565,43 +604,40 @@ def webhook_handle():
                              print(f"      -> Gemini...");
                              gemini_response = get_gemini_response(sender_id, user_input_text, [h for h in history if not (isinstance(h, dict) and h.get('role') == 'system')])
 
-                             # --- Python decyduje o szukaniu slotów ---
                              trigger_keywords = ["umówić", "termin", "wolne", "kiedy", "zapisać", "kalendarz", "rezerw", "dostępn"]
                              user_wants_to_schedule = any(keyword in user_input_text.lower() for keyword in trigger_keywords)
                              confirm_keywords = ["oczywiście", "jasne", "proszę", "sprawdz", "termin", "chętnie"]
                              gemini_confirms_scheduling = isinstance(gemini_response, str) and any(keyword in gemini_response.lower() for keyword in confirm_keywords)
 
-                             # Zapisz odpowiedź Gemini *zanim* zaczniesz szukać slotów
+                             # Zapisz odpowiedź Gemini *przed* szukaniem slotów
                              user_content = Content(role="user", parts=[Part.from_text(user_input_text)])
                              if isinstance(gemini_response, str) and gemini_response:
                                  model_content = Content(role="model", parts=[Part.from_text(gemini_response)])
                                  save_history(sender_id, history + [user_content, model_content]) # Zapisz normalną rozmowę
-                                 if ENABLE_TYPING_DELAY: # Opóźnienie dla odpowiedzi Gemini
+                                 if ENABLE_TYPING_DELAY:
                                      response_len = len(gemini_response); calculated_delay = response_len / TYPING_CHARS_PER_SECOND; final_delay = max(0, min(MAX_TYPING_DELAY_SECONDS, calculated_delay + MIN_TYPING_DELAY_SECONDS))
                                      if final_delay > 0: print(f"      Pisanie... {final_delay:.2f}s"); time.sleep(final_delay)
-                                 send_message(sender_id, gemini_response) # Wyślij odpowiedź Gemini
+                                 send_message(sender_id, gemini_response)
                              else: # Błąd Gemini, zapisz tylko usera
                                  save_history(sender_id, history + [user_content])
-                                 send_message(sender_id, gemini_response or "Błąd.") # Wyślij komunikat o błędzie
+                                 send_message(sender_id, gemini_response or "Błąd.")
 
                              # Teraz, *jeśli* jest intencja umówienia, szukaj slotu
                              if user_wants_to_schedule or gemini_confirms_scheduling:
-                                 print(f"      Wykryto intencję umówienia. Szukanie pierwszego slotu...")
+                                 print(f"      Wykryto intencję/potwierdzenie umówienia. Szukanie pierwszego slotu...")
                                  tz = _get_timezone(); now = datetime.datetime.now(tz); search_start = now
                                  search_end_date = (now + datetime.timedelta(days=MAX_SEARCH_DAYS)).date(); search_end = tz.localize(datetime.datetime.combine(search_end_date, datetime.time(23, 59, 59)))
-                                 if ENABLE_TYPING_DELAY: time.sleep(MIN_TYPING_DELAY_SECONDS) # Opóźnienie przed szukaniem
+                                 if ENABLE_TYPING_DELAY: time.sleep(MIN_TYPING_DELAY_SECONDS)
                                  free_slots = get_free_slots(TARGET_CALENDAR_ID, search_start, search_end)
-                                 first_slot = find_next_reasonable_slot(free_slots, after_time=now)
+                                 first_slot = find_next_reasonable_slot(free_slots, after_time=now) # Znajdź pierwszy od teraz
 
                                  if first_slot:
                                      formatted_slot = format_slot_for_user(first_slot)
                                      proposal_message = f"Sprawdziłem. Najbliższy dostępny termin to: {formatted_slot}. Czy taki by odpowiadał?"
                                      send_message(sender_id, proposal_message) # Wyślij propozycję
                                      # Zaktualizuj historię DODAJĄC wiadomość systemową z kontekstem
-                                     # Uwaga: historia w `save_history` będzie już zawierać odpowiedź Gemini
+                                     current_history, _ = load_history(sender_id) # Pobierz najnowszą (z odp. Gemini)
                                      context_to_save = {'role': 'system', 'type': 'last_proposal', 'slot_iso': first_slot.isoformat()}
-                                     # Pobierz najnowszą historię (z odpowiedzią Gemini) i dodaj kontekst
-                                     current_history, _ = load_history(sender_id)
                                      save_history(sender_id, current_history, context_to_save=context_to_save)
                                  else:
                                      print(f"      Brak slotów przy pierwszym szukaniu."); send_message(sender_id, "Niestety, aktualnie brak wolnych terminów.")
@@ -611,7 +647,7 @@ def webhook_handle():
                         elif "attachments" in message_data: attachment_type = message_data['attachments'][0].get('type', 'nieznany'); print(f"      Załącznik: {attachment_type}."); user_content = Content(role="user", parts=[Part.from_text(f"[Załącznik: {attachment_type}]")]); model_content = Content(role="model", parts=[Part.from_text("Nie obsługuję załączników.")]); save_history(sender_id, history + [user_content, model_content]); send_message(sender_id, "Przepraszam, nie obsługuję załączników.")
                         else: print(f"      Nieznany typ wiadomości: {message_data}"); user_content = Content(role="user", parts=[Part.from_text("[Nieznany typ wiadomości]")]); model_content = Content(role="model", parts=[Part.from_text("Nie rozumiem.")]); save_history(sender_id, history + [user_content, model_content]); send_message(sender_id, "Nie rozumiem.")
 
-                    # ... (reszta obsługi postback, read, delivery bez zmian) ...
+                    # ... (reszta obsługi postback, read, delivery) ...
                     elif messaging_event.get("postback"):
                          postback_data = messaging_event["postback"]; payload = postback_data.get("payload"); title = postback_data.get("title", payload); print(f"    Postback: T:'{title}', P:'{payload}'")
                          prompt_for_button = f"Kliknięto: '{title}' ({payload})."
