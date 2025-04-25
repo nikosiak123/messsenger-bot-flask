@@ -515,11 +515,19 @@ def webhook_handle():
                                         search_start = tz.localize(datetime.datetime.combine(next_target_date, datetime.time(0, 0)))
                                         print(f"      Szukanie od następnego {POLISH_WEEKDAYS[target_weekday]}: {search_start}")
                                     elif action == 'reject_propose_next_day' or "inny dzień" in lower_text or "jutro" in lower_text:
+                                        # Szukaj od początku następnego dnia
                                         search_start = tz.localize(datetime.datetime.combine(last_proposed_dt.date() + datetime.timedelta(days=1), datetime.time(0,0)))
                                         print(f"      Szukanie od następnego dnia: {search_start}")
                                     else: # 'reject_propose_next', 'reject_propose_later', 'reject_propose_earlier'
-                                         search_start = last_proposed_dt + datetime.timedelta(minutes=1) # Zacznij tuż po ostatnim
-                                         print(f"      Szukanie od końca ostatniej propozycji: {search_start}")
+                                         # <<< POPRAWKA: Przeskocz o pełną długość spotkania >>>
+                                         search_start = last_proposed_dt + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+                                         print(f"      Szukanie od końca ostatniego proponowanego slotu: {search_start}")
+
+                                    # Upewnijmy się, że search_start jest co najmniej "teraz", jeśli przez pomyłkę cofnęliśmy się za bardzo
+                                    now = datetime.datetime.now(tz)
+                                    if search_start < now:
+                                        print(f"      (Uwaga: Obliczony search_start ({search_start}) jest w przeszłości. Używam 'teraz'.)")
+                                        search_start = now
                                     # <<< KONIEC ZMODYFIKOWANEJ LOGIKI >>>
 
                                     search_end_date = (search_start + datetime.timedelta(days=MAX_SEARCH_DAYS)).date()
