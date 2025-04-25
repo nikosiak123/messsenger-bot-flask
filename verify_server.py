@@ -67,7 +67,6 @@ def ensure_dir(directory):
         if e.errno != errno.EEXIST: print(f"!!! Błąd tworzenia katalogu {directory}: {e} !!!"); raise
 
 # --- Funkcja do pobierania danych profilu użytkownika ---
-# (Pełna wersja, taka jak dostarczona przez Ciebie)
 def get_user_profile(psid):
     if not PAGE_ACCESS_TOKEN or PAGE_ACCESS_TOKEN == "EACNAHFzEhkUBO7nbFAtYvfPWbEht1B3chQqWLx76Ljg2ekdbJYoOrnpjATqhS0EZC8S0q8a49hEZBaZByZCaj5gr1z62dAaMgcZA1BqFOruHfFo86EWTbI3S9KL59oxFWfZCfCjwbQra9lY5of1JVnj2c9uFJDhIpWlXxLLao9Cv8JKssgs3rEDxIJBRr26HgUewZDZD" or len(PAGE_ACCESS_TOKEN) < 50:
          print(f"!!! [{psid}] Brak/nieprawidłowy PAGE_ACCESS_TOKEN. Profil niepobrany."); return None
@@ -92,7 +91,6 @@ def get_user_profile(psid):
     except Exception as e: import traceback; print(f"!!! Niespodziewany BŁĄD profilu {psid}: {e} !!!"); traceback.print_exc(); return None
 
 # --- Funkcja do odczytu historii z pliku JSON ---
-# (Bez zmian)
 def load_history(user_psid):
     filepath = os.path.join(HISTORY_DIR, f"{user_psid}.json"); history = []
     if not os.path.exists(filepath): return history
@@ -116,7 +114,6 @@ def load_history(user_psid):
     except Exception as e: print(f"!!! BŁĄD [{user_psid}] wczytywania historii: {e} !!!"); return []
 
 # --- Funkcja do zapisu historii do pliku JSON ---
-# (Bez zmian)
 def save_history(user_psid, history):
     ensure_dir(HISTORY_DIR); filepath = os.path.join(HISTORY_DIR, f"{user_psid}.json"); temp_filepath = f"{filepath}.tmp"
     history_data = []
@@ -124,7 +121,6 @@ def save_history(user_psid, history):
         max_messages_to_save = MAX_HISTORY_TURNS * 2
         history_to_process = history[-max_messages_to_save:] if len(history) > max_messages_to_save else history
         if len(history) > max_messages_to_save: print(f"[{user_psid}] Historia przycięta DO ZAPISU: {len(history_to_process)} wiad.")
-
         for msg in history_to_process:
             if isinstance(msg, Content) and hasattr(msg, 'role') and msg.role in ('user', 'model') and hasattr(msg, 'parts') and isinstance(msg.parts, list):
                 parts_data = [{'text': part.text} for part in msg.parts if isinstance(part, Part) and hasattr(part, 'text')]
@@ -141,7 +137,6 @@ def save_history(user_psid, history):
             except OSError as remove_e: print(f"    Nie można usunąć {temp_filepath}: {remove_e}")
 
 # --- Inicjalizacja Vertex AI ---
-# (Bez zmian)
 gemini_model = None
 try:
     print(f"Inicjalizowanie Vertex AI: Projekt={PROJECT_ID}, Lokalizacja={LOCATION}")
@@ -151,7 +146,6 @@ try:
 except Exception as e: print(f"!!! KRYTYCZNY BŁĄD inicjalizacji Vertex AI: {e} !!!")
 
 # --- Funkcje wysyłania wiadomości FB ---
-# (_send_single_message - bez zmian)
 def _send_single_message(recipient_id, message_text):
     print(f"--- Wysyłanie fragm. do {recipient_id} (dł: {len(message_text)}) ---"); params = {"access_token": PAGE_ACCESS_TOKEN}
     payload = {"recipient": {"id": recipient_id}, "message": {"text": message_text}, "messaging_type": "RESPONSE"}
@@ -167,7 +161,6 @@ def _send_single_message(recipient_id, message_text):
             except json.JSONDecodeError: print(f"Odpowiedź FB (błąd, nie JSON): {e.response.text}")
         return False
 
-# (send_message - bez zmian)
 def send_message(recipient_id, full_message_text):
     if not full_message_text or not isinstance(full_message_text, str) or not full_message_text.strip(): print(f"[{recipient_id}] Pominięto pustą wiadomość."); return
     message_len = len(full_message_text); print(f"[{recipient_id}] Przygotowanie wiad. (dł: {message_len}).")
@@ -194,7 +187,6 @@ def send_message(recipient_id, full_message_text):
             if i < num_chunks - 1: print(f"[{recipient_id}] Oczekiwanie {MESSAGE_DELAY_SECONDS}s..."); time.sleep(MESSAGE_DELAY_SECONDS)
         print(f"--- [{recipient_id}] Zakończono wysyłanie {send_success_count}/{num_chunks} fragm. ---")
 
-# (send_quick_replies - bez zmian)
 def send_quick_replies(recipient_id, text, quick_replies_list):
     if not PAGE_ACCESS_TOKEN or PAGE_ACCESS_TOKEN == "EACNAHFzEhkUBO7nbFAtYvfPWbEht1B3chQqWLx76Ljg2ekdbJYoOrnpjATqhS0EZC8S0q8a49hEZBaZByZCaj5gr1z62dAaMgcZA1BqFOruHfFo86EWTbI3S9KL59oxFWfZCfCjwbQra9lY5of1JVnj2c9uFJDhIpWlXxLLao9Cv8JKssgs3rEDxIJBRr26HgUewZDZD" or len(PAGE_ACCESS_TOKEN) < 50: print(f"!!! [{recipient_id}] Brak TOKENA. Nie można wysłać QR."); return False
     if not quick_replies_list: print(f"[{recipient_id}] Brak QR. Wysyłanie tekstu."); return _send_single_message(recipient_id, text)
@@ -219,7 +211,7 @@ def send_quick_replies(recipient_id, text, quick_replies_list):
         return False
     except Exception as e: print(f"!!! Niespodziewany BŁĄD wysyłania QR do {recipient_id}: {e} !!!"); return False
 
-# --- INSTRUKCJA SYSTEMOWA (Zaktualizowana o ograniczenie emotek i akcję kalendarza) ---
+# --- INSTRUKCJA SYSTEMOWA (Przywrócona, ale z obsługą akcji kalendarza) ---
 # TODO: Zmień [Nazwa Firmy], [Twój Numer], [Twój Email]
 SYSTEM_INSTRUCTION_TEXT = """Jesteś profesjonalnym i uprzejmym asystentem obsługi klienta reprezentującym centrum 'Zakręcone Korepetycje', specjalizujące się w korepetycjach online z matematyki, języka angielskiego i języka polskiego dla uczniów od 4 klasy SP do matury (poziom podstawowy i rozszerzony).
 
@@ -237,7 +229,7 @@ Przebieg rozmowy (elastyczny):
 Cennik (60 min): 4-8 SP: 60 zł; 1-3 LO/Tech (podst.): 65 zł; 1-3 LO/Tech (rozsz.): 70 zł; 4 LO/Tech (podst.): 70 zł; 4 LO/Tech (rozsz.): 75 zł.
 
 **Obsługa Umawiania Terminów:**
-*   Jeśli użytkownik pyta o terminy, rezerwację, kalendarz (np. "Chcę umówić wizytę", "Kiedy macie wolne?"), **NIE pytaj o datę**, odpowiedz **TYLKO** znacznikiem: `[ACTION: FIND_SLOTS]`
+*   Jeśli użytkownik pyta o terminy, rezerwację, kalendarz (np. "Chcę umówić wizytę", "Kiedy macie wolne?"), **NIE pytaj o datę**, odpowiedz **TYLKO I WYŁĄCZNIE specjalnym znacznikiem:** `[ACTION: FIND_SLOTS]`
 *   Nawet jeśli poda preferencje, odpowiedz tylko `[ACTION: FIND_SLOTS]`.
 *   Używaj znacznika **TYLKO** w tym kontekście.
 
@@ -246,7 +238,6 @@ Cennik (60 min): 4-8 SP: 60 zł; 1-3 LO/Tech (podst.): 65 zł; 1-3 LO/Tech (rozs
 *   Preferuj formy bezosobowe lub "Państwo" zamiast "Pan/Pani".
 *   Rozdzielaj wywiad na krótsze wiadomości.
 *   Bądź perswazyjny, ale nie nachalny. Po odmowie zaproponuj zastanowienie się.
-*   **<<< NOWA ZASADA: W swoich odpowiedziach unikaj używania emotikonów. Zachowaj profesjonalny, ale przyjazny i rzeczowy ton komunikacji. >>>**
 *   Jeśli nie znasz odpowiedzi, poinformuj i podaj kontakt: tel. [Twój Numer], email: [Twój Email].
 *   Odpowiadaj zawsze po polsku.
 """
@@ -265,7 +256,7 @@ def get_gemini_response_or_action(user_psid, current_user_message):
     if len(full_conversation_for_save) > max_messages_to_send: print(f"[{user_psid}] Historia przycięta DO WYSLANIA: {len(history_to_send)} wiad.")
     prompt_content_with_instruction = [
         Content(role="user", parts=[Part.from_text(SYSTEM_INSTRUCTION_TEXT)]),
-        Content(role="model", parts=[Part.from_text("Rozumiem. Będę pomagał zgodnie z wytycznymi, zachowując profesjonalny ton i inicjując sprawdzanie terminów znacznikiem [ACTION: FIND_SLOTS].")]) # Potwierdzenie dla modelu
+        Content(role="model", parts=[Part.from_text("Rozumiem. Będę pomagał zgodnie z wytycznymi, inicjując sprawdzanie terminów znacznikiem [ACTION: FIND_SLOTS].")]) # Krótsze potwierdzenie
     ] + history_to_send
     print(f"\n--- [{user_psid}] Zawartość do Gemini ({MODEL_ID}) ---") # Logowanie
     for i, content in enumerate(prompt_content_with_instruction): role = content.role; raw_text = content.parts[0].text; text_fragment = raw_text[:150].replace('\n', '\\n'); text_to_log = text_fragment + "..." if len(raw_text) > 150 else text_fragment; print(f"  [{i}] Rola: {role}, Text: '{text_to_log}'")
@@ -277,11 +268,15 @@ def get_gemini_response_or_action(user_psid, current_user_message):
         generated_text = ""
         if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
             generated_text = response.candidates[0].content.parts[0].text.strip()
-            if generated_text == "[ACTION: FIND_SLOTS]": # Sprawdzenie akcji
-                print(f"[{user_psid}] Gemini -> Akcja: FIND_SLOTS"); save_history(user_psid, full_conversation_for_save); return "[ACTION: FIND_SLOTS]"
+            # <<< ZMODYFIKOWANA LOGIKA: Sprawdzenie ZAWARTOSCI znacznika >>>
+            if "[ACTION: FIND_SLOTS]" in generated_text:
+                print(f"[{user_psid}] Gemini -> Tekst zawiera akcję FIND_SLOTS: '{generated_text}'")
+                save_history(user_psid, full_conversation_for_save) # Zapisz do wiad. użytkownika
+                return "[ACTION: FIND_SLOTS]" # Zwróć TYLKO znacznik
+            # <<< Koniec modyfikacji >>>
             print(f"[{user_psid}] Wygenerowany tekst (dł: {len(generated_text)})"); text_preview = generated_text[:150].replace('\n', '\\n'); print(f"   Fragment: '{text_preview}...'")
             model_content = Content(role="model", parts=[Part.from_text(generated_text)]); final_history_to_save = full_conversation_for_save + [model_content]
-            max_messages_to_save = MAX_HISTORY_TURNS * 2 # Przycinanie DO ZAPISU
+            max_messages_to_save = MAX_HISTORY_TURNS * 2
             if len(final_history_to_save) > max_messages_to_save: final_history_to_save = final_history_to_save[-max_messages_to_save:]; print(f"[{user_psid}] Historia przycięta DO ZAPISU: {len(final_history_to_save)} wiad.")
             save_history(user_psid, final_history_to_save); return generated_text
         else: # Obsługa błędów/blokad
@@ -302,7 +297,6 @@ def get_gemini_response_or_action(user_psid, current_user_message):
         return "Wystąpił nieoczekiwany błąd techniczny."
 
 # --- Obsługa Weryfikacji Webhooka (GET) ---
-# (Bez zmian)
 @app.route('/webhook', methods=['GET'])
 def webhook_verification():
     print("--- Otrzymano GET weryfikację ---"); hub_mode = request.args.get('hub.mode'); hub_token = request.args.get('hub.verify_token'); hub_challenge = request.args.get('hub.challenge')
@@ -311,7 +305,6 @@ def webhook_verification():
     else: print("Weryfikacja GET FAILED."); return Response("Verification failed", status=403, mimetype='text/plain')
 
 # --- Główna Obsługa Webhooka (POST) ---
-# (Logika zintegrowana z kalendarzem)
 @app.route('/webhook', methods=['POST'])
 def webhook_handle():
     print("\n------------------------------------------"); print(f"--- {datetime.datetime.now()} Otrzymano POST ---")
@@ -339,7 +332,7 @@ def webhook_handle():
                             try:
                                 tz = _get_timezone(); start_time = datetime.datetime.fromisoformat(slot_iso_string).astimezone(tz); end_time = start_time + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
                                 print(f"      Wybrano slot: {start_time.strftime('%Y-%m-%d %H:%M %Z')}")
-                                user_profile = get_user_profile(sender_id); user_name = user_profile.get('first_name', '') if user_profile else '' # Pobierz imię
+                                user_profile = get_user_profile(sender_id); user_name = user_profile.get('first_name', '') if user_profile else ''
                                 if ENABLE_TYPING_DELAY: time.sleep(MIN_TYPING_DELAY_SECONDS)
                                 success, message_to_user = book_appointment(TARGET_CALENDAR_ID, start_time, end_time, summary=f"Rezerwacja FB Bot", description=f"PSID: {sender_id}\nImię: {user_name}", user_name=user_name)
                                 send_message(sender_id, message_to_user)
@@ -350,8 +343,8 @@ def webhook_handle():
                         # --- Jeśli nie rezerwacja, a jest tekst -> Gemini ---
                         elif user_input_text:
                              print(f"      Przekazanie do Gemini..."); gemini_output = get_gemini_response_or_action(sender_id, user_input_text)
-                             # <<< Logika Akcji FIND_SLOTS >>>
-                             if gemini_output == "[ACTION: FIND_SLOTS]":
+                             # <<< Logika Akcji FIND_SLOTS (z poprawnym if/elif) >>>
+                             if gemini_output == "[ACTION: FIND_SLOTS]": # Sprawdź, czy *dokładnie* to zwrócono
                                  print(f"      Akcja: FIND_SLOTS"); tz = _get_timezone(); now = datetime.datetime.now(tz); search_start = now
                                  search_end_date = (now + datetime.timedelta(days=7)).date(); search_end = tz.localize(datetime.datetime.combine(search_end_date, datetime.time(23, 59, 59)))
                                  if ENABLE_TYPING_DELAY: print(f"      Symulacja szukania..."); time.sleep(MIN_TYPING_DELAY_SECONDS)
@@ -365,13 +358,16 @@ def webhook_handle():
                                      send_quick_replies(sender_id, "Oto kilka najbliższych wolnych terminów:", replies)
                                  else: print(f"      Brak slotów do {search_end_date}."); send_message(sender_id, "Niestety, brak wolnych terminów w najbliższym tygodniu.")
                              # <<< Koniec Logiki FIND_SLOTS >>>
-                             elif isinstance(gemini_output, str): # Normalna odpowiedź
-                                 print(f"      Otrzymano odpowiedź Gemini.");
-                                 if ENABLE_TYPING_DELAY: # Symulacja pisania
+                             elif isinstance(gemini_output, str) and gemini_output: # Normalna odpowiedź (niepusta)
+                                 print(f"      Otrzymano normalną odpowiedź Gemini.");
+                                 if ENABLE_TYPING_DELAY:
                                      response_len = len(gemini_output); calculated_delay = response_len / TYPING_CHARS_PER_SECOND; final_delay = max(0, min(MAX_TYPING_DELAY_SECONDS, calculated_delay + MIN_TYPING_DELAY_SECONDS))
                                      if final_delay > 0: print(f"      Symulacja pisania (Gemini)... {final_delay:.2f}s"); time.sleep(final_delay)
                                  send_message(sender_id, gemini_output)
-                             else: print(f"!!! [{sender_id}] Błąd z get_gemini_response_or_action."); send_message(sender_id, "Przepraszam, błąd przetwarzania.")
+                             else: # Błąd z Gemini lub pusta odpowiedź
+                                  print(f"!!! [{sender_id}] Błąd lub pusta odpowiedź z get_gemini_response_or_action.")
+                                  send_message(sender_id, gemini_output or "Przepraszam, wystąpił błąd.") # Wyślij komunikat błędu, jeśli jest
+
                         # Obsługa załączników
                         elif "attachments" in message_data: attachment_type = message_data['attachments'][0].get('type', 'nieznany'); print(f"      Odebrano załącznik: {attachment_type}."); send_message(sender_id, "Przepraszam, nie obsługuję załączników.")
                         else: print(f"      Odebrano nieznany typ wiadomości: {message_data}"); send_message(sender_id, "Otrzymałem wiadomość, ale nie wiem co z nią zrobić.")
