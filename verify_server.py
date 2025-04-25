@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# verify_server.py (pełny, połączony kod z Pythonem interpretującym feedback v2)
+# verify_server.py (połączony kod z AI wybierającym i proponującym termin)
 
 from flask import Flask, request, Response
 import os
@@ -54,9 +54,10 @@ APPOINTMENT_DURATION_MINUTES = 60
 WORK_START_HOUR = 7
 WORK_END_HOUR = 22
 TARGET_CALENDAR_ID = 'f19e189826b9d6e36950da347ac84d5501ecbd6bed0d76c8641be61a67749c67@group.calendar.google.com'
-PREFERRED_WEEKDAY_START_HOUR = 16 # Preferowany start w tygodniu
-PREFERRED_WEEKEND_START_HOUR = 10 # Preferowany start w weekend
-MAX_SEARCH_DAYS = 14 # Jak daleko w przyszłość szukać kolejnych terminów
+PREFERRED_WEEKDAY_START_HOUR = 16
+PREFERRED_WEEKEND_START_HOUR = 10
+MAX_SEARCH_DAYS = 14
+MAX_SLOTS_FOR_AI = 15 # Ile max slotów przekazać AI do wyboru
 
 # --- Inicjalizacja Zmiennych Globalnych dla Kalendarza ---
 _calendar_service = None
@@ -74,6 +75,11 @@ except locale.Error:
 # =====================================================================
 # === FUNKCJE POMOCNICZE ==============================================
 # =====================================================================
+# (Funkcje ensure_dir, get_user_profile, load_history, save_history, _get_timezone,
+#  get_calendar_service, parse_event_time, get_free_slots, book_appointment,
+#  format_slot_for_user - BEZ ZMIAN od ostatniej wersji)
+# Dodano funkcję do formatowania listy slotów dla AI
+# Usunięto find_next_reasonable_slot, bo AI będzie wybierać
 
 def ensure_dir(directory):
     try: os.makedirs(directory); print(f"Utworzono katalog: {directory}")
@@ -205,7 +211,6 @@ def get_free_slots(calendar_id, start_datetime, end_datetime):
         events = events_result.get('items', [])
     except HttpError as error: print(f'Błąd API pobierania wydarzeń: {error}'); return []
     except Exception as e: print(f"Błąd pobierania wydarzeń: {e}"); return []
-
     free_slots_starts = []; current_day = start_datetime.date(); end_day = end_datetime.date()
     appointment_duration = datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
     while current_day <= end_day:
@@ -281,39 +286,23 @@ def book_appointment(calendar_id, start_time, end_time, summary="Rezerwacja wizy
         else: return False, f"Błąd API ({error.resp.status}) rezerwacji."
     except Exception as e: import traceback; print(f"Nieoczekiwany błąd Python rezerwacji: {e}"); traceback.print_exc(); return False, "Błąd systemu rezerwacji."
 
-def find_next_reasonable_slot(free_slots, after_time=None, requested_hour=None, force_afternoon=False):
-    if not free_slots: return None
-    tz = _get_timezone()
-    if after_time and after_time.tzinfo is None: after_time = tz.localize(after_time)
-    elif after_time: after_time = after_time.astimezone(tz)
+# ZMIANA: Ta funkcja nie jest już potrzebna, AI będzie wybierać
+# def find_next_reasonable_slot(...)
 
-    if after_time:
-        print(f"  Filtrowanie slotów po: {after_time:%Y-%m-%d %H:%M %Z}")
-        valid_slots = [slot for slot in free_slots if slot > after_time]
-        print(f"  Znaleziono {len(valid_slots)} slotów po {after_time:%H:%M}.")
-        if not valid_slots: print("  Brak późniejszych slotów."); return None
-        free_slots = valid_slots
+# ZMIANA: Funkcja formatująca sloty dla AI
+def format_slots_for_ai(slots):
+    """Formatuje listę slotów datetime na tekst dla AI, zawierający ISO string."""
+    if not slots: return "Brak dostępnych terminów."
+    formatted_list = ["Dostępne terminy (wybierz jeden i zaproponuj, dołączając jego ISO string w formacie [SLOT_ISO:...]):"]
+    for slot in slots:
+        iso_str = slot.isoformat()
+        day_name = POLISH_WEEKDAYS[slot.weekday()]
+        hour_str = str(slot.hour)
+        readable_part = f"{day_name}, {slot.strftime(f'%d.%m.%Y o {hour_str}:%M')}"
+        formatted_list.append(f"- [SLOT_ISO:{iso_str}] {readable_part}")
+    return "\n".join(formatted_list)
 
-    if requested_hour is not None:
-        print(f"  Szukanie slotu około godziny {requested_hour}:00...")
-        specific_hour_slots = [slot for slot in free_slots if slot.hour == requested_hour]
-        if specific_hour_slots: print(f"  Znaleziono slot o {requested_hour}:00: {specific_hour_slots[0]:%Y-%m-%d %H:%M}"); return specific_hour_slots[0]
-        else: print(f"  Brak slotów o {requested_hour}:00. Szukam dalej.")
-
-    if force_afternoon:
-        print(f"  Wymuszono szukanie po południu (od {PREFERRED_WEEKDAY_START_HOUR}:00)...")
-        afternoon_slots = [slot for slot in free_slots if slot.hour >= PREFERRED_WEEKDAY_START_HOUR]
-        if afternoon_slots: print(f"  Znaleziono slot popołudniowy: {afternoon_slots[0]:%Y-%m-%d %H:%M}"); return afternoon_slots[0]
-        else: print("  Brak slotów popołudniowych. Szukam dalej.")
-
-    best_slot = None; print(f"  Szukanie wg preferencji (tydzień >= {PREFERRED_WEEKDAY_START_HOUR}, weekend >= {PREFERRED_WEEKEND_START_HOUR})...")
-    for slot in free_slots:
-        weekday = slot.weekday(); preferred_hour = PREFERRED_WEEKDAY_START_HOUR if weekday < 5 else PREFERRED_WEEKEND_START_HOUR
-        if slot.hour >= preferred_hour: best_slot = slot; print(f"  Wybrano slot wg preferencji: {best_slot:%Y-%m-%d %H:%M}"); break
-    if not best_slot and free_slots: best_slot = free_slots[0]; print(f"  Nie znaleziono wg preferencji, wybrano pierwszy: {best_slot:%Y-%m-%d %H:%M}")
-    return best_slot
-
-def format_slot_for_user(slot_start):
+def format_slot_for_user(slot_start): # Ta funkcja zostaje
     if not isinstance(slot_start, datetime.datetime): return ""
     day_index = slot_start.weekday(); day_name = POLISH_WEEKDAYS[day_index]
     hour_str = str(slot_start.hour)
@@ -371,75 +360,138 @@ def send_message(recipient_id, full_message_text):
             if i < num_chunks - 1: print(f"[{recipient_id}] Oczekiwanie {MESSAGE_DELAY_SECONDS}s..."); time.sleep(MESSAGE_DELAY_SECONDS)
         print(f"--- [{recipient_id}] Zakończono wysyłanie {send_success_count}/{num_chunks} fragm. ---")
 
-# --- INSTRUKCJA SYSTEMOWA (dla podejścia Python interpretuje feedback) ---
-SYSTEM_INSTRUCTION_TEXT = """Jesteś profesjonalnym i uprzejmym asystentem obsługi klienta reprezentującym centrum 'Zakręcone Korepetycje', specjalizujące się w korepetycjach online z matematyki, języka angielskiego i języka polskiego dla uczniów od 4 klasy SP do matury (poziom podstawowy i rozszerzony).
+# --- INSTRUKCJA SYSTEMOWA (dla AI wybierającego termin) ---
+SYSTEM_INSTRUCTION_TEXT_PROPOSE = """Jesteś profesjonalnym asystentem klienta 'Zakręcone Korepetycje'. Twoim zadaniem jest przeanalizowanie historii rozmowy i listy dostępnych terminów, a następnie wybranie **jednego**, najbardziej odpowiedniego terminu i zaproponowanie go użytkownikowi.
 
-Twoim głównym celem jest zachęcanie do skorzystania z naszych usług i **umówienia się na pierwszą lekcję próbną** (płatną zgodnie z cennikiem).
+**Kontekst:** Rozmawiasz o korepetycjach online (matematyka, j. polski, j. angielski, kl. 4 SP - matura). Użytkownik wyraził zainteresowanie umówieniem pierwszej lekcji próbnej (płatnej wg cennika).
 
-Przebieg rozmowy (elastyczny):
-1.  Przywitaj się i zapytaj, w czym możesz pomóc w kwestii korepetycji.
-2.  Ustal przedmiot.
-3.  Ustal klasę.
-4.  Dla szkoły średniej ustal poziom (podst./rozsz.).
-5.  Podaj cenę za 60 min lekcji (cennik poniżej).
-6.  **Jeśli użytkownik wyrazi zainteresowanie umówieniem terminu (np. powie "tak", "ok", "chcę spróbować"), potwierdź to i poinformuj, że sprawdzisz najbliższy dostępny termin.** System (kod Pythona) zajmie się resztą.
-7.  Informuj o formie online (MS Teams, bez instalacji) na życzenie.
+**Cennik (60 min):** 4-8 SP: 60 zł; 1-3 LO/Tech(P): 65 zł; 1-3 LO/Tech(R): 70 zł; 4 LO/Tech(P): 70 zł; 4 LO/Tech(R): 75 zł.
 
-Cennik (60 min): 4-8 SP: 60 zł; 1-3 LO/Tech (podst.): 65 zł; 1-3 LO/Tech (rozsz.): 70 zł; 4 LO/Tech (podst.): 70 zł; 4 LO/Tech (rozsz.): 75 zł.
+**Dostępne terminy:**
+{available_slots_text}
 
-**Obsługa Feedbacku do Terminu:**
-*   Gdy system zaproponuje konkretny termin, a użytkownik odpowie (np. "za wcześnie", "pasuje", "może inny dzień"), **Twoim zadaniem jest tylko zareagowanie konwersacyjnie**.
-*   Jeśli użytkownik akceptuje, powiedz np. "Świetnie!" lub "Doskonale!".
-*   Jeśli odrzuca lub prosi o zmianę, powiedz np. "Rozumiem, sprawdzę inny termin." lub "Jasne, poszukam czegoś innego.".
-*   Jeśli odpowiedź jest niejasna, poproś o doprecyzowanie, czy termin pasuje.
-*   **Nie musisz sam proponować kolejnych terminów ani analizować kalendarza.** System (kod Pythona) zrobi to automatycznie po Twojej odpowiedzi.
+**Twoje zadanie:**
+1.  Przeanalizuj historię rozmowy pod kątem ewentualnych preferencji użytkownika (np. "popołudniu", "wtorek", "po 16").
+2.  Wybierz **jeden** termin z powyższej listy "Dostępne terminy", który najlepiej pasuje do preferencji użytkownika LUB jeśli brak preferencji, wybierz termin "rozsądny" (np. popołudnie w tygodniu, okolice południa w weekend).
+3.  Sformułuj **krótką, naturalną propozycję** tego terminu, pytając użytkownika o akceptację.
+4.  **Absolutnie kluczowe:** W swojej odpowiedzi **musisz** zawrzeć identyfikator ISO wybranego terminu w specjalnym znaczniku `[SLOT_ISO:TWOJ_WYBRANY_ISO_STRING]`. Znacznik ten musi być częścią odpowiedzi, ale może być na końcu lub wpleciony w zdanie.
 
-**Ważne zasady:**
-*   **Kontynuacja po przerwie:** **ZAWSZE** analizuj historię i kontynuuj od miejsca przerwania. **NIE ZACZYNAJ OD NOWA**.
-*   Preferuj formy bezosobowe lub "Państwo".
-*   Rozdzielaj wywiad na krótsze wiadomości.
-*   Bądź perswazyjny, ale nie nachalny. Po odmowie zaproponuj zastanowienie się.
-*   Jeśli nie znasz odpowiedzi, poinformuj i podaj kontakt: tel. [Twój Numer], email: [Twój Email].
-*   Odpowiadaj zawsze po polsku.
+**Przykład dobrej odpowiedzi (jeśli wybrałeś termin z ISO '2025-05-06T16:00:00+02:00'):**
+"Znalazłem dla Państwa termin: Wtorek, 06.05.2025 o 16:00. [SLOT_ISO:2025-05-06T16:00:00+02:00] Czy taki termin by odpowiadał?"
+
+**Zasady:**
+*   Odpowiadaj po polsku.
+*   Bądź uprzejmy i profesjonalny.
+*   **Nie proponuj** terminów spoza dostarczonej listy.
+*   **Zawsze** dołączaj znacznik `[SLOT_ISO:...]` z poprawnym ISO stringiem wybranego terminu.
 """
 # ---------------------------------------------------------------------
 
-# --- Funkcja interakcji z Gemini ---
-def get_gemini_response(user_psid, current_user_message, history):
-    if not gemini_model: print(f"!!! BŁĄD [{user_psid}]: Model Gemini niezaładowany!"); return "Przepraszam, błąd AI."
-    user_content = Content(role="user", parts=[Part.from_text(current_user_message)])
+# --- INSTRUKCJA SYSTEMOWA (dla AI interpretującego feedback) ---
+SYSTEM_INSTRUCTION_TEXT_FEEDBACK = """Jesteś profesjonalnym asystentem klienta 'Zakręcone Korepetycje'. Twoim zadaniem jest zinterpretowanie odpowiedzi użytkownika na propozycję terminu lekcji próbnej.
+
+**Kontekst:** System właśnie zaproponował użytkownikowi termin. Ostatnia propozycja systemu brzmiała:
+"{last_proposal_text}"
+
+**Odpowiedź użytkownika:**
+"{user_feedback}"
+
+**Twoje zadanie:**
+Przeanalizuj odpowiedź użytkownika i zdecyduj, co należy zrobić dalej. **Odpowiedz TYLKO I WYŁĄCZNIE jednym z poniższych znaczników akcji:**
+
+*   `[ACCEPT]`: Jeśli użytkownik akceptuje proponowany termin (słowa kluczowe: tak, pasuje, ok, super, zgadzam się, dobrze, może być itp.).
+*   `[REJECT_FIND_NEXT PREFERENCE='later']`: Jeśli użytkownik odrzuca termin i chce po prostu inny/późniejszy (słowa kluczowe: nie, nie pasuje, inny, później, następny, dalej, może inny, za późno itp.).
+*   `[REJECT_FIND_NEXT PREFERENCE='afternoon']`: Jeśli użytkownik mówi, że proponowany termin jest "za wcześnie" lub prosi o termin popołudniowy.
+*   `[REJECT_FIND_NEXT PREFERENCE='next_day']`: Jeśli użytkownik prosi o inny dzień, jutro, w tygodniu (jeśli propozycja była w weekend).
+*   `[REJECT_FIND_NEXT PREFERENCE='specific_day' DAY='NAZWA_DNIA']`: Jeśli użytkownik prosi o konkretny dzień tygodnia (np. "wolałbym wtorek"). Zastąp NAZWA_DNIA polską nazwą dnia.
+*   `[REJECT_FIND_NEXT PREFERENCE='specific_hour' HOUR='GODZINA']`: Jeśli użytkownik prosi o konkretną godzinę (np. "może o 14?"). Zastąp GODZINA liczbą.
+*   `[CLARIFY]`: Jeśli odpowiedź użytkownika jest niejasna, zadaje pytanie niezwiązane z terminem lub nie da się jednoznacznie określić jego intencji.
+
+**Ważne:** Twoja odpowiedź musi być *dokładnie* jednym z powyższych znaczników, bez żadnego dodatkowego tekstu.
+"""
+# ---------------------------------------------------------------------
+
+# --- Funkcja interakcji z Gemini (proponowanie slotu) ---
+def get_gemini_slot_proposal(user_psid, history, available_slots):
+    if not gemini_model: print(f"!!! BŁĄD [{user_psid}]: Model Gemini niezaładowany!"); return None
+    if not available_slots: print(f"[{user_psid}]: Brak slotów do zaproponowania."); return None # Zwróć None jeśli lista pusta
+
+    # Przygotuj listę slotów dla AI
+    slots_text_for_ai = format_slots_for_ai(available_slots[:MAX_SLOTS_FOR_AI]) # Przekaż ograniczoną liczbę
+
+    # Przygotuj prompt
+    current_instruction = SYSTEM_INSTRUCTION_TEXT_PROPOSE.format(available_slots_text=slots_text_for_ai)
     max_messages_to_send = MAX_HISTORY_TURNS * 2
     history_to_send = history[-max_messages_to_send:] if len(history) > max_messages_to_send else history
-    if len(history) > max_messages_to_send: print(f"[{user_psid}] Historia przycięta DO WYSLANIA: {len(history_to_send)} wiad.")
-    prompt_content_with_instruction = [
-        Content(role="user", parts=[Part.from_text(SYSTEM_INSTRUCTION_TEXT)]),
-        Content(role="model", parts=[Part.from_text("Rozumiem. Będę prowadził rozmowę zgodnie z wytycznymi.")])
-    ] + history_to_send + [user_content]
-    print(f"\n--- [{user_psid}] Zawartość do Gemini ({MODEL_ID}) ---");
-    # for i, content in enumerate(prompt_content_with_instruction): role = content.role; raw_text = content.parts[0].text; text_fragment = raw_text[:80].replace('\n', '\\n'); text_to_log = text_fragment + "..." if len(raw_text) > 80 else text_fragment; print(f"  [{i}] R:{role}, T:'{text_to_log}'")
+    prompt_content = [
+        Content(role="user", parts=[Part.from_text(current_instruction)]),
+        Content(role="model", parts=[Part.from_text("Rozumiem. Wybiorę najlepszy termin z listy i zaproponuję go, dołączając znacznik [SLOT_ISO:...].")])
+    ] + history_to_send
+
+    print(f"\n--- [{user_psid}] Zawartość do Gemini ({MODEL_ID}) - Propozycja Slotu ---");
+    # Logowanie promptu...
     print(f"--- Koniec zawartości {user_psid} ---\n")
     try:
-        generation_config = GenerationConfig(temperature=0.7, top_p=0.95, top_k=40)
-        safety_settings = {HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE, HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE, HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE, HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,}
-        response = gemini_model.generate_content(prompt_content_with_instruction, generation_config=generation_config, safety_settings=safety_settings, stream=False)
-        generated_text = ""
+        generation_config = GenerationConfig(temperature=0.5, top_p=0.95, top_k=40) # Może niższa temperatura dla wyboru?
+        safety_settings = {HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE, #... itd ...
+                           HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                           HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                           HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,}
+        response = gemini_model.generate_content(prompt_content, generation_config=generation_config, safety_settings=safety_settings, stream=False)
         if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
             generated_text = response.candidates[0].content.parts[0].text.strip()
-            print(f"[{user_psid}] Wygenerowany tekst (dł: {len(generated_text)})"); text_preview = generated_text[:150].replace('\n', '\\n'); print(f"   Fragment: '{text_preview}...'")
-            return generated_text
-        else:
-            finish_reason = "UNKNOWN"; safety_ratings = [];
-            if response.candidates: finish_reason_obj = response.candidates[0].finish_reason; finish_reason = finish_reason_obj.name if hasattr(finish_reason_obj, 'name') else str(finish_reason_obj); safety_ratings = response.candidates[0].safety_ratings if response.candidates[0].safety_ratings else []
-            print(f"!!! [{user_psid}] Odp. Gemini pusta/zablokowana. Powód: {finish_reason}, Oceny: {safety_ratings} !!!")
-            if finish_reason == 'SAFETY': return "Przepraszam, treść narusza zasady."
-            elif finish_reason == 'RECITATION': return "Moje źródła są ograniczone."
-            else: return "Hmm, błąd generowania odpowiedzi."
-    except Exception as e:
-        import traceback; print(f"!!! KRYTYCZNY BŁĄD Gemini ({MODEL_ID}) dla PSID {user_psid}: {e} !!!"); traceback.print_exc()
-        error_str = str(e).lower();
-        if "permission denied" in error_str: return "Błąd: Brak uprawnień AI."
-        # ... (inne komunikaty błędów) ...
-        return "Wystąpił błąd techniczny."
+            print(f"[{user_psid}] Gemini zaproponował: '{generated_text}'")
+            # --- Walidacja odpowiedzi AI ---
+            iso_match = re.search(r"\[SLOT_ISO:([^\]]+)\]", generated_text)
+            if iso_match:
+                extracted_iso = iso_match.group(1)
+                # Sprawdź, czy wyekstrahowany ISO jest na liście dostępnych slotów
+                slot_exists = any(slot.isoformat() == extracted_iso for slot in available_slots[:MAX_SLOTS_FOR_AI])
+                if slot_exists:
+                    # Usuń znacznik z tekstu dla użytkownika
+                    text_for_user = re.sub(r"\[SLOT_ISO:[^\]]+\]", "", generated_text).strip()
+                    return text_for_user, extracted_iso # Zwróć tekst i ISO
+                else:
+                    print(f"!!! BŁĄD AI [{user_psid}]: Zaproponowany ISO '{extracted_iso}' nie ma na liście dostępnych!")
+                    return None, None # Błąd - AI wymyśliło slot
+            else:
+                print(f"!!! BŁĄD AI [{user_psid}]: Brak znacznika [SLOT_ISO:...] w odpowiedzi!")
+                return None, None # Błąd - AI nie dołączyło znacznika
+        else: print(f"!!! [{user_psid}] Odp. Gemini pusta/zablokowana przy propozycji."); return None, None
+    except Exception as e: print(f"!!! BŁĄD Gemini ({MODEL_ID}) propozycji: {e} !!!"); return None, None
+
+# --- Funkcja interakcji z Gemini (interpretacja feedbacku) ---
+def get_gemini_feedback_decision(user_psid, user_feedback, history, last_proposal_text):
+     if not gemini_model: print(f"!!! BŁĄD [{user_psid}]: Model Gemini niezaładowany!"); return "[CLARIFY]" # Fallback
+     user_content = Content(role="user", parts=[Part.from_text(user_feedback)])
+     max_messages_to_send = MAX_HISTORY_TURNS * 2
+     history_to_send = history[-max_messages_to_send:] if len(history) > max_messages_to_send else history
+     current_instruction = SYSTEM_INSTRUCTION_TEXT_FEEDBACK.format(last_proposal_text=last_proposal_text, user_feedback=user_feedback)
+     prompt_content = [
+         Content(role="user", parts=[Part.from_text(current_instruction)]) # Tylko instrukcja i pytanie
+     ] + history_to_send + [user_content] # Dodaj historię i feedback usera
+
+     print(f"\n--- [{user_psid}] Zawartość do Gemini ({MODEL_ID}) - Interpretacja Feedbacku ---");
+     # Logowanie...
+     print(f"--- Koniec zawartości {user_psid} ---\n")
+     try:
+         generation_config = GenerationConfig(temperature=0.2, top_p=0.95, top_k=40) # Niska temp dla znaczników
+         safety_settings = {HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE, #... itd ...
+                           HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                           HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                           HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,}
+         response = gemini_model.generate_content(prompt_content, generation_config=generation_config, safety_settings=safety_settings, stream=False)
+         if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+             decision = response.candidates[0].content.parts[0].text.strip()
+             print(f"[{user_psid}] Gemini zdecydował (feedback): '{decision}'")
+             # Podstawowa walidacja znacznika
+             if decision.startswith("[") and decision.endswith("]"):
+                 return decision
+             else:
+                 print(f"Ostrz. [{user_psid}]: Gemini nie zwrócił poprawnego znacznika, zwrócił tekst: '{decision}'. Traktuję jako CLARIFY.")
+                 return "[CLARIFY]" # Jeśli nie jest to znacznik, poproś o wyjaśnienie
+         else: print(f"!!! [{user_psid}] Odp. Gemini pusta/zablokowana przy feedbacku."); return "[CLARIFY]"
+     except Exception as e: print(f"!!! BŁĄD Gemini ({MODEL_ID}) feedbacku: {e} !!!"); return "[CLARIFY]" # Fallback
 
 # --- Obsługa Weryfikacji Webhooka (GET) ---
 @app.route('/webhook', methods=['GET'])
@@ -475,176 +527,137 @@ def webhook_handle():
                         user_input_text = None;
                         if "text" in message_data: user_input_text = message_data["text"]; print(f"      Txt: '{user_input_text}'")
 
-                        # --- Logika Główna ---
+                        # --- Nowa Logika Główna ---
                         if user_input_text:
                             user_content = Content(role="user", parts=[Part.from_text(user_input_text)])
-                            action_to_perform = None
-                            text_for_gemini = user_input_text # Domyślnie przekaż tekst do AI
-                            should_find_slots = False
-                            context_to_save = None
+                            action_to_perform = None; text_to_send = None; context_to_save = None
                             history_for_gemini = [h for h in history if not (isinstance(h, dict) and h.get('role') == 'system')]
 
-                            # 1. Sprawdź, czy oczekujemy na feedback do propozycji
+                            # 1. Jeśli oczekiwano na feedback
                             if is_context_current:
-                                print(f"      Oczekiwano na feedback. Interpretacja przez Python: '{user_input_text}'")
-                                lower_text = user_input_text.lower()
-                                requested_hour = None; force_afternoon = False; search_start_override = None
-                                # --- Interpretacja feedbacku przez Python ---
-                                if any(word in lower_text for word in ["tak", " pasuje", "ok", "zgadzam", "świetnie", "dobrze", "super", "może być"]):
-                                    action_to_perform = 'book'
-                                    text_for_gemini = "Użytkownik zaakceptował termin." # Poinformuj Gemini
-                                elif any(word in lower_text for word in ["nie", "inny", "inne", "dalej", "następn", "więcej", "odpada", "zły", "zła", "żaden"]):
-                                    action_to_perform = 'find_next'
-                                    text_for_gemini = "Użytkownik odrzucił termin i poprosił o inny."
-                                    # Ustal search_start dla 'find_next'
-                                    try:
-                                        tz = _get_timezone(); last_proposed_dt = datetime.datetime.fromisoformat(last_proposed_slot_iso).astimezone(tz)
-                                        search_start_override = last_proposed_dt + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
-                                    except: pass # Ignoruj błąd parsowania, użyje domyślnego startu
-                                elif any(word in lower_text for word in ["wcześniej", "wczesn", "za wczesnie", "za wcześnie"]):
-                                    action_to_perform = 'find_next'
-                                    text_for_gemini = "Użytkownik stwierdził, że termin jest za wcześnie."
-                                    force_afternoon = True
-                                    try:
-                                        tz = _get_timezone(); last_proposed_dt = datetime.datetime.fromisoformat(last_proposed_slot_iso).astimezone(tz)
-                                        afternoon_start_time = tz.localize(datetime.datetime.combine(last_proposed_dt.date(), datetime.time(PREFERRED_WEEKDAY_START_HOUR, 0)))
-                                        search_start_override = max(last_proposed_dt + datetime.timedelta(minutes=1), afternoon_start_time)
-                                    except: pass
-                                elif any(word in lower_text for word in ["później", "pozniej", "późno", "za pozno", "za późno"]):
-                                    action_to_perform = 'find_next'
-                                    text_for_gemini = "Użytkownik poprosił o późniejszy termin."
-                                    try:
-                                        tz = _get_timezone(); last_proposed_dt = datetime.datetime.fromisoformat(last_proposed_slot_iso).astimezone(tz)
-                                        jump_hours = 3
-                                        base_start = last_proposed_dt + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
-                                        later_start = last_proposed_dt + datetime.timedelta(hours=jump_hours)
-                                        search_start_override = max(base_start, later_start)
-                                        if last_proposed_dt.hour < PREFERRED_WEEKDAY_START_HOUR and last_proposed_dt.weekday() < 5:
-                                            afternoon_start = tz.localize(datetime.datetime.combine(last_proposed_dt.date(), datetime.time(PREFERRED_WEEKDAY_START_HOUR, 0)))
-                                            search_start_override = max(search_start_override, afternoon_start)
-                                    except: pass
-                                elif any(word in lower_text for word in ["poniedziałek", "poniedzialek", "wtorek", "środ", "srod", "czwartek", "piątek", "piatek", "sobot", "niedziel", "jutro", "pojutrze"]):
-                                    action_to_perform = 'find_next'
-                                    text_for_gemini = f"Użytkownik poprosił o termin w {user_input_text}." # Przekaż całą frazę
-                                    try:
-                                        tz = _get_timezone(); last_proposed_dt = datetime.datetime.fromisoformat(last_proposed_slot_iso).astimezone(tz)
-                                        target_weekday = -1
-                                        # ... (logika rozpoznawania dnia tygodnia) ...
-                                        if "poniedziałek" in lower_text or "poniedzialek" in lower_text: target_weekday = 0
-                                        elif "wtorek" in lower_text: target_weekday = 1
-                                        # ... itd ...
-                                        elif "niedziel" in lower_text: target_weekday = 6
-                                        if target_weekday != -1:
-                                            days_ahead = target_weekday - last_proposed_dt.weekday();
-                                            if days_ahead <= 0: days_ahead += 7
-                                            next_target_date = last_proposed_dt.date() + datetime.timedelta(days=days_ahead)
-                                            search_start_override = tz.localize(datetime.datetime.combine(next_target_date, datetime.time(0, 0)))
-                                        elif "jutro" in lower_text:
-                                             search_start_override = tz.localize(datetime.datetime.combine(last_proposed_dt.date() + datetime.timedelta(days=1), datetime.time(0,0)))
-                                    except: pass
-                                else: # Sprawdź konkretną godzinę
-                                    hour_match = re.search(r'\b(o|na|godzin[aęe]|około)\s*(\d{1,2})\b', lower_text)
-                                    if hour_match:
-                                        try:
-                                            hr = int(hour_match.group(2))
-                                            if 0 <= hr <= 23:
-                                                action_to_perform = 'find_next'
-                                                text_for_gemini = f"Użytkownik poprosił o termin o godzinie {hr}."
-                                                requested_hour = hr
-                                                # Ustal search_start dla konkretnej godziny
-                                                tz = _get_timezone(); last_proposed_dt = datetime.datetime.fromisoformat(last_proposed_slot_iso).astimezone(tz)
-                                                if hr > last_proposed_dt.hour: search_start_override = tz.localize(datetime.datetime.combine(last_proposed_dt.date(), datetime.time(0,0)))
-                                                else: search_start_override = tz.localize(datetime.datetime.combine(last_proposed_dt.date() + datetime.timedelta(days=1), datetime.time(0,0)))
-                                        except ValueError: pass
+                                print(f"      Oczekiwano na feedback. Pytanie Gemini o decyzję...")
+                                last_proposal_dt = datetime.datetime.fromisoformat(last_proposed_slot_iso)
+                                proposal_info_for_ai = f"Zaproponowano: {format_slot_for_user(last_proposal_dt)}."
+                                gemini_decision = get_gemini_feedback_decision(sender_id, user_input_text, history_for_gemini, proposal_info_for_ai)
 
-                                # Jeśli akcja to nie akceptacja ani szukanie, poproś Gemini o reakcję
-                                if action_to_perform is None or action_to_perform == 'clarify':
-                                    print(f"      Niejasny feedback lub brak akcji. Pytanie Gemini...")
-                                    action_to_perform = 'send_gemini_response'
-                                    gemini_response = get_gemini_response(sender_id, text_for_gemini, history_for_gemini)
-                                    text_to_send = gemini_response
-                                    context_to_save = {'role':'system', 'type':'last_proposal', 'slot_iso': last_proposed_slot_iso} # Utrzymaj kontekst
+                                if gemini_decision == "[ACCEPT]": action_to_perform = 'book'
+                                elif isinstance(gemini_decision, str) and gemini_decision.startswith("[FIND_NEXT_SLOT"):
+                                    action_to_perform = 'find_and_propose' # Akcja: znajdź i niech AI zaproponuje
+                                    # Parsuj preferencje (jak poprzednio)
+                                    preference = 'later'; requested_day_str = None; requested_hour_int = None; force_afternoon = False
+                                    pref_match = re.search(r"PREFERENCE='([^']*)'", gemini_decision); #... itd ...
+                                    if pref_match: preference = pref_match.group(1)
+                                    day_match = re.search(r"DAY='([^']*)'", gemini_decision)
+                                    if day_match: requested_day_str = day_match.group(1)
+                                    hour_match = re.search(r"HOUR='(\d+)'", gemini_decision)
+                                    if hour_match: requested_hour_int = int(hour_match.group(1))
+                                    if preference == 'afternoon': force_afternoon = True
+                                elif gemini_decision == "[CLARIFY]" or (isinstance(gemini_decision, str) and not gemini_decision.startswith("[")):
+                                     action_to_perform = 'send_clarification_from_ai'
+                                     text_to_send = gemini_decision if gemini_decision != "[CLARIFY]" else "Nie jestem pewien, co masz na myśli. Czy termin pasuje?"
+                                     context_to_save = {'role':'system', 'type':'last_proposal', 'slot_iso': last_proposed_slot_iso} # Utrzymaj kontekst
+                                else: action_to_perform = 'send_error'; text_to_send = "Problem z interpretacją odpowiedzi."
+
                             # 2. Jeśli NIE oczekiwano na feedback
                             else:
-                                print(f"      -> Gemini...");
-                                gemini_response = get_gemini_response(sender_id, user_input_text, history_for_gemini)
-                                action_to_perform = 'send_gemini_response'
-                                text_to_send = gemini_response
-                                # Sprawdź, czy odpowiedź GEMINI lub input USERA sugeruje umówienie
-                                trigger_keywords = ["umówić", "termin", "wolne", "kiedy", "zapisać", "kalendarz", "rezerw", "dostępn"]
-                                user_wants_to_schedule = any(keyword in user_input_text.lower() for keyword in trigger_keywords)
-                                confirm_keywords = ["oczywiście", "jasne", "proszę", "sprawdz", "termin", "chętnie", "znajdę"]
-                                gemini_confirms_scheduling = isinstance(gemini_response, str) and any(keyword in gemini_response.lower() for keyword in confirm_keywords)
-                                if user_wants_to_schedule or gemini_confirms_scheduling:
-                                    should_find_slots = True # Ustaw flagę, aby poszukać slotu PO wysłaniu odp. Gemini
+                                print(f"      -> Gemini (normalna rozmowa)...");
+                                # Wywołaj Gemini z normalnym promptem
+                                gemini_response = get_gemini_response(sender_id, user_input_text, history_for_gemini) # Użyj starej funkcji do rozmowy
+                                if isinstance(gemini_response, str) and gemini_response:
+                                    action_to_perform = 'send_gemini_response'
+                                    text_to_send = gemini_response
+                                    trigger_keywords = ["umówić", "termin", "wolne", "kiedy", "zapisać", "kalendarz", "rezerw", "dostępn"]
+                                    user_wants_to_schedule = any(keyword in user_input_text.lower() for keyword in trigger_keywords)
+                                    confirm_keywords = ["oczywiście", "jasne", "proszę", "sprawdz", "termin", "chętnie", "znajdę"]
+                                    gemini_confirms_scheduling = any(keyword in gemini_response.lower() for keyword in confirm_keywords)
+                                    if user_wants_to_schedule or gemini_confirms_scheduling:
+                                        action_to_perform = 'find_and_propose' # Zmień akcję na szukanie i proponowanie przez AI
+                                        preference = 'first_reasonable' # Domyślna preferencja dla pierwszego szukania
+                                        requested_day_str = None; requested_hour_int = None; force_afternoon = False
+                                else: action_to_perform = 'send_error'; text_to_send = gemini_response or "Błąd AI."
 
                             # --- Wykonanie Akcji przez Pythona ---
                             print(f"      Wykonanie akcji: {action_to_perform}")
-                            model_response_text = None # Tekst odpowiedzi modelu do zapisania w historii
+                            model_response_content = None # Content odpowiedzi modelu do zapisu
 
                             if action_to_perform == 'book':
-                                # ... (logika rezerwacji jak poprzednio) ...
                                 try:
                                     tz = _get_timezone(); start_time = datetime.datetime.fromisoformat(last_proposed_slot_iso).astimezone(tz); end_time = start_time + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
                                     user_profile = get_user_profile(sender_id); user_name = user_profile.get('first_name', '') if user_profile else ''
                                     if ENABLE_TYPING_DELAY: time.sleep(MIN_TYPING_DELAY_SECONDS)
                                     success, message_to_user = book_appointment(TARGET_CALENDAR_ID, start_time, end_time, summary=f"Rezerwacja FB", description=f"PSID:{sender_id}\nImię:{user_name}", user_name=user_name)
-                                    send_message(sender_id, message_to_user); model_response_text = message_to_user
-                                except Exception as book_err: print(f"!!! BŁĄD rezerwacji: {book_err} !!!"); send_message(sender_id, "Błąd rezerwacji."); model_response_text = "Błąd rezerwacji."
+                                    send_message(sender_id, message_to_user); model_response_content = Content(role="model", parts=[Part.from_text(message_to_user)])
+                                except Exception as book_err: print(f"!!! BŁĄD rezerwacji: {book_err} !!!"); send_message(sender_id, "Błąd rezerwacji."); model_response_content = Content(role="model", parts=[Part.from_text("Błąd rezerwacji.")])
                                 context_to_save = None # Usuń kontekst po próbie rezerwacji
-                            elif action_to_perform == 'find_next':
+                            elif action_to_perform == 'find_and_propose':
                                 try:
                                     tz = _get_timezone(); now = datetime.datetime.now(tz)
-                                    search_start = search_start_override if search_start_override else now # Użyj nadpisanego startu, jeśli jest
-                                    if search_start < now: search_start = now
+                                    search_start = now; after_dt = now
+                                    if last_proposed_slot_iso and action_to_perform == 'find_next': # Jeśli szukamy następnego
+                                        last_proposed_dt = datetime.datetime.fromisoformat(last_proposed_slot_iso).astimezone(tz)
+                                        after_dt = last_proposed_dt
+                                        search_start = last_proposed_dt + datetime.timedelta(minutes=1)
+                                        # ... (logika ustalania search_start wg preferencji jak poprzednio) ...
+                                        target_weekday = -1
+                                        if preference == 'specific_day' and requested_day_str:
+                                            try: target_weekday = POLISH_WEEKDAYS.index(requested_day_str.capitalize())
+                                            except ValueError: pass
+                                        if target_weekday != -1:
+                                            days_ahead = target_weekday - last_proposed_dt.weekday();
+                                            if days_ahead <= 0: days_ahead += 7
+                                            search_start = tz.localize(datetime.datetime.combine(last_proposed_dt.date() + datetime.timedelta(days=days_ahead), datetime.time(0,0)))
+                                        elif preference == 'next_day': search_start = tz.localize(datetime.datetime.combine(last_proposed_dt.date() + datetime.timedelta(days=1), datetime.time(0,0)))
+                                        elif preference == 'later':
+                                             jump_hours = 3; base_start = last_proposed_dt + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES); later_start = last_proposed_dt + datetime.timedelta(hours=jump_hours)
+                                             search_start = max(base_start, later_start)
+                                             if last_proposed_dt.hour < PREFERRED_WEEKDAY_START_HOUR and last_proposed_dt.weekday() < 5: afternoon_start = tz.localize(datetime.datetime.combine(last_proposed_dt.date(), datetime.time(PREFERRED_WEEKDAY_START_HOUR, 0))); search_start = max(search_start, afternoon_start)
+                                        elif preference == 'afternoon':
+                                             afternoon_start = tz.localize(datetime.datetime.combine(last_proposed_dt.date(), datetime.time(PREFERRED_WEEKDAY_START_HOUR, 0))); search_start = max(search_start, afternoon_start)
+
+                                    if search_start < now: search_start = now # Nie szukaj w przeszłości
+                                    print(f"      Ustalono search_start: {search_start:%Y-%m-%d %H:%M}")
+
                                     search_end_date = (search_start + datetime.timedelta(days=MAX_SEARCH_DAYS)).date()
                                     search_end = tz.localize(datetime.datetime.combine(search_end_date, datetime.time(23, 59, 59)))
-                                    after_dt = datetime.datetime.fromisoformat(last_proposed_slot_iso).astimezone(tz) if last_proposed_slot_iso else now
-                                    if ENABLE_TYPING_DELAY: print(f"      Szukanie slotu (start={search_start:%H:%M})..."); time.sleep(MIN_TYPING_DELAY_SECONDS)
+                                    if ENABLE_TYPING_DELAY: print(f"      Szukanie slotów..."); time.sleep(MIN_TYPING_DELAY_SECONDS)
                                     free_slots = get_free_slots(TARGET_CALENDAR_ID, search_start, search_end)
-                                    next_slot = find_next_reasonable_slot(free_slots, after_time=after_dt, requested_hour=requested_hour, force_afternoon=force_afternoon)
-                                    if next_slot:
-                                        formatted_slot = format_slot_for_user(next_slot)
-                                        proposal_message = f"Rozumiem. Znalazłem inny termin: {formatted_slot}. Czy ten pasuje?"
-                                        send_message(sender_id, proposal_message); model_response_text = proposal_message
-                                        context_to_save = {'role': 'system', 'type': 'last_proposal', 'slot_iso': next_slot.isoformat()} # Zapisz nowy kontekst
-                                    else:
-                                        proposal_message = f"Niestety, nie znalazłem innych pasujących terminów."
-                                        send_message(sender_id, proposal_message); model_response_text = proposal_message
-                                        context_to_save = None # Brak kontekstu
-                                except Exception as find_err: print(f"!!! BŁĄD szukania slotu: {find_err} !!!"); send_message(sender_id, "Błąd szukania terminu."); model_response_text = "Błąd szukania."
+
+                                    # --- Wywołaj AI, aby wybrało i zaproponowało slot ---
+                                    if free_slots:
+                                        # Usuń 'after_time' z argumentów, bo AI dostaje całą listę
+                                        # Możemy wstępnie odfiltrować listę wg preferencji GODZINOWYCH tutaj, aby pomóc AI
+                                        filtered_slots = free_slots
+                                        if requested_hour_int is not None: filtered_slots = [s for s in free_slots if s.hour == requested_hour_int]
+                                        elif force_afternoon: filtered_slots = [s for s in free_slots if s.hour >= PREFERRED_WEEKDAY_START_HOUR]
+                                        if not filtered_slots: filtered_slots = free_slots # Jeśli filtrowanie nic nie dało, użyj pełnej listy
+
+                                        print(f"      Przekazanie {len(filtered_slots)} slotów do AI (max {MAX_SLOTS_FOR_AI})...")
+                                        proposal_text, proposed_iso = get_gemini_slot_proposal(sender_id, history_for_gemini, filtered_slots)
+
+                                        if proposal_text and proposed_iso:
+                                            send_message(sender_id, proposal_text)
+                                            model_response_content = Content(role="model", parts=[Part.from_text(proposal_text)])
+                                            context_to_save = {'role': 'system', 'type': 'last_proposal', 'slot_iso': proposed_iso}
+                                        else: # Błąd AI przy propozycji
+                                            error_msg = "Przepraszam, mam problem z zaproponowaniem konkretnego terminu. Spróbujmy jeszcze raz."
+                                            send_message(sender_id, error_msg)
+                                            model_response_content = Content(role="model", parts=[Part.from_text(error_msg)])
+                                            context_to_save = None # Usuń kontekst
+                                    else: # Brak slotów
+                                        no_slots_msg = "Niestety, nie znalazłem pasujących wolnych terminów."
+                                        send_message(sender_id, no_slots_msg)
+                                        model_response_content = Content(role="model", parts=[Part.from_text(no_slots_msg)])
+                                        context_to_save = None
+                                except Exception as find_err: print(f"!!! BŁĄD find_and_propose: {find_err} !!!"); send_message(sender_id, "Błąd szukania."); model_response_content = Content(role="model", parts=[Part.from_text("Błąd szukania.")])
                             elif action_to_perform == 'send_gemini_response' or action_to_perform == 'send_clarification' or action_to_perform == 'send_error':
                                  if ENABLE_TYPING_DELAY and text_to_send: time.sleep(MIN_TYPING_DELAY_SECONDS)
-                                 send_message(sender_id, text_to_send); model_response_text = text_to_send
-                                 # context_to_save jest już ustawiony dla 'clarify' i 'send_error', None dla 'send_gemini_response' (chyba że should_find_slots)
+                                 send_message(sender_id, text_to_send); model_response_content = Content(role="model", parts=[Part.from_text(text_to_send)])
+                                 # Context_to_save jest już ustawiony lub None
+                            else: print(f"!!! Nie wykonano akcji dla: {user_input_text}")
 
-                            # Zapisz historię na końcu, uwzględniając odpowiedź modelu i kontekst
-                            if model_response_text: # Jeśli bot coś odpowiedział
-                                model_content = Content(role="model", parts=[Part.from_text(model_response_text)])
-                                save_history(sender_id, history + [user_content, model_content], context_to_save=context_to_save)
-                            else: # Jeśli tylko była akcja bez odpowiedzi tekstowej (np. błąd wewnętrzny przed wysłaniem)
-                                save_history(sender_id, history + [user_content], context_to_save=context_to_save)
-
-                            # Wykonaj szukanie PIERWSZEGO slotu, jeśli flaga ustawiona PO wysłaniu odpowiedzi Gemini
-                            if action_to_perform == 'send_gemini_response' and should_find_slots:
-                                print(f"      Wywołanie szukania PIERWSZEGO slotu po odpowiedzi Gemini...")
-                                tz = _get_timezone(); now = datetime.datetime.now(tz); search_start = now
-                                search_end_date = (now + datetime.timedelta(days=MAX_SEARCH_DAYS)).date(); search_end = tz.localize(datetime.datetime.combine(search_end_date, datetime.time(23, 59, 59)))
-                                if ENABLE_TYPING_DELAY: time.sleep(MIN_TYPING_DELAY_SECONDS)
-                                free_slots = get_free_slots(TARGET_CALENDAR_ID, search_start, search_end)
-                                first_slot = find_next_reasonable_slot(free_slots, after_time=now)
-                                if first_slot:
-                                    formatted_slot = format_slot_for_user(first_slot)
-                                    proposal_message = f"Sprawdziłem. Najbliższy dostępny termin to: {formatted_slot}. Czy taki by odpowiadał?"
-                                    send_message(sender_id, proposal_message)
-                                    # Pobierz NAJNOWSZĄ historię (z odp. Gemini) i ZAKTUALIZUJ ją o nowy kontekst
-                                    current_history, _ = load_history(sender_id)
-                                    proposal_model_content = Content(role="model", parts=[Part.from_text(proposal_message)])
-                                    context_to_save = {'role': 'system', 'type': 'last_proposal', 'slot_iso': first_slot.isoformat()}
-                                    save_history(sender_id, current_history + [proposal_model_content], context_to_save=context_to_save) # Zapisz z nowym kontekstem
-                                else:
-                                    print(f"      Brak slotów przy pierwszym szukaniu."); send_message(sender_id, "Niestety, aktualnie brak wolnych terminów.")
-                                    # Historia już zapisana bez kontekstu
+                            # Zapisz historię na końcu, uwzględniając odpowiedź modelu (jeśli była) i kontekst
+                            if model_response_content: save_history(sender_id, history + [user_content, model_response_content], context_to_save=context_to_save)
+                            else: save_history(sender_id, history + [user_content], context_to_save=context_to_save) # Zapisz tylko usera jeśli nie było odp. modelu
 
                         # ... (obsługa załączników i nieznanych typów wiadomości) ...
                         elif "attachments" in message_data: attachment_type = message_data['attachments'][0].get('type', 'nieznany'); print(f"      Załącznik: {attachment_type}."); user_content = Content(role="user", parts=[Part.from_text(f"[Załącznik: {attachment_type}]")]); model_content = Content(role="model", parts=[Part.from_text("Nie obsługuję załączników.")]); save_history(sender_id, history + [user_content, model_content]); send_message(sender_id, "Przepraszam, nie obsługuję załączników.")
@@ -652,15 +665,18 @@ def webhook_handle():
 
                     # ... (reszta obsługi postback, read, delivery) ...
                     elif messaging_event.get("postback"):
+                         # UWAGA: Logika Postback nie została dostosowana do nowego przepływu AI!
+                         # Może wymagać podobnej refaktoryzacji, jeśli przyciski mają inicjować szukanie/rezerwację.
                          postback_data = messaging_event["postback"]; payload = postback_data.get("payload"); title = postback_data.get("title", payload); print(f"    Postback: T:'{title}', P:'{payload}'")
                          prompt_for_button = f"Kliknięto: '{title}' ({payload})."
+                         # Użyj ogólnej funkcji odpowiedzi, bez kontekstu slotów
                          response_text = get_gemini_response(sender_id, prompt_for_button, [h for h in history if not (isinstance(h, dict) and h.get('role') == 'system')])
                          if isinstance(response_text, str) and response_text:
                              if ENABLE_TYPING_DELAY:
                                  response_len = len(response_text); calculated_delay = response_len / TYPING_CHARS_PER_SECOND; final_delay = max(0, min(MAX_TYPING_DELAY_SECONDS, calculated_delay + MIN_TYPING_DELAY_SECONDS))
                                  if final_delay > 0: print(f"      Pisanie (postback)... {final_delay:.2f}s"); time.sleep(final_delay)
                              user_content = Content(role="user", parts=[Part.from_text(prompt_for_button)]); model_content = Content(role="model", parts=[Part.from_text(response_text)])
-                             save_history(sender_id, history + [user_content, model_content])
+                             save_history(sender_id, history + [user_content, model_content]) # Zapisz normalnie
                              send_message(sender_id, response_text)
                          else: user_content = Content(role="user", parts=[Part.from_text(prompt_for_button)]); save_history(sender_id, history + [user_content]); send_message(sender_id, response_text or "Błąd.")
                     elif messaging_event.get("read"): print(f"    Typ: read.")
