@@ -130,26 +130,42 @@ def get_free_slots(calendar_id, start_datetime, end_datetime, duration_minutes=D
         for event in events:
             start = parse_event_time(event['start'], tz); end = parse_event_time(event['end'], tz)
 
-            # <<< --- PONOWNA POPRAWKA LOGIKI DLA WYDARZEŃ CAŁODNIOWYCH --- >>>
-            if isinstance(start, datetime.date): # Wydarzenie całodniowe
-                # Wydarzenia całodniowe zwracane przez API mają datę końca dnia *następnego*.
-                # Jeśli API zwróciło 'end' jako datę, użyj jej.
-                # Jeśli nie (np. end jest None lub datetime), standardowo trwa do końca dnia 'start'.
-                # Data końca (exclusive) - dzień, w którym wydarzenie już NIE obowiązuje.
-                event_exclusive_end_date = None
+            # <<< --- TRZECIA POPRAWKA LOGIKI DLA WYDARZEŃ CAŁODNIOWYCH --- >>>
+            if isinstance(start, datetime.date): # Wiemy, że 'start' jest typu 'date'
+                # Ustal datę końca (ekskluzywną) - domyślnie następny dzień po 'start'
+                exclusive_end_date = start + datetime.timedelta(days=1)
+                # Jeśli 'end' istnieje i jest datą, użyj jej zamiast domyślnej
                 if isinstance(end, datetime.date):
-                    event_exclusive_end_date = end
-                else:
-                    # Domyślnie wydarzenie całodniowe kończy się o północy *po* dniu startowym.
-                    event_exclusive_end_date = start + datetime.timedelta(days=1)
+                    exclusive_end_date = end
+                elif isinstance(end, datetime.datetime): # Jeśli API zwróciło datetime, weź tylko datę
+                    exclusive_end_date = end.date()
 
-                # Sprawdź, czy current_day (sprawdzany dzień) zawiera się w zakresie [start, event_exclusive_end_date)
-                # Porównujemy tylko obiekty 'date'
-                if start <= current_day < event_exclusive_end_date:
-                    # Jeśli tak, to cały dzień pracy jest zajęty
-                    busy_times.append({'start': day_start_limit, 'end': day_end_limit})
-                    # print(f"   - Uwzględniono wydarzenie całodniowe '{event.get('summary','?')}' w dniu {current_day}")
-            # <<< --- KONIEC PONOWNEJ POPRAWKI --- >>>
+                # --- Bezpieczne porównanie ---
+                # Upewnij się, że WSZYSTKIE elementy są typu 'date' przed porównaniem
+                try:
+                    start_date_cmp = start
+                    current_day_cmp = current_day # Już jest date
+                    exclusive_end_date_cmp = exclusive_end_date
+
+                    # Sprawdź typy tuż przed porównaniem (do debugowania, jeśli nadal będzie błąd)
+                    # print(f"DEBUG: Comparing types - start: {type(start_date_cmp)}, current: {type(current_day_cmp)}, end: {type(exclusive_end_date_cmp)}")
+
+                    if start_date_cmp <= current_day_cmp < exclusive_end_date_cmp:
+                        busy_times.append({'start': day_start_limit, 'end': day_end_limit})
+                        # print(f"   - Uwzględniono wydarzenie całodniowe '{event.get('summary','?')}' w dniu {current_day}")
+
+                except TypeError as te:
+                    # Dodatkowe logowanie, jeśli błąd nadal występuje
+                    print(f"!!! KRYTYCZNY BŁĄD PORÓWNANIA DAT (ponownie) !!!")
+                    print(f"    Wydarzenie: {event.get('summary','?')}, ID: {event.get('id')}")
+                    print(f"    Start (typ {type(start)}): {start}")
+                    print(f"    End (typ {type(end)}): {end}")
+                    print(f"    Current Day (typ {type(current_day)}): {current_day}")
+                    print(f"    Obliczona Exclusive End Date (typ {type(exclusive_end_date)}): {exclusive_end_date}")
+                    print(f"    Błąd: {te}")
+                    # Można tu rzucić wyjątek dalej lub pominąć wydarzenie
+                    # continue # Pomiń to wydarzenie, jeśli powoduje błąd
+            # <<< --- KONIEC TRZECIEJ POPRAWKI --- >>>
 
             elif isinstance(start, datetime.datetime) and isinstance(end, datetime.datetime): # Normalne wydarzenie
                  if end > day_start_limit and start < day_end_limit: # Czy nakłada się na godziny pracy?
@@ -228,3 +244,19 @@ def book_appointment(calendar_id, start_time, end_time, summary="Rezerwacja wizy
     except Exception as e:
         import traceback; print(f"Nieoczekiwany błąd Python rezerwacji: {e}"); traceback.print_exc()
         return False, "Niespodziewany błąd systemu rezerwacji."
+
+# --- Przykładowe użycie (można odkomentować do testów lokalnych) ---
+# if __name__ == '__main__':
+#     test_calendar_id = 'f19e189826b9d6e36950da347ac84d5501ecbd6bed0d76c8641be61a67749c67@group.calendar.google.com'
+#     tz = _get_timezone()
+#     now = datetime.datetime.now(tz)
+#     start_search = tz.localize(datetime.datetime.combine(now.date() + datetime.timedelta(days=1), datetime.time(WORK_START_HOUR, 0)))
+#     end_search = tz.localize(datetime.datetime.combine(now.date() + datetime.timedelta(days=1), datetime.time(WORK_END_HOUR, 0)))
+#     slots = get_free_slots(test_calendar_id, start_search, end_search, duration_minutes=60)
+#     if slots:
+#         print("\nZnalezione wolne sloty na jutro:")
+#         for slot in slots: print(f"- {slot.strftime('%Y-%m-%d %H:%M %Z')}")
+#         first_slot_start = slots[0]; first_slot_end = first_slot_start + datetime.timedelta(minutes=60)
+#         success, message = book_appointment(test_calendar_id, first_slot_start, first_slot_end, summary="Testowa Rezerwacja Bota", user_name="Tester")
+#         print(f"\nWynik rezerwacji testowej: {success} - {message}")
+#     else: print("\nNie znaleziono wolnych slotów na jutro do testów.")
