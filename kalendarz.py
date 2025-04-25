@@ -50,8 +50,29 @@ def get_calendar_service():
                 return None
             flow = InstalledAppFlow.from_client_secrets_file(
                 CREDENTIALS_FILE, SCOPES)
-            # Uruchom lokalny serwer do obsługi przepływu OAuth
-            creds = flow.run_local_server(port=0)
+
+            # --- ZMIANA TUTAJ: Użycie przepływu konsolowego ---
+            # Zamiast uruchamiać serwer i otwierać przeglądarkę, użyj przepływu konsolowego
+            # Poinformuj użytkownika, aby ręcznie otworzył URL autoryzacji
+            auth_url, _ = flow.authorization_url(prompt='consent') # Użyj prompt='consent' by zawsze pytał o zgodę przy autoryzacji
+            print('Aby autoryzować dostęp, przejdź pod ten adres URL:')
+            print(auth_url)
+            print('\nPo autoryzacji w przeglądarce, Google wyświetli kod.')
+            print('Skopiuj ten kod i wklej go tutaj:')
+
+            # Poproś użytkownika o wklejenie kodu autoryzacyjnego z przeglądarki
+            code = input('Wpisz kod autoryzacyjny: ').strip()
+
+            try:
+                 # Wymień kod autoryzacyjny na tokeny dostępu
+                flow.fetch_token(code=code)
+                creds = flow.credentials # Pobierz utworzone dane uwierzytelniające
+            except Exception as e:
+                 print(f"Błąd podczas wymiany kodu na token: {e}")
+                 print("Sprawdź, czy kod został poprawnie skopiowany i wklejony.")
+                 return None
+            # --- KONIEC ZMIANY ---
+
         # Zapisz dane uwierzytelniające na następny raz
         with open(TOKEN_FILE, 'w') as token:
             token.write(creds.to_json())
@@ -90,7 +111,16 @@ def parse_event_time(event_time_data, default_tz):
             dt = datetime.datetime.fromisoformat(dt_str)
         except ValueError:
             # Czasami brakuje sekund w formacie ISO
-            dt = datetime.datetime.strptime(dt_str, '%Y-%m-%dT%H:%M:%S%z')
+            try:
+                dt = datetime.datetime.strptime(dt_str, '%Y-%m-%dT%H:%M:%S%z')
+            except ValueError:
+                 # Jeszcze inny możliwy format bez sekundy i z 'Z'
+                 try:
+                     dt = datetime.datetime.strptime(dt_str, '%Y-%m-%dT%H:%M%z')
+                 except ValueError:
+                     print(f"Nie można sparsować daty/czasu: {dt_str}")
+                     return None
+
 
         # Upewnij się, że datetime jest świadomy strefy czasowej
         if dt.tzinfo is None:
@@ -145,7 +175,7 @@ def find_free_slots(service, calendar_id, start_dt, end_dt, tz):
 
     # Przetwarzanie dzień po dniu
     current_day = start_dt.date()
-    end_day = end_dt.date()
+    end_day = end_dt.date() # API zwraca do północy, więc używamy <
 
     while current_day < end_day:
         # Pomijaj weekendy (opcjonalnie)
@@ -168,47 +198,68 @@ def find_free_slots(service, calendar_id, start_dt, end_dt, tz):
             start = parse_event_time(event['start'], tz)
             end = parse_event_time(event['end'], tz)
 
-            # Obsługa wydarzeń całodniowych
+            # Obsługa wydarzeń całodniowych - traktujemy je jako blokujące cały dzień pracy
             if isinstance(start, datetime.date):
-                # Całodniowe wydarzenie zaczyna się o północy danego dnia
-                event_start_dt = tz.localize(datetime.datetime.combine(start, datetime.time.min))
-                # Kończy się o północy *następnego* dnia
-                event_end_dt = tz.localize(datetime.datetime.combine(end, datetime.time.min))
+                 # Jeśli data startowa wydarzenia całodniowego to bieżący dzień
+                 if start == current_day:
+                      # Zablokuj cały dzień roboczy
+                      day_events.append({'start': day_start_time, 'end': day_end_time})
+                      # Możemy przerwać pętlę dla tego dnia, bo jest cały zajęty
+                      # (ale bezpieczniej przetworzyć resztę na wypadek nakładania się)
+                      # break
+                 continue # Przejdź do następnego wydarzenia
+
+            # Obsługa normalnych wydarzeń czasowych
             elif isinstance(start, datetime.datetime):
                 event_start_dt = start
                 event_end_dt = end
+
+                # Sprawdź, czy wydarzenie (nawet częściowo) przypada na bieżący dzień roboczy
+                # Warunek: koniec wydarzenia jest po początku dnia pracy ORAZ początek wydarzenia jest przed końcem dnia pracy
+                if event_end_dt > day_start_time and event_start_dt < day_end_time:
+                     # Przytnij czas wydarzenia do granic dnia pracy, jeśli wychodzi poza nie
+                     effective_start = max(event_start_dt, day_start_time)
+                     effective_end = min(event_end_dt, day_end_time)
+                     # Dodaj tylko jeśli przycięty czas jest sensowny (start przed końcem)
+                     if effective_start < effective_end:
+                         day_events.append({'start': effective_start, 'end': effective_end})
             else:
-                continue # Pomiń jeśli nie udało się sparsować
-
-            # Sprawdź, czy wydarzenie (nawet częściowo) przypada na bieżący dzień
-            if event_start_dt < day_end_time and event_end_dt > day_start_time:
-                 # Przytnij czas wydarzenia do granic dnia pracy, jeśli wychodzi poza nie
-                 effective_start = max(event_start_dt, day_start_time)
-                 effective_end = min(event_end_dt, day_end_time)
-                 # Dodaj tylko jeśli przycięty czas jest sensowny
-                 if effective_start < effective_end:
-                     day_events.append({'start': effective_start, 'end': effective_end})
+                # Pomiń jeśli nie udało się sparsować czasu startowego
+                print(f"Pomijam wydarzenie z nierozpoznanym czasem startu: {event.get('summary', 'Brak tytułu')}")
+                continue
 
 
-        # Sortuj wydarzenia dnia wg czasu rozpoczęcia (powinny już być, ale dla pewności)
+        # Sortuj wydarzenia dnia wg czasu rozpoczęcia (ważne dla algorytmu)
         day_events.sort(key=lambda x: x['start'])
 
         # Znajdowanie wolnych slotów
+        free_slots_found = False
         for event in day_events:
             event_start = event['start']
             event_end = event['end']
 
             # Sprawdź, czy jest luka między potential_free_start a początkiem tego wydarzenia
-            if potential_free_start < event_start:
+            # Dodajemy mały margines (sekunda), aby uniknąć problemów z precyzją
+            if potential_free_start < event_start - datetime.timedelta(seconds=1):
                 # Mamy wolny slot
                 print(f"  Wolne: {potential_free_start.strftime('%H:%M')} - {event_start.strftime('%H:%M')}")
+                free_slots_found = True
 
             # Przesuń potential_free_start na koniec bieżącego wydarzenia (lub dalej, jeśli wydarzenia się nakładają)
             potential_free_start = max(potential_free_start, event_end)
 
         # Sprawdź, czy jest wolny slot po ostatnim wydarzeniu do końca dnia pracy
-        if potential_free_start < day_end_time:
+        if potential_free_start < day_end_time - datetime.timedelta(seconds=1):
             print(f"  Wolne: {potential_free_start.strftime('%H:%M')} - {day_end_time.strftime('%H:%M')}")
+            free_slots_found = True
+
+        if not free_slots_found and not day_events:
+             # Jeśli nie było żadnych wydarzeń w tym dniu, cały dzień pracy jest wolny
+             print(f"  Wolne: {day_start_time.strftime('%H:%M')} - {day_end_time.strftime('%H:%M')}")
+        elif not free_slots_found and day_events:
+             # Jeśli były wydarzenia, ale nie znaleziono slotów (np. dzień cały zajęty)
+             print("  Brak wolnych slotów w godzinach pracy.")
+
 
         # Przejdź do następnego dnia
         current_day += datetime.timedelta(days=1)
@@ -234,4 +285,4 @@ if __name__ == '__main__':
         # Znajdź i wypisz wolne sloty
         find_free_slots(service, CALENDAR_ID, start_range, end_range, tz)
     else:
-        print("Nie udało się uzyskać dostępu do usługi Google Calendar.")
+        print("Nie udało się uzyskać dostępu do usługi Google Calendar. Zakończono.")
