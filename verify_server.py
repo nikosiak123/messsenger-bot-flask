@@ -30,7 +30,7 @@ app = Flask(__name__)
 # --- Konfiguracja Ogólna ---
 VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "KOLAGEN") # Zmień na swój token weryfikacyjny
 # ZASADA 1: UŻYTO DOMYŚLNEGO TOKENU PODANEGO PRZEZ UŻYTKOWNIKA
-PAGE_ACCESS_TOKEN = os.environ.get("FB_PAGE_ACCESS_TOKEN", "EACNAHFzEhkUBO7nbFAtYvfPWbEht1B3chQqWLx76Ljg2ekdbJYoOrnpjATqhS0EZC8S0q8a49hEZBaZByZCaj5gr1z62dAaMgcZA1B")
+PAGE_ACCESS_TOKEN = os.environ.get("FB_PAGE_ACCESS_TOKEN", "EACNAHFzEhkUBO5fkUaM58QhzyLYaiXmQk71sj85c9OsuhZAYOd5UyZCugih6PlWyZCuNEtGaFtB1V6BMPLgZBEbJuZAU1EmwUoB4ZCFZAXHh7BnoTyEb7XthBdgsHCWzzaH4ZB3WOaMjP0H4ZBtrn0JFbnMV6tEoLy3J7HN3vZBsTYzpHWiDDZBNqzQIVGmdBiur7nhmwZDZD")
 PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "linear-booth-450221-k1") # Zmień na swój Project ID
 LOCATION = os.environ.get("GCP_LOCATION", "us-central1") # Zmień na swoją lokalizację
 # ZASADA 2: UŻYTO MODELU PODANEGO PRZEZ UŻYTKOWNIKA
