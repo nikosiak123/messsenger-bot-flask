@@ -737,7 +737,7 @@ def send_message(recipient_id, full_message_text):
 # =====================================================================
 
 # --- INSTRUKCJA DLA GŁÓWNEGO AI (ROZMOWA + WYKRYWANIE INTENCJI) ---
-SYSTEM_INSTRUCTION_GENERAL = f"""Jesteś profesjonalnym i przyjaznym asystentem klienta 'Zakręcone Korepetycje'. Pomagasz w sprawach związanych z korepetycjami online.
+SYSTEM_INSTRUCTION_GENERAL = f"""Jesteś profesjonalnym i przyjaznym asystentem klienta naszej firmy. Pomagasz w sprawach związanych z korepetycjami online.
 
 **Twoje Główne Zadania:**
 1.  Odpowiadaj na pytania dotyczące:
