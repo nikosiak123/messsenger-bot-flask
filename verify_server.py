@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# verify_server.py (Uproszczony feedback, Wzmocniona propozycja, model 2.0-flash)
+# verify_server.py (Poprawiona inicjalizacja gemini_model, bez zbędnych średników)
 
 from flask import Flask, request, Response
 import os
@@ -67,7 +67,7 @@ SLOT_ISO_MARKER_SUFFIX = "]"
 
 # --- Ustawienia Modelu Gemini ---
 GENERATION_CONFIG_PROPOSAL = GenerationConfig(
-    temperature=0.05, # Niska temperatura dla determinizmu propozycji
+    temperature=0.05, # Nadal niska dla determinizmu propozycji
     top_p=0.95, top_k=40, max_output_tokens=512,
 )
 GENERATION_CONFIG_FEEDBACK_SIMPLE = GenerationConfig(
@@ -99,6 +99,25 @@ except locale.Error:
         locale.setlocale(locale.LC_TIME, 'Polish_Poland.1250')
     except locale.Error:
         logging.warning("Nie można ustawić polskiej lokalizacji dla formatowania dat.")
+
+# =====================================================================
+# === INICJALIZACJA AI - WE WŁAŚCIWYM MIEJSCU =========================
+# =====================================================================
+gemini_model = None # Zainicjuj jako None na początku
+try:
+    # Logowanie może nie być jeszcze skonfigurowane, używamy print
+    print(f"--- Inicjalizowanie Vertex AI: Projekt={PROJECT_ID}, Lokalizacja={LOCATION}")
+    vertexai.init(project=PROJECT_ID, location=LOCATION)
+    print("--- Inicjalizacja Vertex AI OK.")
+    print(f"--- Ładowanie modelu: {MODEL_ID}")
+    gemini_model = GenerativeModel(MODEL_ID) # Przypisanie obiektu modelu
+    print(f"--- Model {MODEL_ID} załadowany OK.")
+except Exception as e:
+    print(f"!!! KRYTYCZNY BŁĄD inicjalizacji Vertex AI lub ładowania modelu: {e}", flush=True)
+    import traceback
+    traceback.print_exc()
+    print("!!! Funkcjonalność AI będzie niedostępna !!!", flush=True)
+    # W tym miejscu gemini_model pozostanie None
 
 # =====================================================================
 # === FUNKCJE POMOCNICZE ==============================================
@@ -712,8 +731,9 @@ def _simulate_typing(recipient_id, duration_seconds):
 
 def _call_gemini(user_psid, prompt_history, generation_config, task_name, max_retries=3):
     """Wywołuje API Gemini z obsługą błędów i logowaniem."""
+    # Sprawdzenie globalnej zmiennej gemini_model
     if not gemini_model:
-        logging.error(f"!!! [{user_psid}] Model Gemini ({task_name}) niezaładowany.")
+        logging.error(f"!!! [{user_psid}] Model Gemini ({task_name}) niezaładowany (None). Nie można wywołać API.")
         return None
     if not isinstance(prompt_history, list) or not all(isinstance(item, Content) for item in prompt_history):
         logging.error(f"!!! [{user_psid}] Nieprawidłowy format promptu dla Gemini ({task_name}).")
@@ -725,6 +745,7 @@ def _call_gemini(user_psid, prompt_history, generation_config, task_name, max_re
         logging.debug(f"    Próba {attempt}/{max_retries} Gemini ({task_name})...")
         try:
             _simulate_typing(user_psid, MIN_TYPING_DELAY_SECONDS)
+            # Użycie globalnej zmiennej gemini_model
             response = gemini_model.generate_content(
                 prompt_history,
                 generation_config=generation_config,
@@ -741,7 +762,7 @@ def _call_gemini(user_psid, prompt_history, generation_config, task_name, max_re
                         continue
                     else:
                         logging.error(f"!!! [{user_psid}] Gemini ({task_name}) nieudane po blokadzie po {max_retries} próbach.")
-                        return "Przepraszam, problem z zasadami bezpieczeństwa." # Zwraca info o błędzie
+                        return "Przepraszam, problem z zasadami bezpieczeństwa."
                 if response.candidates[0].content and response.candidates[0].content.parts:
                     generated_text = "".join(part.text for part in response.candidates[0].content.parts if hasattr(part, 'text'))
                     logging.info(f"[{user_psid}] Gemini ({task_name}) zwróciło odp. (dł: {len(generated_text)}).")
@@ -753,31 +774,34 @@ def _call_gemini(user_psid, prompt_history, generation_config, task_name, max_re
                  logging.error(f"!!! BŁĄD [{user_psid}] Gemini ({task_name}) - Brak kandydatów. Feedback: {prompt_feedback}. Odp: {response}")
 
         except HttpError as http_err:
-             # Log tylko statusu i podstawowych informacji dla zwięzłości
              logging.error(f"!!! BŁĄD HTTP ({http_err.resp.status}) [{user_psid}] Gemini ({task_name}) - Próba {attempt}/{max_retries}: {http_err.resp.reason}")
              if http_err.resp.status in [429, 500, 503] and attempt < max_retries:
-                  sleep_time = (2 ** attempt) + (random.random() * 0.1) # Exponential backoff
+                  sleep_time = (2 ** attempt) + (random.random() * 0.1)
                   logging.warning(f"    Oczekiwanie {sleep_time:.2f}s przed ponowieniem...")
                   time.sleep(sleep_time)
                   continue
              else:
-                  break # Nie ponawiaj dla innych błędów lub po limicie
+                  break
         except Exception as e:
-             logging.error(f"!!! BŁĄD [{user_psid}] Gemini ({task_name}) - Nieoczekiwany błąd API (Próba {attempt}/{max_retries}): {e}", exc_info=True)
+             if isinstance(e, NameError) and 'gemini_model' in str(e):
+                 logging.critical(f"!!! KRYTYCZNY BŁĄD NameError [{user_psid}] w _call_gemini: {e}. gemini_model jest None!", exc_info=True)
+                 # W tej sytuacji nie ma sensu ponawiać, bo model nie istnieje
+                 return None # Zwróć None, aby funkcja nadrzędna wiedziała o problemie
+             else:
+                 logging.error(f"!!! BŁĄD [{user_psid}] Gemini ({task_name}) - Nieoczekiwany błąd API (Próba {attempt}/{max_retries}): {e}", exc_info=True)
 
         if attempt < max_retries:
              logging.warning(f"    Oczekiwanie przed ponowieniem ({attempt+1}/{max_retries})...")
              time.sleep(1.5 * attempt)
 
     logging.error(f"!!! KRYTYCZNY BŁĄD [{user_psid}] Gemini ({task_name}) - Nie udało się po {max_retries} próbach.")
-    return None # Zwróć None po nieudanych próbach
+    return None
 
 # =====================================================================
 # === INSTRUKCJE SYSTEMOWE I GŁÓWNE FUNKCJE AI ========================
 # =====================================================================
 
 # --- INSTRUKCJA SYSTEMOWA (Propozycja terminu - WZMOCNIONA) ---
-# (Bez zmian od poprzedniej wersji - celowo wzmocniona)
 SYSTEM_INSTRUCTION_TEXT_PROPOSE = """Jesteś profesjonalnym asystentem klienta 'Zakręcone Korepetycje'. Twoim zadaniem jest przeanalizowanie historii rozmowy i listy dostępnych zakresów czasowych, a następnie wybranie **jednego**, najbardziej odpowiedniego terminu i zaproponowanie go użytkownikowi.
 
 **Kontekst:** Rozmawiasz o korepetycjach online. Użytkownik chce umówić lekcję próbną (płatną). W historii rozmowy może znajdować się feedback dotyczący poprzednio proponowanych terminów.
@@ -854,7 +878,7 @@ SYSTEM_INSTRUCTION_GENERAL = """Jesteś przyjaznym i pomocnym asystentem klienta
 def get_gemini_slot_proposal(user_psid, history_for_proposal_ai, available_ranges):
     """Pobiera propozycję terminu od AI."""
     if not gemini_model:
-        logging.error(f"!!! [{user_psid}] Model Gemini niezaładowany! Nie można generować propozycji.")
+        logging.error(f"!!! [{user_psid}] Model Gemini niezaładowany!")
         return None, None
     if not available_ranges:
         logging.warning(f"[{user_psid}]: Brak zakresów do przekazania AI.")
@@ -870,14 +894,14 @@ def get_gemini_slot_proposal(user_psid, history_for_proposal_ai, available_range
 
     max_prompt_messages = (MAX_HISTORY_TURNS * 2) + 2
     while len(full_prompt) > max_prompt_messages:
-        full_prompt.pop(2) # Usuń najstarszą wiadomość użytkownika
+        full_prompt.pop(2)
         if len(full_prompt) > 2:
-            full_prompt.pop(2) # Usuń odpowiadającą wiadomość modelu
+            full_prompt.pop(2)
 
     generated_text = _call_gemini(user_psid, full_prompt, GENERATION_CONFIG_PROPOSAL, "Slot Proposal Strict")
 
     if not generated_text:
-        logging.error(f"!!! [{user_psid}] Nie uzyskano odpowiedzi Gemini dla propozycji slotu (Strict).")
+        logging.error(f"!!! [{user_psid}] Nie uzyskano odpowiedzi Gemini (Slot Proposal Strict).")
         return "Problem z systemem proponowania terminów.", None
 
     iso_match = re.search(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}(.*?){re.escape(SLOT_ISO_MARKER_SUFFIX)}", generated_text)
@@ -892,7 +916,7 @@ def get_gemini_slot_proposal(user_psid, history_for_proposal_ai, available_range
             proposed_end = proposed_start + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
             is_within = any(r['start'] <= proposed_start and proposed_end <= r['end'] for r in available_ranges)
             if not is_within:
-                 logging.error(f"!!! BŁĄD Walidacji AI (Strict) [{user_psid}]: ISO '{extracted_iso}' poza dostępnymi zakresami!")
+                 logging.error(f"!!! BŁĄD Walidacji AI (Strict) [{user_psid}]: ISO '{extracted_iso}' poza zakresami!")
                  return "Błąd wybierania terminu.", None
             if is_slot_actually_free(proposed_start, TARGET_CALENDAR_ID):
                  return text_for_user, extracted_iso
@@ -909,7 +933,7 @@ def get_gemini_slot_proposal(user_psid, history_for_proposal_ai, available_range
         logging.critical(f"!!! KRYTYCZNY BŁĄD AI (Strict) [{user_psid}]: Brak ISO! Odp: '{generated_text}'")
         clean_text = generated_text.strip()
         if clean_text:
-             return clean_text, None # Zwróć tekst, ale bez ISO
+             return clean_text, None # Zwróć sam tekst bez ISO
         else:
              return "Błąd generowania propozycji.", None
 
@@ -917,7 +941,7 @@ def get_gemini_slot_proposal(user_psid, history_for_proposal_ai, available_range
 def get_gemini_simple_feedback_decision(user_psid, user_feedback_text, history_for_feedback_ai, last_proposed_slot_text):
      """Prosi AI o zwrócenie [ACCEPT], [REJECT] lub [CLARIFY]."""
      if not gemini_model:
-        logging.error(f"!!! [{user_psid}] Model Gemini niezaładowany! Nie można interpretować feedbacku."); return "[CLARIFY]"
+         logging.error(f"!!! [{user_psid}] Model Gemini niezaładowany!"); return "[CLARIFY]"
 
      instruction = SYSTEM_INSTRUCTION_TEXT_FEEDBACK_SIMPLE.format(
          last_proposal_text=last_proposed_slot_text, user_feedback=user_feedback_text
@@ -956,9 +980,9 @@ def get_gemini_general_response(user_psid, current_user_message_text, history_fo
     full_prompt.append(Content(role="user", parts=[Part.from_text(current_user_message_text)]))
     max_prompt_messages = (MAX_HISTORY_TURNS * 2) + 2
     while len(full_prompt) > max_prompt_messages:
-        full_prompt.pop(2)
+        full_prompt.pop(2) # Usuń user
         if len(full_prompt) > 2:
-            full_prompt.pop(2)
+            full_prompt.pop(2) # Usuń model
     response_text = _call_gemini(user_psid, full_prompt, GENERATION_CONFIG_DEFAULT, "General Conversation")
     if response_text:
         if SLOT_ISO_MARKER_PREFIX in response_text:
@@ -968,7 +992,6 @@ def get_gemini_general_response(user_psid, current_user_message_text, history_fo
     else:
         logging.error(f"!!! [{user_psid}] Nie uzyskano odpowiedzi Gemini (General).")
         return "Przepraszam, błąd przetwarzania."
-
 
 # =====================================================================
 # === WEBHOOK HANDLERS ================================================
@@ -1049,14 +1072,14 @@ def webhook_handle():
                             if is_context_active:
                                 logging.info("      -> Kontekst aktywny. Pytanie AI (Simple Feedback)...")
                                 try:
-                                    # ZMIANA: Wywołanie uproszczonej funkcji feedbacku
+                                    # Użycie uproszczonej funkcji feedbacku
                                     decision = get_gemini_simple_feedback_decision(
                                         sender_id,
                                         user_input_text,
                                         history_for_gemini,
                                         last_proposal_text_for_feedback
                                     )
-                                    # ZMIANA: Uproszczona logika
+                                    # Uproszczona logika reakcji
                                     if decision == "[ACCEPT]":
                                         action = 'book'
                                         logging.info(f"      Decyzja AI (Simple): {decision} -> Akcja: Rezerwacja")
@@ -1071,7 +1094,7 @@ def webhook_handle():
                                         logging.info(f"      Decyzja AI (Simple): {decision} -> Akcja: Prośba o doprecyzowanie")
                                         msg_result = "Nie jestem pewien, co masz na myśli w kontekście terminu. Czy możesz wyjaśnić?"
                                         ctx_save = context # Zachowaj kontekst
-                                    else: # Błąd AI feedbacku
+                                    else: # Nieoczekiwany wynik
                                         action = 'send_error'
                                         logging.warning(f"      Niespodziewana decyzja AI (Simple Feedback): {decision}.")
                                         msg_result = "Problem ze zrozumieniem odpowiedzi."
@@ -1109,7 +1132,7 @@ def webhook_handle():
                              user_content = Content(role="user", parts=[Part.from_text(f"[Załącznik: {att_type}]")])
                              msg_result = "Nie obsługuję załączników." if att_type != 'sticker' else "👍"
                              action = 'send_info'
-                             ctx_save = context
+                             ctx_save = context # Zachowaj kontekst, jeśli był aktywny
                         else:
                             logging.info("      Otrzymano pustą wiadomość.")
                             if is_context_active:
@@ -1168,9 +1191,15 @@ def webhook_handle():
                                 ctx_save = None
 
                     # === Inne zdarzenia ===
-                    elif event.get("read"): logging.debug(f"    Potw. odczytania."); continue
-                    elif event.get("delivery"): logging.debug(f"    Potw. dostarczenia."); continue
-                    else: logging.warning(f"    Nieobsługiwany typ zdarzenia: {json.dumps(event)}"); continue
+                    elif event.get("read"):
+                        logging.debug(f"    Potw. odczytania.")
+                        continue
+                    elif event.get("delivery"):
+                        logging.debug(f"    Potw. dostarczenia.")
+                        continue
+                    else:
+                        logging.warning(f"    Nieobsługiwany typ zdarzenia: {json.dumps(event)}")
+                        continue
 
 
                     # --- WYKONANIE ZAPLANOWANEJ AKCJI ---
@@ -1215,7 +1244,7 @@ def webhook_handle():
                                     msg_result = final_proposal_msg
                                     ctx_save = {'role': 'system', 'type': 'last_proposal', 'slot_iso': proposed_iso}
                                 elif proposal_text and not proposed_iso: # AI dało tekst, ale bez ISO
-                                     logging.warning(f"      AI (Strict) dało tekst '{proposal_text[:50]}...' bez ISO. Wysyłanie tekstu.")
+                                     logging.warning(f"      AI (Strict) dało tekst '{proposal_text[:50]}...' bez ISO.")
                                      final_proposal_msg = (msg_result + "\n\n" + proposal_text) if msg_result else proposal_text
                                      msg_result = final_proposal_msg
                                      ctx_save = None # Reset kontekstu
@@ -1281,11 +1310,16 @@ def webhook_handle():
 if __name__ == '__main__':
     ensure_dir(HISTORY_DIR)
     log_level = logging.DEBUG if os.environ.get("FLASK_DEBUG", "False").lower() in ("true", "1", "yes") else logging.INFO
-    logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - [%(funcName)s:%(lineno)d] - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+    # Konfiguruj logowanie tylko raz
+    if not logging.getLogger().hasHandlers():
+        logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - [%(funcName)s:%(lineno)d] - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+
+    # Wyciszenie loggerów
     logging.getLogger('googleapiclient.discovery_cache').setLevel(logging.ERROR)
     logging.getLogger('urllib3.connectionpool').setLevel(logging.WARNING)
-    logging.getLogger('werkzeug').setLevel(logging.WARNING)
+    logging.getLogger('werkzeug').setLevel(logging.WARNING) # Mniej logów z serwera dev
 
+    # Wypisanie konfiguracji startowej
     print("\n" + "="*60 + "\n--- START KONFIGURACJI BOTA ---")
     print(f"  * Tryb debugowania Flask: {'Włączony' if log_level == logging.DEBUG else 'Wyłączony'}")
     print("-" * 60)
@@ -1307,8 +1341,11 @@ if __name__ == '__main__':
     print(f"    Projekt GCP: {PROJECT_ID}")
     print(f"    Lokalizacja GCP: {LOCATION}")
     print(f"    Model AI: {MODEL_ID}") # Nadal gemini-2.0-flash-001
-    if not gemini_model: print("!!! OSTRZEŻENIE: Model Gemini AI NIE został załadowany poprawnie! !!!")
-    else: print(f"    Model Gemini AI ({MODEL_ID}): Załadowany (OK)")
+    # Sprawdzenie, czy model został załadowany (zmienna globalna)
+    if not gemini_model:
+        print("!!! OSTRZEŻENIE: Model Gemini AI NIE został załadowany poprawnie podczas startu! (Sprawdź logi krytyczne) !!!")
+    else:
+        print(f"    Model Gemini AI ({MODEL_ID}): Załadowany (OK)")
     print("-" * 60)
     print("  Konfiguracja Kalendarza Google:")
     print(f"    ID Kalendarza: {TARGET_CALENDAR_ID}")
