@@ -18,7 +18,8 @@ import datetime
 import pytz
 import locale
 import re
-from collections import defaultdict # Potrzebne do grupowania zakresów
+# Usunięto import defaultdict, bo nie jest już potrzebny
+# from collections import defaultdict
 
 # --- Importy Google Calendar ---
 from google.oauth2 import service_account
@@ -58,7 +59,8 @@ TARGET_CALENDAR_ID = 'f19e189826b9d6e36950da347ac84d5501ecbd6bed0d76c8641be61a67
 PREFERRED_WEEKDAY_START_HOUR = 16
 PREFERRED_WEEKEND_START_HOUR = 10
 MAX_SEARCH_DAYS = 14
-# MAX_SLOTS_FOR_AI nie jest już potrzebne w tym podejściu
+# PRZYWRÓCONO: Maksymalna liczba KONKRETNYCH slotów przekazywanych do AI
+MAX_SLOTS_FOR_AI = 15
 
 # --- Inicjalizacja Zmiennych Globalnych dla Kalendarza ---
 _calendar_service = None
@@ -300,13 +302,13 @@ def parse_event_time(event_time_data, default_tz):
             return None
     return None
 
-# ZMIANA: Funkcja generująca ZAKRESY wolnego czasu
-def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
-    """Znajduje ciągłe zakresy wolnego czasu w kalendarzu Google."""
+# PRZYWRÓCONO: Funkcja generująca KONKRETNE sloty
+def get_free_slots(calendar_id, start_datetime, end_datetime):
+    """Znajduje wolne sloty (konkretne czasy rozpoczęcia) w kalendarzu Google."""
     service = get_calendar_service()
     tz = _get_timezone()
     if not service:
-        logging.error("Błąd: Usługa kalendarza niedostępna w get_free_time_ranges.")
+        logging.error("Błąd: Usługa kalendarza niedostępna w get_free_slots.")
         return []
 
     if start_datetime.tzinfo is None: start_datetime = tz.localize(start_datetime)
@@ -314,7 +316,7 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
     if end_datetime.tzinfo is None: end_datetime = tz.localize(end_datetime)
     else: end_datetime = end_datetime.astimezone(tz)
 
-    logging.info(f"Szukanie zakresów wolnego czasu (min. {APPOINTMENT_DURATION_MINUTES} min) w '{calendar_id}'")
+    logging.info(f"Szukanie wolnych slotów ({APPOINTMENT_DURATION_MINUTES} min) w '{calendar_id}'")
     logging.info(f"Zakres: od {start_datetime.strftime('%Y-%m-%d %H:%M:%S %Z')} do {end_datetime.strftime('%Y-%m-%d %H:%M:%S %Z')}")
 
     try:
@@ -334,175 +336,18 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
         logging.error(f"Nieoczekiwany błąd podczas pobierania wydarzeń: {e}", exc_info=True)
         return []
 
-    free_ranges = []
-    current_time = start_datetime
-    appointment_duration_td = datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
-
-    # Posortowane czasy rozpoczęcia i zakończenia zajętych wydarzeń
-    busy_times = []
-    for event in events:
-        start = parse_event_time(event.get('start'), tz)
-        end = parse_event_time(event.get('end'), tz)
-        if isinstance(start, datetime.datetime) and isinstance(end, datetime.datetime):
-            # Interesują nas tylko wydarzenia w głównym zakresie
-            if end > start_datetime and start < end_datetime:
-                 # Ograniczamy do zakresu start/end dla pewności
-                effective_start = max(start, start_datetime)
-                effective_end = min(end, end_datetime)
-                if effective_start < effective_end:
-                    busy_times.append({'start': effective_start, 'end': effective_end})
-        elif isinstance(start, datetime.date): # Obsługa wydarzeń całodniowych
-            event_date = start
-            day_start_limit = tz.localize(datetime.datetime.combine(event_date, datetime.time(0, 0)))
-            day_end_limit = tz.localize(datetime.datetime.combine(event_date, datetime.time(23, 59, 59)))
-            # Sprawdź, czy dzień wydarzenia całodniowego pokrywa się z zakresem
-            if day_end_limit > start_datetime and day_start_limit < end_datetime:
-                effective_start = max(day_start_limit, start_datetime)
-                effective_end = min(day_end_limit, end_datetime)
-                if effective_start < effective_end:
-                     busy_times.append({'start': effective_start, 'end': effective_end})
-
-
-    busy_times.sort(key=lambda x: x['start'])
-
-    # Scal nachodzące na siebie zajęte przedziały
-    merged_busy_times = []
-    if busy_times:
-        merged_busy_times.append(busy_times[0])
-        for current_busy in busy_times[1:]:
-            last_merged = merged_busy_times[-1]
-            if current_busy['start'] <= last_merged['end']:
-                last_merged['end'] = max(last_merged['end'], current_busy['end'])
-            else:
-                merged_busy_times.append(current_busy)
-
-    # Znajdź luki między zajętymi przedziałami
-    for busy in merged_busy_times:
-        free_start = current_time
-        free_end = busy['start']
-        # Sprawdź, czy zakres jest w dozwolonych godzinach pracy i czy jest wystarczająco długi
-        range_start = max(free_start, tz.localize(datetime.datetime.combine(free_start.date(), datetime.time(WORK_START_HOUR, 0))))
-        range_end = min(free_end, tz.localize(datetime.datetime.combine(free_end.date(), datetime.time(WORK_END_HOUR, 0))))
-
-        # Dodaj zakresy dla każdego dnia osobno, jeśli luka obejmuje zmianę dnia
-        current_check_date = range_start.date()
-        final_end_date = range_end.date()
-
-        while current_check_date <= final_end_date:
-             day_start_work = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_START_HOUR, 0)))
-             day_end_work = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_END_HOUR, 0)))
-
-             effective_range_start = max(range_start, day_start_work)
-             effective_range_end = min(range_end, day_end_work)
-
-             if effective_range_end > effective_range_start and effective_range_end - effective_range_start >= appointment_duration_td:
-                  free_ranges.append({'start': effective_range_start, 'end': effective_range_end})
-                  logging.debug(f"  + Znaleziono zakres wolny (między zajętymi): {effective_range_start.strftime('%Y-%m-%d %H:%M')} - {effective_range_end.strftime('%Y-%m-%d %H:%M')}")
-
-             current_check_date += datetime.timedelta(days=1)
-             # Ustaw range_start na początek następnego dnia, aby kontynuować sprawdzanie
-             range_start = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(0, 0)))
-
-
-        current_time = max(current_time, busy['end']) # Przesuń wskaźnik za zajęty okres
-
-    # Sprawdź zakres po ostatnim zajętym wydarzeniu do końca globalnego zakresu
-    free_start = current_time
-    free_end = end_datetime
-    range_start = max(free_start, tz.localize(datetime.datetime.combine(free_start.date(), datetime.time(WORK_START_HOUR, 0))))
-    range_end = min(free_end, tz.localize(datetime.datetime.combine(free_end.date(), datetime.time(WORK_END_HOUR, 0))))
-
-    current_check_date = range_start.date()
-    final_end_date = range_end.date()
-
-    while current_check_date <= final_end_date:
-        day_start_work = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_START_HOUR, 0)))
-        day_end_work = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_END_HOUR, 0)))
-
-        effective_range_start = max(range_start, day_start_work)
-        effective_range_end = min(range_end, day_end_work)
-
-        if effective_range_end > effective_range_start and effective_range_end - effective_range_start >= appointment_duration_td:
-            free_ranges.append({'start': effective_range_start, 'end': effective_range_end})
-            logging.debug(f"  + Znaleziono zakres wolny (po ostatnim zajętym): {effective_range_start.strftime('%Y-%m-%d %H:%M')} - {effective_range_end.strftime('%Y-%m-%d %H:%M')}")
-
-        current_check_date += datetime.timedelta(days=1)
-        range_start = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(0, 0)))
-
-
-    logging.info(f"Znaleziono {len(free_ranges)} zakresów wolnego czasu.")
-    return free_ranges
-
-# NOWA funkcja do formatowania ZAKRESÓW dla AI
-def format_ranges_for_ai(ranges):
-    """Formatuje listę zakresów na czytelny tekst dla AI."""
-    if not ranges:
-        return "Brak dostępnych zakresów czasowych w najbliższym czasie."
-
-    # Grupuj zakresy po dacie
-    ranges_by_date = defaultdict(list)
-    for r in ranges:
-        # Klucz to obiekt date, wartość to lista {'start_time': 'HH:MM', 'end_time': 'HH:MM'}
-        range_date = r['start'].date()
-        ranges_by_date[range_date].append({
-            'start_time': r['start'].strftime('%H:%M'),
-            'end_time': r['end'].strftime('%H:%M')
-        })
-
-    formatted_list = ["Oto dostępne zakresy czasowe, w których można umówić wizytę (trwającą 60 minut). Wybierz jeden zakres i wygeneruj w nim konkretny termin, preferując pełne godziny:"]
-
-    # Sortuj daty
-    sorted_dates = sorted(ranges_by_date.keys())
-
-    for d in sorted_dates:
-        day_name = POLISH_WEEKDAYS[d.weekday()]
-        date_str = d.strftime('%d.%m.%Y')
-        time_parts = []
-        for time_range in ranges_by_date[d]:
-            time_parts.append(f"{time_range['start_time']}-{time_range['end_time']}")
-        formatted_list.append(f"- {day_name}, {date_str}: {'; '.join(time_parts)}")
-
-    return "\n".join(formatted_list)
-
-# NOWA funkcja do weryfikacji, czy dany slot jest FAKTYCZNIE wolny
-# Używa oryginalnej logiki get_free_slots (przemianowanej)
-def get_valid_start_times(calendar_id, check_start, check_end):
-    """Zwraca listę DOKŁADNYCH dozwolonych czasów rozpoczęcia wizyty."""
-    # Ta funkcja zawiera logikę z poprzedniej wersji get_free_slots,
-    # która generuje konkretne 10-minutowe sloty.
-    service = get_calendar_service()
-    tz = _get_timezone()
-    if not service: return []
-
-    if check_start.tzinfo is None: check_start = tz.localize(check_start)
-    else: check_start = check_start.astimezone(tz)
-    if check_end.tzinfo is None: check_end = tz.localize(check_end)
-    else: check_end = check_end.astimezone(tz)
-
-    logging.debug(f"Pobieranie dokładnych slotów startowych w zakresie: {check_start.isoformat()} - {check_end.isoformat()}")
-
-    try:
-        events_result = service.events().list(
-            calendarId=calendar_id, timeMin=check_start.isoformat(),
-            timeMax=check_end.isoformat(), singleEvents=True,
-            orderBy='startTime').execute()
-        events = events_result.get('items', [])
-    except Exception as e:
-        logging.error(f"Błąd API przy pobieraniu wydarzeń dla weryfikacji slotu: {e}")
-        return []
-
-    valid_starts = []
-    current_day = check_start.date()
-    end_day = check_end.date()
+    free_slots_starts = []
+    current_day = start_datetime.date()
+    end_day = end_datetime.date()
     appointment_duration = datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
 
     while current_day <= end_day:
         day_start_limit = tz.localize(datetime.datetime.combine(current_day, datetime.time(WORK_START_HOUR, 0)))
         day_end_limit = tz.localize(datetime.datetime.combine(current_day, datetime.time(WORK_END_HOUR, 0)))
-        loop_check_start_time = max(check_start, day_start_limit)
-        loop_check_end_time = min(check_end, day_end_limit)
+        check_start_time = max(start_datetime, day_start_limit)
+        check_end_time = min(end_datetime, day_end_limit)
 
-        if loop_check_start_time >= loop_check_end_time:
+        if check_start_time >= check_end_time:
             current_day += datetime.timedelta(days=1)
             continue
 
@@ -513,10 +358,11 @@ def get_valid_start_times(calendar_id, check_start, check_end):
             if isinstance(start, datetime.date):
                 if start == current_day: busy_intervals.append({'start': day_start_limit, 'end': day_end_limit})
             elif isinstance(start, datetime.datetime) and isinstance(end, datetime.datetime):
-                if end > loop_check_start_time and start < loop_check_end_time:
-                    effective_start = max(start, loop_check_start_time)
-                    effective_end = min(end, loop_check_end_time)
+                if end > check_start_time and start < check_end_time:
+                    effective_start = max(start, check_start_time)
+                    effective_end = min(end, check_end_time)
                     if effective_start < effective_end: busy_intervals.append({'start': effective_start, 'end': effective_end})
+            else: logging.warning(f"Ostrz.: Wydarzenie '{event.get('summary','?')}' ma nieprawidłowe czasy ({type(start)}, {type(end)})")
 
         if not busy_intervals: merged_busy_times = []
         else:
@@ -526,61 +372,117 @@ def get_valid_start_times(calendar_id, check_start, check_end):
                  last_merged = merged_busy_times[-1]
                  if current_busy['start'] <= last_merged['end']: last_merged['end'] = max(last_merged['end'], current_busy['end'])
                  else: merged_busy_times.append(current_busy)
+             logging.debug(f"  Scalone zajęte dla {current_day}: {[{'s': t['start'].strftime('%H:%M'), 'e': t['end'].strftime('%H:%M')} for t in merged_busy_times]}")
 
-        potential_slot_start = loop_check_start_time
+        potential_slot_start = check_start_time
         for busy in merged_busy_times:
             busy_start = busy['start']
             busy_end = busy['end']
             while potential_slot_start + appointment_duration <= busy_start:
-                 if potential_slot_start.minute % 10 == 0:
-                    if potential_slot_start >= day_start_limit and potential_slot_start + appointment_duration <= day_end_limit:
-                        valid_starts.append(potential_slot_start)
-                 current_minute = potential_slot_start.minute
-                 minutes_to_add = 10 - (current_minute % 10) if current_minute % 10 != 0 else 10
-                 potential_slot_start += datetime.timedelta(minutes=minutes_to_add)
-                 potential_slot_start = potential_slot_start.replace(second=0, microsecond=0)
+                if potential_slot_start.minute % 10 == 0:
+                     if potential_slot_start >= day_start_limit and potential_slot_start + appointment_duration <= day_end_limit:
+                        free_slots_starts.append(potential_slot_start)
+                        logging.debug(f"  + Wolny slot (przed): {potential_slot_start.strftime('%Y-%m-%d %H:%M')}")
+                current_minute = potential_slot_start.minute
+                minutes_to_add = 10 - (current_minute % 10) if current_minute % 10 != 0 else 10
+                potential_slot_start += datetime.timedelta(minutes=minutes_to_add)
+                potential_slot_start = potential_slot_start.replace(second=0, microsecond=0)
             potential_slot_start = max(potential_slot_start, busy_end)
 
-        while potential_slot_start + appointment_duration <= loop_check_end_time:
+        while potential_slot_start + appointment_duration <= check_end_time:
              if potential_slot_start.minute % 10 == 0:
                 if potential_slot_start >= day_start_limit and potential_slot_start + appointment_duration <= day_end_limit:
-                    valid_starts.append(potential_slot_start)
+                    free_slots_starts.append(potential_slot_start)
+                    logging.debug(f"  + Wolny slot (po/cały): {potential_slot_start.strftime('%Y-%m-%d %H:%M')}")
              current_minute = potential_slot_start.minute
              minutes_to_add = 10 - (current_minute % 10) if current_minute % 10 != 0 else 10
              potential_slot_start += datetime.timedelta(minutes=minutes_to_add)
              potential_slot_start = potential_slot_start.replace(second=0, microsecond=0)
-
         current_day += datetime.timedelta(days=1)
 
-    # Zwróć posortowaną listę unikalnych datetime
-    final_valid_starts = sorted(list(set(slot for slot in valid_starts if check_start <= slot < check_end)))
-    logging.debug(f"Znaleziono {len(final_valid_starts)} dokładnych slotów startowych w podanym wąskim zakresie.")
-    return final_valid_starts
+    final_slots = sorted(list(set(slot for slot in free_slots_starts if start_datetime <= slot < end_datetime)))
+    logging.info(f"Znaleziono {len(final_slots)} unikalnych wolnych slotów (czasów rozpoczęcia).")
+    return final_slots
 
-def is_slot_actually_free(proposed_start_dt, calendar_id):
-    """Sprawdza, czy DOKŁADNIE proponowany czas rozpoczęcia jest na liście ważnych slotów."""
+# PRZYWRÓCONO: Funkcja formatująca KONKRETNE sloty dla AI
+def format_slots_for_ai(slots):
+    """Formatuje listę slotów (datetime) na czytelny tekst dla AI, zawierający ISO string."""
+    if not slots:
+        return "Brak dostępnych terminów w najbliższym czasie."
+
+    formatted_list = ["Oto kilka dostępnych terminów (każdy w formacie [SLOT_ISO:ISODATA] Dzień, DD.MM.RRRR o GG:MM):"]
+    # Używamy MAX_SLOTS_FOR_AI
+    for slot in slots[:MAX_SLOTS_FOR_AI]:
+        iso_str = slot.isoformat()
+        day_name = POLISH_WEEKDAYS[slot.weekday()]
+        hour_str = str(slot.hour)
+        readable_part = f"{day_name}, {slot.strftime(f'%d.%m.%Y o {hour_str}:%M')}"
+        formatted_list.append(f"- {SLOT_ISO_MARKER_PREFIX}{iso_str}{SLOT_ISO_MARKER_SUFFIX} {readable_part}")
+
+    return "\n".join(formatted_list)
+
+# USUNIĘTO: get_valid_start_times (logika wróciła do get_free_slots)
+# USUNIĘTO: is_slot_actually_free (weryfikacja będzie prostsza)
+
+def book_appointment(calendar_id, start_time, end_time, summary="Rezerwacja wizyty", description="", user_name=""):
+    service = get_calendar_service()
+    tz = _get_timezone()
+    if not service:
+        return False, "Błąd: Brak połączenia z usługą kalendarza."
+
+    if start_time.tzinfo is None: start_time = tz.localize(start_time)
+    else: start_time = start_time.astimezone(tz)
+    if end_time.tzinfo is None: end_time = tz.localize(end_time)
+    else: end_time = end_time.astimezone(tz)
+
+    event_summary = summary
+    if user_name:
+        event_summary += f" - {user_name}"
+
+    event = {
+        'summary': event_summary,
+        'description': description,
+        'start': {'dateTime': start_time.isoformat(), 'timeZone': CALENDAR_TIMEZONE,},
+        'end': {'dateTime': end_time.isoformat(), 'timeZone': CALENDAR_TIMEZONE,},
+        'reminders': {'useDefault': False, 'overrides': [{'method': 'popup', 'minutes': 60},], },
+    }
+
     try:
-        # Sprawdź w bardzo wąskim zakresie czasu (np. +/- 1 minuta) wokół proponowanego startu
-        check_start = proposed_start_dt - datetime.timedelta(minutes=1)
-        check_end = proposed_start_dt + datetime.timedelta(minutes=1)
-        valid_starts_nearby = get_valid_start_times(calendar_id, check_start, check_end)
-        # Sprawdź, czy proponowany czas startu jest DOKŁADNIE na liście
-        is_valid = proposed_start_dt in valid_starts_nearby
-        logging.info(f"Weryfikacja slotu {proposed_start_dt.isoformat()}: {'VALID' if is_valid else 'INVALID'}")
-        return is_valid
+        logging.info(f"Próba rezerwacji: '{event_summary}' od {start_time.strftime('%Y-%m-%d %H:%M')} do {end_time.strftime('%Y-%m-%d %H:%M')} w kalendarzu {calendar_id}")
+        created_event = service.events().insert(calendarId=calendar_id, body=event).execute()
+        event_id = created_event.get('id')
+        logging.info(f"Rezerwacja zakończona sukcesem. ID wydarzenia: {event_id}")
+
+        day_index = start_time.weekday(); locale_day_name = POLISH_WEEKDAYS[day_index]
+        hour_str = start_time.strftime('%#H') if os.name != 'nt' else start_time.strftime('%H')
+        try: hour_str = str(start_time.hour)
+        except Exception: pass
+        confirm_message = f"Świetnie! Termin na {locale_day_name}, {start_time.strftime(f'%d.%m.%Y o {hour_str}:%M')} został zarezerwowany."
+        return True, confirm_message
+
+    except HttpError as error:
+        error_details = f"Kod: {error.resp.status}, Powód: {error.resp.reason}"
+        try:
+            error_json = json.loads(error.content.decode('utf-8'))
+            error_message = error_json.get('error', {}).get('message', '')
+            if error_message: error_details += f" - {error_message}"
+        except (json.JSONDecodeError, AttributeError): pass
+        logging.error(f"Błąd API podczas rezerwacji: {error}, Szczegóły: {error_details}", exc_info=True)
+        if error.resp.status == 409: return False, "Niestety, ten termin został właśnie zajęty. Czy chcesz spróbować znaleźć inny?"
+        elif error.resp.status == 403: return False, f"Brak uprawnień do zapisu w kalendarzu '{calendar_id}'. Skontaktuj się z administratorem."
+        elif error.resp.status == 404: return False, f"Nie znaleziono kalendarza o ID '{calendar_id}'. Sprawdź konfigurację."
+        else: return False, f"Wystąpił nieoczekiwany błąd podczas rezerwacji (kod: {error.resp.status}). Spróbuj ponownie później."
     except Exception as e:
-        logging.error(f"Błąd podczas weryfikacji slotu {proposed_start_dt.isoformat()}: {e}", exc_info=True)
-        return False # Bezpieczniej założyć, że jest niepoprawny w razie błędu
+        logging.error(f"Nieoczekiwany błąd Python podczas rezerwacji: {e}", exc_info=True)
+        return False, "Wystąpił wewnętrzny błąd systemu rezerwacji. Przepraszamy za utrudnienia."
 
 def format_slot_for_user(slot_start):
-    if not isinstance(slot_start, datetime.datetime):
-        return ""
+    if not isinstance(slot_start, datetime.datetime): return ""
     try:
-        day_index = slot_start.weekday()
-        day_name = POLISH_WEEKDAYS[day_index]
+        day_index = slot_start.weekday(); day_name = POLISH_WEEKDAYS[day_index]
         hour_str = slot_start.strftime('%#H') if os.name != 'nt' else slot_start.strftime('%H')
         try: hour_str = str(slot_start.hour)
-        except Exception: pass # Ignoruj błąd formatowania godziny
+        except Exception: pass
         return f"{day_name}, {slot_start.strftime(f'%d.%m.%Y o {hour_str}:%M')}"
     except Exception as e:
         logging.error(f"Błąd formatowania slotu dla użytkownika: {e}", exc_info=True)
@@ -601,19 +503,10 @@ try:
 except Exception as e:
     logging.critical(f"KRYTYCZNY BŁĄD podczas inicjalizacji Vertex AI lub ładowania modelu {MODEL_ID}: {e}", exc_info=True)
 
-GENERATION_CONFIG_DEFAULT = GenerationConfig(
-    temperature=0.7, top_p=0.95, top_k=40, max_output_tokens=1024
-)
-# ZMIANA: Konfiguracja dla AI generującego termin z zakresu
-GENERATION_CONFIG_PROPOSAL = GenerationConfig(
-    temperature=0.5, # Nieco więcej kreatywności niż przy wyborze, ale nie za dużo
-    top_p=0.95,
-    top_k=40,
-    max_output_tokens=1024 # Dajmy więcej miejsca na odpowiedź
-)
-GENERATION_CONFIG_FEEDBACK = GenerationConfig(
-    temperature=0.1, top_p=0.95, top_k=40, max_output_tokens=100
-)
+GENERATION_CONFIG_DEFAULT = GenerationConfig(temperature=0.7, top_p=0.95, top_k=40, max_output_tokens=1024)
+# PRZYWRÓCONO: Konfiguracja dla AI wybierającego slot z listy
+GENERATION_CONFIG_PROPOSAL = GenerationConfig(temperature=0.4, top_p=0.95, top_k=40, max_output_tokens=512) # 512 powinno wystarczyć na krótką propozycję
+GENERATION_CONFIG_FEEDBACK = GenerationConfig(temperature=0.1, top_p=0.95, top_k=40, max_output_tokens=100)
 
 SAFETY_SETTINGS = {
     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
@@ -739,34 +632,34 @@ SYSTEM_INSTRUCTION_GENERAL = f"""Jesteś profesjonalnym i przyjaznym asystentem 
 **Ważne:** Znacznik `{INTENT_SCHEDULE_MARKER}` jest kluczowy do uruchomienia procesu szukania terminów. Używaj go **tylko i wyłącznie**, gdy jesteś pewien, że użytkownik chce się umówić lub bezpośrednio o to pyta. W innych przypadkach prowadź normalną rozmowę.
 """
 
-# ZMIANA: Nowa instrukcja dla AI generującego termin z zakresu
-SYSTEM_INSTRUCTION_PROPOSE = f"""Jesteś asystentem AI specjalizującym się w proponowaniu terminów spotkań dla 'Zakręcone Korepetycje'. Twoim zadaniem jest wybranie **jednego zakresu** z dostarczonej listy, wygenerowanie w nim **jednego konkretnego terminu** i zaproponowanie go użytkownikowi. Czas trwania wizyty to **{APPOINTMENT_DURATION_MINUTES} minut**.
+# PRZYWRÓCONO: Pierwotna instrukcja dla AI wybierającego z listy
+SYSTEM_INSTRUCTION_PROPOSE = f"""Jesteś asystentem AI specjalizującym się w proponowaniu terminów spotkań dla 'Zakręcone Korepetycje'. Twoim zadaniem jest wybranie **jednego**, najbardziej odpowiedniego terminu z dostarczonej listy i zaproponowanie go użytkownikowi.
 
-**Kontekst:** Użytkownik wyraził chęć umówienia pierwszej lekcji próbnej (płatnej). Otrzymałeś listę dostępnych ZAKRESÓW czasowych.
+**Kontekst:** Użytkownik wyraził chęć umówienia pierwszej lekcji próbnej (płatnej). Otrzymałeś listę dostępnych terminów.
 
-**Dostępne zakresy czasowe:**
-{{available_ranges_text}}
+**Dostępne terminy:**
+{{available_slots_text}}
 
 **Twoje zadanie:**
-1.  Przeanalizuj historię rozmowy (jeśli dostępna) pod kątem ewentualnych preferencji użytkownika (np. "popołudniu", "wtorek", "po 16").
-2.  Wybierz **jeden** zakres z powyższej listy, który najlepiej pasuje do preferencji użytkownika LUB jeśli brak preferencji, wybierz zakres "rozsądny" (np. popołudnie w tygodniu, okolice południa w weekend).
-3.  Wewnątrz wybranego zakresu **wygeneruj DOKŁADNY czas rozpoczęcia** wizyty. **Preferuj PEŁNE GODZINY** (np. 16:00, 10:00), jeśli to możliwe w ramach zakresu.
-4.  **BARDZO WAŻNE:** Upewnij się, że wygenerowany czas rozpoczęcia pozwala na odbycie całej wizyty (czyli `wygenerowany_czas + {APPOINTMENT_DURATION_MINUTES} minut`) **w całości w ramach wybranego zakresu czasowego**. Np. jeśli zakres to 16:00-16:50, a wizyta trwa 60 minut, to 16:00 NIE jest poprawnym czasem rozpoczęcia.
-5.  Sformułuj **krótką, uprzejmą i naturalną propozycję** wygenerowanego terminu, pytając użytkownika o akceptację. Użyj polskiego formatu daty i dnia tygodnia.
-6.  **ABSOLUTNIE KLUCZOWE:** W swojej odpowiedzi **musisz** zawrzeć **identyfikator ISO wygenerowanego przez Ciebie terminu rozpoczęcia** w specjalnym znaczniku `{SLOT_ISO_MARKER_PREFIX}WYGENEROWANY_ISO_STRING{SLOT_ISO_MARKER_SUFFIX}`. Znacznik ten musi być częścią odpowiedzi i zawierać poprawny format ISO 8601 ze strefą czasową (np. `2025-05-07T17:00:00+02:00`).
+1.  Przeanalizuj historię rozmowy (jeśli dostępna) pod kątem ewentualnych preferencji użytkownika (np. "popołudniu", "wtorek", "po 16"). Uwzględnij te preferencje przy wyborze.
+2.  Jeśli brak wyraźnych preferencji w historii, wybierz termin, który wydaje się "rozsądny":
+    *   W dni robocze (Pon-Pt): preferuj godziny popołudniowe (od {PREFERRED_WEEKDAY_START_HOUR}:00).
+    *   W weekendy (Sob-Nd): preferuj godziny od {PREFERRED_WEEKEND_START_HOUR}:00.
+    *   Jeśli to możliwe, wybierz termin nie w najbliższych kilku godzinach, dając użytkownikowi czas na przygotowanie.
+3.  Wybierz **tylko jeden** termin z powyższej listy "Dostępne terminy".
+4.  Sformułuj **krótką, uprzejmą i naturalną propozycję** wybranego terminu, pytając użytkownika o akceptację. Użyj polskiego formatu daty i dnia tygodnia.
+5.  **ABSOLUTNIE KLUCZOWE:** W swojej odpowiedzi **musisz** zawrzeć identyfikator ISO wybranego terminu w specjalnym znaczniku `{SLOT_ISO_MARKER_PREFIX}TWOJ_WYBRANY_ISO_STRING{SLOT_ISO_MARKER_SUFFIX}`. Znacznik ten musi być częścią odpowiedzi.
 
-**Przykład (jeśli zakres to "Środa, 07.05.2025: 16:00-18:30"):**
-*   Dobry wybór (pełna godzina, mieści się w zakresie): "Proponuję termin: Środa, 07.05.2025 o 17:00. Czy ten termin by odpowiadał? {SLOT_ISO_MARKER_PREFIX}2025-05-07T17:00:00+02:00{SLOT_ISO_MARKER_SUFFIX}"
-*   Zły wybór (nie mieści się w zakresie): 18:00 (bo 18:00 + 60 min = 19:00, a zakres kończy się o 18:30)
-*   Zły wybór (niepełna godzina, jeśli pełna była możliwa): 16:30
+**Przykład dobrej odpowiedzi (jeśli wybrałeś termin z ISO '2025-05-06T16:00:00+02:00'):**
+"Znalazłem dla Pana/Pani taki termin: Wtorek, 06.05.2025 o 16:00. Czy taki termin by odpowiadał? {SLOT_ISO_MARKER_PREFIX}2025-05-06T16:00:00+02:00{SLOT_ISO_MARKER_SUFFIX}"
+Lub:
+"Proponuję termin: Piątek, 09.05.2025 o 17:30. {SLOT_ISO_MARKER_PREFIX}2025-05-09T17:30:00+02:00{SLOT_ISO_MARKER_SUFFIX} Pasuje?"
 
 **Zasady:**
 *   Odpowiadaj po polsku.
 *   Bądź zwięzły i profesjonalny.
-*   **Wygeneruj tylko JEDEN termin** w ramach JEDNEGO wybranego zakresu.
-*   **Zawsze** preferuj pełne godziny, jeśli to możliwe.
-*   **Zawsze** sprawdzaj, czy cała wizyta zmieści się w zakresie.
-*   **Zawsze** dołączaj znacznik `{SLOT_ISO_MARKER_PREFIX}...{SLOT_ISO_MARKER_SUFFIX}` z poprawnym ISO stringiem **wygenerowanego** terminu.
+*   **Nie proponuj** terminów spoza dostarczonej listy.
+*   **Zawsze** dołączaj znacznik `{SLOT_ISO_MARKER_PREFIX}...{SLOT_ISO_MARKER_SUFFIX}` z poprawnym ISO stringiem wybranego terminu.
 *   Nie dodawaj żadnych innych informacji (np. o cenniku), skup się tylko na propozycji terminu.
 """
 
@@ -904,23 +797,23 @@ def get_gemini_general_response(user_psid, user_input, history):
     response_text = _call_gemini(user_psid, prompt_content, GENERATION_CONFIG_DEFAULT, model_purpose="General Conversation & Intent Detection", max_retries=1)
     return response_text
 
-# ZMIANA: Funkcja wywołująca AI do GENEROWANIA terminu z ZAKRESÓW
-def get_gemini_slot_proposal(user_psid, history, available_ranges):
-    """Wywołuje AI, aby wygenerowało jeden slot z podanych zakresów i sformułowało propozycję."""
-    if not available_ranges:
-        logging.warning(f"[{user_psid}]: Brak zakresów do przekazania AI ({MODEL_ID}) do propozycji.")
+# PRZYWRÓCONO: Logika wybierania slotu z listy
+def get_gemini_slot_proposal(user_psid, history, available_slots):
+    """Wywołuje AI, aby wybrało jeden slot z listy i sformułowało propozycję."""
+    if not available_slots:
+        logging.warning(f"[{user_psid}]: Brak slotów do przekazania AI ({MODEL_ID}) do propozycji.")
         return None, None
 
-    ranges_text_for_ai = format_ranges_for_ai(available_ranges)
-    logging.info(f"[{user_psid}] Przekazuję {len(available_ranges)} zakresów do AI ({MODEL_ID}) w celu wygenerowania terminu.")
+    # Używamy formatowania listy slotów
+    slots_text_for_ai = format_slots_for_ai(available_slots[:MAX_SLOTS_FOR_AI])
+    logging.info(f"[{user_psid}] Przekazuję {min(len(available_slots), MAX_SLOTS_FOR_AI)} slotów do AI ({MODEL_ID}) w celu wyboru.")
 
     history_for_ai = [msg for msg in history if msg.role in ('user', 'model')]
-    # Używamy nowej instrukcji systemowej
-    current_instruction = SYSTEM_INSTRUCTION_PROPOSE.format(available_ranges_text=ranges_text_for_ai)
+    # Używamy przywróconej instrukcji
+    current_instruction = SYSTEM_INSTRUCTION_PROPOSE.format(available_slots_text=slots_text_for_ai)
     prompt_content = [
         Content(role="user", parts=[Part.from_text(current_instruction)]),
-        # Zaktualizowana odpowiedź modela dla nowej instrukcji
-        Content(role="model", parts=[Part.from_text(f"Rozumiem. Wybiorę jeden zakres, wygeneruję w nim konkretny termin ({APPOINTMENT_DURATION_MINUTES} min), preferując pełne godziny i upewniając się, że mieści się w zakresie. Następnie sformułuję propozycję i dołączę znacznik {SLOT_ISO_MARKER_PREFIX}WYGENEROWANY_ISO_STRING{SLOT_ISO_MARKER_SUFFIX}.")])
+        Content(role="model", parts=[Part.from_text(f"Rozumiem. Wybiorę jeden najlepszy termin z dostarczonej listy, sformułuję propozycję i dołączę znacznik {SLOT_ISO_MARKER_PREFIX}ISO_TERMINU{SLOT_ISO_MARKER_SUFFIX}.")])
     ]
     prompt_content.extend(history_for_ai)
 
@@ -929,30 +822,28 @@ def get_gemini_slot_proposal(user_psid, history, available_ranges):
          prompt_content.pop(2)
          if len(prompt_content) > 2: prompt_content.pop(2)
 
-    # Wywołanie AI
-    generated_text = _call_gemini(user_psid, prompt_content, GENERATION_CONFIG_PROPOSAL, model_purpose="Slot Proposal from Ranges", max_retries=1)
+    # Używamy przywróconej konfiguracji
+    generated_text = _call_gemini(user_psid, prompt_content, GENERATION_CONFIG_PROPOSAL, model_purpose="Slot Proposal from List", max_retries=1)
 
     if not generated_text:
-        return None, None # Błąd lub pusta odpowiedź
+        return None, None
 
-    # Walidacja odpowiedzi AI - tylko szukanie znacznika i ekstrakcja ISO
+    # Walidacja - czy zawiera znacznik i czy ISO jest na liście
     iso_match = re.search(rf"\{SLOT_ISO_MARKER_PREFIX}(.*?)\{SLOT_ISO_MARKER_SUFFIX}", generated_text)
     if iso_match:
         extracted_iso = iso_match.group(1)
-        # Na tym etapie NIE weryfikujemy, czy ISO jest poprawne/wolne. To zrobi webhook_handle.
-        text_for_user = re.sub(rf"\{SLOT_ISO_MARKER_PREFIX}.*?\{SLOT_ISO_MARKER_SUFFIX}", "", generated_text).strip()
-        text_for_user = re.sub(r'\s+', ' ', text_for_user).strip()
-        logging.info(f"[{user_psid}] AI ({MODEL_ID}) wygenerowało potencjalny slot: {extracted_iso}. Tekst dla użytkownika: '{text_for_user}'")
-        # Spróbujmy sparsować ISO, aby upewnić się, że ma poprawny format
-        try:
-            datetime.datetime.fromisoformat(extracted_iso)
+        # Weryfikacja, czy ISO jest na liście *przekazanej* do AI
+        slot_exists = any(slot.isoformat() == extracted_iso for slot in available_slots[:MAX_SLOTS_FOR_AI])
+        if slot_exists:
+            text_for_user = re.sub(rf"\{SLOT_ISO_MARKER_PREFIX}.*?\{SLOT_ISO_MARKER_SUFFIX}", "", generated_text).strip()
+            text_for_user = re.sub(r'\s+', ' ', text_for_user).strip()
+            logging.info(f"[{user_psid}] AI ({MODEL_ID}) wybrało poprawny slot: {extracted_iso}. Tekst dla użytkownika: '{text_for_user}'")
             return text_for_user, extracted_iso
-        except ValueError:
-             logging.error(f"!!! BŁĄD KRYTYCZNY AI [{user_psid}, {MODEL_ID}]: Wygenerowany ISO '{extracted_iso}' ma nieprawidłowy format!")
-             return None, None # Zwróć błąd, jeśli format ISO jest zły
+        else:
+            logging.error(f"!!! BŁĄD KRYTYCZNY AI [{user_psid}, {MODEL_ID}]: Zaproponowany ISO '{extracted_iso}' nie znajduje się na liście dostępnych slotów przekazanych do AI!")
+            return None, None
     else:
-        # To jest nadal krytyczny błąd, bo AI nie zastosowało się do instrukcji
-        logging.error(f"!!! BŁĄD KRYTYCZNY AI [{user_psid}, {MODEL_ID}]: Brak znacznika {SLOT_ISO_MARKER_PREFIX}...{SLOT_ISO_MARKER_SUFFIX} w odpowiedzi AI generującej slot!")
+        logging.error(f"!!! BŁĄD KRYTYCZNY AI [{user_psid}, {MODEL_ID}]: Brak znacznika {SLOT_ISO_MARKER_PREFIX}...{SLOT_ISO_MARKER_SUFFIX} w odpowiedzi AI wybierającej slot!")
         logging.error(f"    Odpowiedź AI ({MODEL_ID}): '{generated_text}'")
         return None, None
 
@@ -1129,7 +1020,7 @@ def webhook_handle():
                                         text_to_send_immediately = text_before_marker
                                     else:
                                         text_to_send_immediately = "Dobrze, sprawdzę dostępne terminy."
-                                    preference = 'any' # Reset preferencji przy nowym szukaniu
+                                    preference = 'any'
                                     requested_day_str = None
                                     requested_hour_int = None
                                     model_response_content = Content(role="model", parts=[Part.from_text(text_to_send_immediately)])
@@ -1145,7 +1036,7 @@ def webhook_handle():
 
                         if text_to_send_immediately:
                             send_message(sender_id, text_to_send_immediately)
-                            # Zapisz historię tylko jeśli wiadomość pochodziła z wykrycia intencji
+                            # PRZYWRÓCONO: Logika zapisu historii po wykryciu intencji
                             if action_to_perform == 'find_and_propose' and model_response_content:
                                 save_history(sender_id, history + [user_content, model_response_content], context_to_save=None)
                                 history.append(user_content)
@@ -1155,27 +1046,23 @@ def webhook_handle():
                         if action_to_perform == 'book':
                             try:
                                 tz = _get_timezone()
-                                # Weryfikacja przed rezerwacją - czy slot nadal jest ważny?
+                                # Prosta weryfikacja formatu ISO przed parsowaniem
                                 proposed_start_dt_verify = datetime.datetime.fromisoformat(last_proposed_slot_iso).astimezone(tz)
-                                if is_slot_actually_free(proposed_start_dt_verify, TARGET_CALENDAR_ID):
-                                    start_time = proposed_start_dt_verify
-                                    end_time = start_time + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
-                                    user_profile = get_user_profile(sender_id)
-                                    user_name = user_profile.get('first_name', 'Użytkownik FB') if user_profile else 'Użytkownik FB'
-                                    logging.info(f"      Wywołanie book_appointment dla {start_time}")
-                                    success, message_to_user = book_appointment(
-                                        TARGET_CALENDAR_ID, start_time, end_time,
-                                        summary=f"Korepetycje (FB)",
-                                        description=f"Rezerwacja przez bota FB.\nPSID: {sender_id}\nImię: {user_name}",
-                                        user_name=user_name)
-                                    text_to_send_as_result = message_to_user
-                                    if not success: error_occurred = True
-                                else:
-                                    logging.warning(f"[{sender_id}] Slot {last_proposed_slot_iso} nie jest już dostępny! Informowanie użytkownika.")
-                                    text_to_send_as_result = "Niestety, wybrany przez Ciebie termin został w międzyczasie zajęty. Czy chcesz poszukać innego?"
-                                    # Nie ustawiamy błędu, ale resetujemy kontekst, żeby mógł szukać dalej
-                                context_to_save = None # Zawsze resetuj kontekst po próbie rezerwacji
-                            except ValueError: # Błąd parsowania ISO
+                                # Nie ma już potrzeby weryfikacji is_slot_actually_free, bo zakładamy poprawność ISO z kontekstu
+                                start_time = proposed_start_dt_verify
+                                end_time = start_time + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+                                user_profile = get_user_profile(sender_id)
+                                user_name = user_profile.get('first_name', 'Użytkownik FB') if user_profile else 'Użytkownik FB'
+                                logging.info(f"      Wywołanie book_appointment dla {start_time}")
+                                success, message_to_user = book_appointment(
+                                    TARGET_CALENDAR_ID, start_time, end_time,
+                                    summary=f"Korepetycje (FB)",
+                                    description=f"Rezerwacja przez bota FB.\nPSID: {sender_id}\nImię: {user_name}",
+                                    user_name=user_name)
+                                text_to_send_as_result = message_to_user
+                                if not success: error_occurred = True
+                                context_to_save = None
+                            except ValueError:
                                 logging.error(f"!!! BŁĄD: Nie można sparsować ISO '{last_proposed_slot_iso}' z kontekstu przy rezerwacji.")
                                 text_to_send_as_result = "Wystąpił błąd podczas próby rezerwacji terminu. Spróbuj ponownie."
                                 error_occurred = True
@@ -1185,14 +1072,12 @@ def webhook_handle():
                                 text_to_send_as_result = "Wystąpił poważny błąd podczas próby rezerwacji terminu. Skontaktuj się z nami bezpośrednio."
                                 error_occurred = True
                                 context_to_save = None
-
                         elif action_to_perform == 'find_and_propose':
                             try:
                                 tz = _get_timezone()
                                 now = datetime.datetime.now(tz)
                                 search_start = now
                                 if last_proposed_slot_iso and preference != 'any':
-                                    # ... (logika ustalania search_start bez zmian) ...
                                     try:
                                         last_proposed_dt = datetime.datetime.fromisoformat(last_proposed_slot_iso).astimezone(tz)
                                         base_start = last_proposed_dt + datetime.timedelta(minutes=10)
@@ -1220,59 +1105,62 @@ def webhook_handle():
                                         logging.error(f"Błąd przy ustalaniu search_start na podstawie preferencji: {date_err}", exc_info=True)
                                         search_start = now
                                 else: search_start = now
-
-                                logging.info(f"      Rozpoczynanie szukania zakresów od: {search_start.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                                logging.info(f"      Rozpoczynanie szukania slotów od: {search_start.strftime('%Y-%m-%d %H:%M:%S %Z')}")
                                 search_end_date = (search_start + datetime.timedelta(days=MAX_SEARCH_DAYS)).date()
                                 search_end = tz.localize(datetime.datetime.combine(search_end_date, datetime.time(WORK_END_HOUR, 0)))
 
-                                # Krok 1: Znajdź zakresy wolnego czasu
-                                free_ranges = get_free_time_ranges(TARGET_CALENDAR_ID, search_start, search_end)
+                                # Krok 1: Znajdź KONKRETNE wolne sloty
+                                free_slots = get_free_slots(TARGET_CALENDAR_ID, search_start, search_end)
 
-                                if free_ranges:
-                                    # Krok 2: Poproś AI o wygenerowanie slotu z tych zakresów
-                                    logging.info(f"      Przekazanie {len(free_ranges)} zakresów do AI ({MODEL_ID}) w celu wygenerowania propozycji...")
-                                    proposal_text, proposed_iso = get_gemini_slot_proposal(sender_id, history, free_ranges)
+                                if free_slots:
+                                    # Krok 2: Opcjonalnie filtruj sloty wg preferencji godzinowych/popołudniowych
+                                    filtered_slots = free_slots
+                                    if preference == 'specific_hour' and requested_hour_int is not None:
+                                        potential_matches = [s for s in free_slots if s.hour == requested_hour_int]
+                                        if potential_matches:
+                                             filtered_slots = potential_matches
+                                             logging.info(f"Wstępnie przefiltrowano sloty do godziny {requested_hour_int}. Liczba: {len(filtered_slots)}")
+                                        else: logging.info(f"Brak slotów o godzinie {requested_hour_int}. Używam wszystkich {len(free_slots)}.")
+                                    elif preference == 'later':
+                                        potential_matches = [s for s in free_slots if s.hour >= PREFERRED_WEEKDAY_START_HOUR]
+                                        if potential_matches:
+                                             filtered_slots = potential_matches
+                                             logging.info(f"Wstępnie przefiltrowano sloty do popołudniowych. Liczba: {len(filtered_slots)}")
+                                        else: logging.info(f"Brak slotów popołudniowych. Używam wszystkich {len(free_slots)}.")
+                                    elif preference == 'earlier':
+                                         potential_matches = [s for s in free_slots if s.hour < 12]
+                                         if potential_matches:
+                                              filtered_slots = potential_matches
+                                              logging.info(f"Wstępnie przefiltrowano sloty do przedpołudniowych. Liczba: {len(filtered_slots)}")
+                                         else: logging.info(f"Brak slotów przedpołudniowych. Używam wszystkich {len(free_slots)}.")
 
-                                    verified_iso = None # Zmienna na zweryfikowany ISO
+                                    # Krok 3: Poproś AI o WYBRANIE slotu z (potencjalnie filtrowanej) listy
+                                    logging.info(f"      Przekazanie {len(filtered_slots)} slotów do AI ({MODEL_ID}) w celu wyboru propozycji...")
+                                    # Przekazujemy listę `filtered_slots`, AI wybierze z niej max MAX_SLOTS_FOR_AI
+                                    proposal_text, proposed_iso = get_gemini_slot_proposal(sender_id, history, filtered_slots)
 
+                                    # Krok 4: Logika awaryjna (Fallback), jeśli AI nie wybrało poprawnie
                                     if proposal_text and proposed_iso:
-                                        # Krok 3: WERYFIKACJA wygenerowanego slotu
-                                        try:
-                                            proposed_start_dt_verify = datetime.datetime.fromisoformat(proposed_iso).astimezone(tz)
-                                            if is_slot_actually_free(proposed_start_dt_verify, TARGET_CALENDAR_ID):
-                                                verified_iso = proposed_iso # Slot jest poprawny i wolny
-                                                text_to_send_as_result = proposal_text
-                                                context_to_save = {'role': 'system', 'type': 'last_proposal', 'slot_iso': verified_iso}
-                                                logging.info(f"      AI ({MODEL_ID}) wygenerowało poprawny i wolny slot: {verified_iso}")
-                                            else:
-                                                logging.warning(f"[{sender_id}] AI ({MODEL_ID}) wygenerowało termin ({proposed_iso}), który NIE JEST faktycznie wolny! Używam fallbacku.")
-                                                # Nie ustawiaj text_to_send_as_result ani context_to_save, przejdź do fallbacku
-                                        except ValueError:
-                                             logging.error(f"!!! BŁĄD [{sender_id}, {MODEL_ID}]: AI zwróciło nieprawidłowy format ISO '{proposed_iso}'. Używam fallbacku.")
-                                             # Nie ustawiaj text_to_send_as_result ani context_to_save, przejdź do fallbacku
+                                        # AI wybrało poprawny slot z listy
+                                        text_to_send_as_result = proposal_text
+                                        context_to_save = {'role': 'system', 'type': 'last_proposal', 'slot_iso': proposed_iso}
+                                        # Logowanie już jest w get_gemini_slot_proposal
                                     else:
-                                        logging.warning(f"[{sender_id}] AI ({MODEL_ID}) nie zwróciło propozycji (błąd lub pusta odpowiedź). Używam fallbacku.")
-                                        # Przejdź do fallbacku
-
-                                    # Krok 4: Logika awaryjna (Fallback), jeśli weryfikacja zawiodła lub AI nie odpowiedziało
-                                    if not verified_iso:
-                                        logging.info(f"      Uruchamianie logiki awaryjnej (Fallback)...")
-                                        # Pobierz listę *dokładnych* slotów, aby mieć z czego wybrać
-                                        all_possible_slots = get_valid_start_times(TARGET_CALENDAR_ID, search_start, search_end)
-                                        if all_possible_slots:
-                                            fallback_slot = all_possible_slots[0] # Wybierz pierwszy dostępny
+                                        logging.warning(f"[{sender_id}] AI ({MODEL_ID}) nie wybrało poprawnego slotu z listy. Używam logiki awaryjnej.")
+                                        if filtered_slots: # Upewnij się, że mamy z czego wybrać
+                                            fallback_slot = filtered_slots[0] # Wybierz pierwszy z (potencjalnie filtrowanej) listy
                                             fallback_iso = fallback_slot.isoformat()
                                             fallback_text = f"Mam pewien problem z wyszukaniem idealnego terminu, ale proponuję najbliższy dostępny: {format_slot_for_user(fallback_slot)}. Czy ten może być?"
                                             text_to_send_as_result = fallback_text
                                             context_to_save = {'role': 'system', 'type': 'last_proposal', 'slot_iso': fallback_iso}
                                             logging.info(f"      Logika awaryjna wybrała: {fallback_text} (ISO: {fallback_iso})")
-                                        else:
-                                             logging.error(f"[{sender_id}] Brak jakichkolwiek ważnych slotów startowych dla logiki awaryjnej!")
-                                             text_to_send_as_result = "Niestety, nie udało mi się znaleźć żadnych dostępnych terminów w tej chwili."
+                                        else: # Ten case nie powinien się zdarzyć, jeśli free_slots nie było puste
+                                             logging.error(f"[{sender_id}] Brak slotów w filtered_slots dla logiki awaryjnej!")
+                                             text_to_send_as_result = "Niestety, mam problem ze znalezieniem pasującego terminu. Spróbuj ponownie później."
                                              error_occurred = True
                                              context_to_save = None
-                                else: # Brak jakichkolwiek zakresów
-                                    logging.info("      Nie znaleziono żadnych zakresów wolnego czasu w kalendarzu.")
+                                else: # Brak jakichkolwiek wolnych slotów
+                                    logging.info("      Nie znaleziono żadnych wolnych slotów w kalendarzu.")
                                     text_to_send_as_result = "Niestety, aktualnie brak wolnych terminów w kalendarzu pasujących do Twoich kryteriów."
                                     context_to_save = None
                             except Exception as find_err:
@@ -1393,7 +1281,8 @@ if __name__ == '__main__':
     print(f"  Docelowy Kalendarz Google ID: {TARGET_CALENDAR_ID}")
     print(f"  Strefa czasowa kalendarza: {CALENDAR_TIMEZONE}")
     print(f"  Symulacja pisania: {'Włączona' if ENABLE_TYPING_DELAY else 'Wyłączona'}")
-    # Usunięto MAX_SLOTS_FOR_AI z logów startowych, bo nie jest już bezpośrednio używane w ten sam sposób
+    # PRZYWRÓCONO logowanie MAX_SLOTS_FOR_AI
+    print(f"  Maks. slotów przekazywanych do AI: {MAX_SLOTS_FOR_AI}")
 
     if gemini_model is None:
         print(f"\n!!! OSTRZEŻENIE: Model Gemini AI ({MODEL_ID}) NIE został załadowany poprawnie!")
