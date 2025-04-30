@@ -766,12 +766,24 @@ def _call_gemini(user_psid, prompt_content, generation_config, model_purpose="",
     logging.error(f"!!! [{user_psid}] Pętla _call_gemini zakończona."); return None
 
 def get_gemini_general_response(user_psid, user_input, history):
+    """Wywołuje AI do prowadzenia rozmowy i wykrywania intencji umówienia."""
     if not user_input: return None
-    history_for_ai = [m for m in history if m.role in ('user','model')]; user_c = Content(role="user", parts=[Part.from_text(user_input)])
-    prompt = [Content(role="user", parts=[Part.from_text(SYSTEM_INSTRUCTION_GENERAL)]), Content(role="model", parts=[Part.from_text("Rozumiem.")])] + history_for_ai + [user_c]
-    while len(prompt)>(MAX_HISTORY_TURNS*2+3) and len(prompt)>3: logging.warning(f"[{user_psid}] Prompt Gen długi. Skracam."); prompt.pop(2); if len(prompt)>3: prompt.pop(2)
-    return _call_gemini(user_psid, prompt, GENERATION_CONFIG_DEFAULT, "General Conversation & Intent Detection", 1)
+    history_for_ai = [m for m in history if m.role in ('user','model')]
+    user_c = Content(role="user", parts=[Part.from_text(user_input)])
+    prompt = [
+        Content(role="user", parts=[Part.from_text(SYSTEM_INSTRUCTION_GENERAL)]),
+        Content(role="model", parts=[Part.from_text("Rozumiem.")])
+    ] + history_for_ai + [user_c]
 
+    # Poprawione przycinanie promptu (bez średników)
+    while len(prompt) > (MAX_HISTORY_TURNS * 2 + 3) and len(prompt) > 3:
+        logging.warning(f"[{user_psid}] Prompt General za długi ({len(prompt)}). Usuwam turę.")
+        prompt.pop(2) # Usuń najstarszą wiadomość użytkownika (po instrukcjach)
+        if len(prompt) > 3: # Upewnij się, że jest co usunąć (odpowiedź modelu)
+             prompt.pop(2) # Usuń odpowiadającą jej wiadomość modelu
+
+    response_text = _call_gemini(user_psid, prompt, GENERATION_CONFIG_DEFAULT, "General Conversation & Intent Detection", 1)
+    return response_text
 # ZMIANA: Funkcja używa ZAKRESÓW
 def get_gemini_slot_proposal(user_psid, history, available_ranges):
     if not available_ranges: logging.warning(f"[{user_psid}]: Brak zakresów dla AI."); return None, None
