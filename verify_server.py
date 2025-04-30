@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# verify_server.py (połączony kod z iteracyjnym szukaniem wg preferencji)
+# verify_server.py (wersja z AI GENERUJĄCYM termin z ZAKRESÓW - obsługa dnia+pory v2)
 
 from flask import Flask, request, Response
 import os
@@ -30,7 +30,7 @@ app = Flask(__name__)
 
 # --- Konfiguracja Ogólna ---
 VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "KOLAGEN")
-PAGE_ACCESS_TOKEN = os.environ.get("FB_PAGE_ACCESS_TOKEN", "EACNAHFzEhkUBO4ypcoyQfWIgNc0YLZA1aCr9n3BzpvSJLoBTJnv5rWZBmc7HlqF6uUWt1uAp6aDZB8ZAb0RRT45qVIfGnciQX6wBKrZColGARfVLXP5Ic6Ptrj5AUvom4Rt12hyBxcjIJGes76fvdvBhiBZCJ0ZCVfkQMZBZCBatJshSZA8hFuRyKd58b50wkhVCMZCuwZDZD") # WAŻNE: Podaj swój prawdziwy token!
+PAGE_ACCESS_TOKEN = os.environ.get("FB_PAGE_ACCESS_TOKEN", "EACNAHFzEhkUBO4ypcoyQfWIgNc0YLZA1aCr9n3BzpvSJLoBTJnv5rWZBmc7HlqF6uUWt1uAp6aDZB8ZAb0RRT45qVIfGnciQX6wBKrZColGARfVLXP5Ic6Ptrj5AUvom4Rt12hyBxcjIJGes76fvdvBhiBZCJ0ZCVfkQMZBZCBatJshSZA8hFuRyKd58b50wkhVCMZCuwZDZD")
 PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "linear-booth-450221-k1")
 LOCATION = os.environ.get("GCP_LOCATION", "us-central1")
 MODEL_ID = os.environ.get("VERTEX_MODEL_ID", "gemini-2.0-flash-001")
@@ -55,9 +55,9 @@ APPOINTMENT_DURATION_MINUTES = 60
 WORK_START_HOUR = 7
 WORK_END_HOUR = 22
 TARGET_CALENDAR_ID = 'f19e189826b9d6e36950da347ac84d5501ecbd6bed0d76c8641be61a67749c67@group.calendar.google.com'
-PREFERRED_WEEKDAY_START_HOUR = 16 # Godzina "popołudniowa"
+PREFERRED_WEEKDAY_START_HOUR = 16 # Godzina "popołudniowa" / "później"
 PREFERRED_WEEKEND_START_HOUR = 10
-MAX_SEARCH_DAYS = 14 # Jak daleko w przyszłość szukać kolejnych terminów
+MAX_SEARCH_DAYS = 14
 EARLY_HOUR_LIMIT = 12 # Górna granica dla preferencji "earlier"
 
 # --- Inicjalizacja Zmiennych Globalnych dla Kalendarza ---
@@ -73,376 +73,583 @@ except locale.Error:
     try: locale.setlocale(locale.LC_TIME, 'Polish_Poland.1250')
     except locale.Error: print("Ostrzeżenie: Nie można ustawić polskiej lokalizacji dla formatowania dat.")
 
+# --- Znaczniki specjalne dla AI ---
+INTENT_SCHEDULE_MARKER = "[INTENT:SCHEDULE]"
+SLOT_ISO_MARKER_PREFIX = "[SLOT_ISO:"
+SLOT_ISO_MARKER_SUFFIX = "]"
+
 # =====================================================================
-# === FUNKCJE POMOCNICZE ==============================================
+# === FUNKCJE POMOCNICZE (Logowanie, Profil, Historia, Kalendarz) =====
 # =====================================================================
-# (Funkcje ensure_dir, get_user_profile, load_history, save_history, _get_timezone,
-#  get_calendar_service, parse_event_time, get_free_slots, book_appointment,
-#  format_slot_for_user - BEZ ZMIAN od ostatniej wersji)
-# (Funkcja find_next_reasonable_slot nie jest już potrzebna w tej logice)
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def ensure_dir(directory):
-    try: os.makedirs(directory); print(f"Utworzono katalog: {directory}")
+    """Tworzy katalog, jeśli nie istnieje."""
+    try: os.makedirs(directory); logging.info(f"Utworzono katalog: {directory}")
     except OSError as e:
-        if e.errno != errno.EEXIST: print(f"!!! Błąd tworzenia katalogu {directory}: {e} !!!"); raise
+        if e.errno != errno.EEXIST: logging.error(f"Błąd tworzenia katalogu {directory}: {e}", exc_info=True); raise
 
 def get_user_profile(psid):
-    if not PAGE_ACCESS_TOKEN or len(PAGE_ACCESS_TOKEN) < 50: print(f"!!! [{psid}] Brak/nieprawidłowy TOKEN. Profil niepobrany."); return None
-    USER_PROFILE_API_URL_TEMPLATE = "https://graph.facebook.com/v19.0/{psid}?fields=first_name,last_name,profile_pic&access_token={token}"
-    url = USER_PROFILE_API_URL_TEMPLATE.format(psid=psid, token=PAGE_ACCESS_TOKEN)
-    print(f"--- [{psid}] Pobieranie profilu...")
-    profile_data = {}
+    """Pobiera podstawowe informacje o profilu użytkownika z Facebooka."""
+    if not PAGE_ACCESS_TOKEN: logging.warning(f"[{psid}] Brak tokena."); return None
+    elif len(PAGE_ACCESS_TOKEN) < 50: logging.warning(f"[{psid}] Token za krótki."); return None
+    USER_PROFILE_API_URL_TEMPLATE = f"https://graph.facebook.com/v19.0/{psid}?fields=first_name,last_name,profile_pic&access_token={PAGE_ACCESS_TOKEN}"
+    logging.info(f"--- [{psid}] Pobieranie profilu...")
     try:
-        r = requests.get(url, timeout=10); r.raise_for_status(); data = r.json()
-        if 'error' in data: print(f"!!! BŁĄD FB API (profil) {psid}: {data['error']} !!!"); return None
-        profile_data['first_name'] = data.get('first_name'); profile_data['last_name'] = data.get('last_name')
-        profile_data['profile_pic'] = data.get('profile_pic'); profile_data['id'] = data.get('id')
-        return profile_data
-    except requests.exceptions.Timeout: print(f"!!! BŁĄD TIMEOUT profilu {psid} !!!"); return None
+        r = requests.get(USER_PROFILE_API_URL_TEMPLATE, timeout=10); r.raise_for_status(); data = r.json()
+        if 'error' in data: logging.error(f"BŁĄD FB API (profil) {psid}: {data['error']}"); return None
+        profile_data = {'first_name': data.get('first_name'), 'last_name': data.get('last_name'), 'profile_pic': data.get('profile_pic'), 'id': data.get('id')}
+        logging.info(f"--- [{psid}] Pobrany profil: {profile_data.get('first_name')}"); return profile_data
+    except requests.exceptions.Timeout: logging.error(f"BŁĄD TIMEOUT profilu {psid}"); return None
     except requests.exceptions.HTTPError as http_err:
-         print(f"!!! BŁĄD HTTP {http_err.response.status_code} profilu {psid}: {http_err} !!!")
+         logging.error(f"BŁĄD HTTP {http_err.response.status_code} profilu {psid}: {http_err}")
          if http_err.response is not None:
-            try: print(f"Odpowiedź FB (błąd HTTP): {http_err.response.json()}")
-            except json.JSONDecodeError: print(f"Odpowiedź FB (błąd HTTP, nie JSON): {http_err.response.text}")
+            try: logging.error(f"Odpowiedź FB (błąd HTTP): {http_err.response.json()}")
+            except json.JSONDecodeError: logging.error(f"Odpowiedź FB (błąd HTTP, nie JSON): {http_err.response.text}")
          return None
-    except requests.exceptions.RequestException as req_err: print(f"!!! BŁĄD RequestException profilu {psid}: {req_err} !!!"); return None
-    except Exception as e: import traceback; print(f"!!! Niespodziewany BŁĄD profilu {psid}: {e} !!!"); traceback.print_exc(); return None
+    except requests.exceptions.RequestException as req_err: logging.error(f"BŁĄD RequestException profilu {psid}: {req_err}"); return None
+    except Exception as e: logging.error(f"Niespodziewany BŁĄD profilu {psid}: {e}", exc_info=True); return None
 
 def load_history(user_psid):
+    """Wczytuje historię konwersacji i ostatni kontekst systemowy (jeśli istnieje)."""
     filepath = os.path.join(HISTORY_DIR, f"{user_psid}.json"); history = []; context = {}
     if not os.path.exists(filepath): return history, context
     try:
-        with open(filepath, 'r', encoding='utf-8') as f:
-            history_data = json.load(f)
-            if isinstance(history_data, list):
-                processed_indices = set()
-                for i, msg_data in enumerate(history_data):
-                    if i in processed_indices: continue
-                    if (isinstance(msg_data, dict) and 'role' in msg_data and msg_data['role'] in ('user', 'model') and
-                            'parts' in msg_data and isinstance(msg_data['parts'], list) and msg_data['parts']):
-                        text_parts = []; valid_parts = True
-                        for part_data in msg_data['parts']:
-                            if isinstance(part_data, dict) and 'text' in part_data and isinstance(part_data['text'], str): text_parts.append(Part.from_text(part_data['text']))
-                            else: print(f"Ostrz. [{user_psid}]: Niepoprawna część (idx {i})"); valid_parts = False; break
-                        if valid_parts and text_parts: history.append(Content(role=msg_data['role'], parts=text_parts))
-                    elif (isinstance(msg_data, dict) and 'role' in msg_data and msg_data['role'] == 'system' and
-                          'type' in msg_data and msg_data['type'] == 'last_proposal' and 'slot_iso' in msg_data):
-                        is_latest_context = all(not (isinstance(history_data[j], dict) and history_data[j].get('role') == 'system') for j in range(i + 1, len(history_data)))
-                        if is_latest_context:
-                            context['last_proposed_slot_iso'] = msg_data['slot_iso']
-                            context['message_index'] = i
-                            print(f"[{user_psid}] Odczytano AKTUALNY kontekst: last_proposed_slot_iso (idx {i})")
-                        else: print(f"[{user_psid}] Pominięto stary kontekst systemowy na indeksie {i}")
-                    else: print(f"Ostrz. [{user_psid}]: Pominięto niepoprawną wiadomość w historii (idx {i}): {msg_data}")
-                print(f"[{user_psid}] Wczytano historię: {len(history)} wiadomości."); return history, context
-            else: print(f"!!! BŁĄD [{user_psid}]: Plik historii nie zawiera listy."); return [], {}
-    except FileNotFoundError: print(f"[{user_psid}] Plik historii nie istnieje."); return [], {}
-    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e: print(f"!!! BŁĄD [{user_psid}] parsowania historii: {e}."); return [], {}
-    except Exception as e: print(f"!!! BŁĄD [{user_psid}] wczytywania historii: {e} !!!"); return [], {}
+        with open(filepath, 'r', encoding='utf-8') as f: history_data = json.load(f)
+        if not isinstance(history_data, list): logging.error(f"BŁĄD [{user_psid}]: Plik historii nie jest listą."); return [], {}
+        last_system_entry_index = -1
+        for i in range(len(history_data) - 1, -1, -1):
+            entry = history_data[i]
+            if isinstance(entry, dict) and entry.get('role') == 'system' and entry.get('type') == 'last_proposal': last_system_entry_index = i; break
+        for i, msg_data in enumerate(history_data):
+            if isinstance(msg_data, dict) and msg_data.get('role') in ('user', 'model') and 'parts' in msg_data:
+                text_parts = []; valid_parts = True
+                for part_data in msg_data['parts']:
+                    if isinstance(part_data, dict) and 'text' in part_data and isinstance(part_data['text'], str): text_parts.append(Part.from_text(part_data['text']))
+                    else: logging.warning(f"Ostrz. [{user_psid}]: Niepoprawna część w historii (idx {i})"); valid_parts = False; break
+                if valid_parts and text_parts: history.append(Content(role=msg_data['role'], parts=text_parts))
+                elif valid_parts: logging.warning(f"Ostrz. [{user_psid}]: Puste 'parts' w historii (idx {i})")
+            elif i == last_system_entry_index and 'slot_iso' in msg_data:
+                context['last_proposed_slot_iso'] = msg_data['slot_iso']; context['message_index_in_file'] = i
+                logging.info(f"[{user_psid}] Odczytano kontekst: {context['last_proposed_slot_iso']} (idx {i})")
+            elif isinstance(msg_data, dict) and msg_data.get('role') == 'system': pass
+            else: logging.warning(f"Ostrz. [{user_psid}]: Pominięto wpis w historii (idx {i}): {msg_data}")
+        logging.info(f"[{user_psid}] Wczytano {len(history)} wiad. (user/model).")
+        if 'message_index_in_file' in context and context['message_index_in_file'] != len(history_data) - 1:
+            logging.info(f"[{user_psid}] Kontekst nieaktualny. Reset."); context = {}
+        return history, context
+    except Exception as e: logging.error(f"BŁĄD [{user_psid}] wczytywania historii: {e}", exc_info=True); return [], {}
 
 def save_history(user_psid, history, context_to_save=None):
-    ensure_dir(HISTORY_DIR); filepath = os.path.join(HISTORY_DIR, f"{user_psid}.json"); temp_filepath = f"{filepath}.tmp"
-    history_data = []
+    """Zapisuje historię konwersacji i opcjonalny kontekst systemowy."""
+    ensure_dir(HISTORY_DIR); filepath = os.path.join(HISTORY_DIR, f"{user_psid}.json"); temp_filepath = f"{filepath}.tmp"; history_data = []
     try:
-        max_messages_to_save = MAX_HISTORY_TURNS * 2
-        history_to_process = history[-max_messages_to_save:] if len(history) > max_messages_to_save else history
-        if len(history) > max_messages_to_save: print(f"[{user_psid}] Historia przycięta DO ZAPISU: {len(history_to_process)} wiad.")
-        for msg in history_to_process:
-             if isinstance(msg, Content) and hasattr(msg, 'role') and msg.role in ('user', 'model') and hasattr(msg, 'parts') and isinstance(msg.parts, list):
-                parts_data = [{'text': part.text} for part in msg.parts if isinstance(part, Part) and hasattr(part, 'text')]
-                if parts_data: history_data.append({'role': msg.role, 'parts': parts_data})
-             else: print(f"Ostrz. [{user_psid}]: Pomijanie nieprawidłowego obiektu (zapis): {msg}")
-        if context_to_save and isinstance(context_to_save, dict):
-             history_data.append(context_to_save)
-             print(f"[{user_psid}] Dodano kontekst do zapisu: {context_to_save.get('type')}")
+        max_messages = MAX_HISTORY_TURNS * 2; start_index = max(0, len(history) - max_messages)
+        history_to_save = history[start_index:]
+        if len(history) > max_messages: logging.info(f"[{user_psid}] Historia przycięta do zapisu: {len(history_to_save)} wiad.")
+        for msg in history_to_save:
+             if isinstance(msg, Content) and msg.role in ('user', 'model') and msg.parts:
+                parts = [{'text': p.text} for p in msg.parts if hasattr(p, 'text')]
+                if parts: history_data.append({'role': msg.role, 'parts': parts})
+             else: logging.warning(f"Ostrz. [{user_psid}]: Pomijanie obiektu w zapisie historii: {type(msg)}")
+        if context_to_save: history_data.append(context_to_save); logging.info(f"[{user_psid}] Dodano kontekst {context_to_save.get('type')} do zapisu.")
         with open(temp_filepath, 'w', encoding='utf-8') as f: json.dump(history_data, f, ensure_ascii=False, indent=2)
-        os.replace(temp_filepath, filepath)
-        print(f"[{user_psid}] Zapisano historię/kontekst ({len(history_data)} wpisów) do: {filepath}")
+        os.replace(temp_filepath, filepath); logging.info(f"[{user_psid}] Zapisano historię/kontekst ({len(history_data)} wpisów).")
     except Exception as e:
-        print(f"!!! BŁĄD [{user_psid}] zapisu historii/kontekstu: {e} !!! Plik: {filepath}")
+        logging.error(f"BŁĄD [{user_psid}] zapisu historii: {e}", exc_info=True)
         if os.path.exists(temp_filepath):
-            try: os.remove(temp_filepath); print(f"    Usunięto {temp_filepath}.")
-            except OSError as remove_e: print(f"    Nie można usunąć {temp_filepath}: {remove_e}")
+            try: os.remove(temp_filepath); logging.info(f"Usunięto {temp_filepath} po błędzie.")
+            except OSError as rem_e: logging.error(f"Nie można usunąć {temp_filepath}: {rem_e}")
 
 def _get_timezone():
-    global _tz;
+    """Pobiera i cachuje obiekt strefy czasowej."""
+    global _tz
     if _tz is None:
-        try: _tz = pytz.timezone(CALENDAR_TIMEZONE)
-        except pytz.exceptions.UnknownTimeZoneError: print(f"BŁĄD: Strefa '{CALENDAR_TIMEZONE}' nieznana. Używam UTC."); _tz = pytz.utc
+        try: _tz = pytz.timezone(CALENDAR_TIMEZONE); logging.info(f"Strefa czasowa: {CALENDAR_TIMEZONE}")
+        except pytz.exceptions.UnknownTimeZoneError: logging.error(f"BŁĄD: Strefa '{CALENDAR_TIMEZONE}' nieznana. Używam UTC."); _tz = pytz.utc
     return _tz
 
 def get_calendar_service():
-    global _calendar_service;
+    """Pobiera i cachuje obiekt usługi Google Calendar API."""
+    global _calendar_service
     if _calendar_service: return _calendar_service
-    if not os.path.exists(SERVICE_ACCOUNT_FILE): print(f"BŁĄD: Brak pliku klucza: '{SERVICE_ACCOUNT_FILE}'"); return None
+    if not os.path.exists(SERVICE_ACCOUNT_FILE): logging.error(f"KRYTYCZNY: Brak pliku klucza: '{SERVICE_ACCOUNT_FILE}'"); return None
     try:
         creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=CALENDAR_SCOPES)
-        service = build('calendar', 'v3', credentials=creds); print("Utworzono usługę Calendar API."); _calendar_service = service; return service
-    except HttpError as error: print(f"Błąd API tworzenia usługi Calendar: {error}"); return None
-    except Exception as e: print(f"Błąd tworzenia usługi Calendar: {e}"); return None
+        service = build('calendar', 'v3', credentials=creds); logging.info("Połączono z Google Calendar API."); _calendar_service = service; return service
+    except Exception as e: logging.error(f"Błąd tworzenia usługi Calendar: {e}", exc_info=True); return None
 
 def parse_event_time(event_time_data, default_tz):
+    """Parsuje datę/czas z danych wydarzenia Google Calendar."""
+    if not event_time_data: return None
     if 'dateTime' in event_time_data:
-        dt_str = event_time_data['dateTime'];
-        try: dt = datetime.datetime.fromisoformat(dt_str)
-        except ValueError:
-            try: dt = datetime.datetime.strptime(dt_str, '%Y-%m-%dT%H:%M:%S%z')
-            except ValueError:
-                try: dt = datetime.datetime.strptime(dt_str, '%Y-%m-%dT%H:%M%z')
-                except ValueError: print(f"Ostrz.: Nie sparsowano dateTime: {dt_str}"); return None
-        if dt.tzinfo is None: dt = default_tz.localize(dt)
-        else: dt = dt.astimezone(default_tz)
-        return dt
+        dt_str = event_time_data['dateTime']
+        try: dt = datetime.datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
+        except ValueError: logging.warning(f"Ostrz.: Nie sparsowano dateTime: {dt_str}"); return None
+        if dt.tzinfo is None: dt = pytz.utc.localize(dt)
+        return dt.astimezone(default_tz)
     elif 'date' in event_time_data:
         try: return datetime.date.fromisoformat(event_time_data['date'])
-        except ValueError: print(f"Ostrz.: Nie sparsowano date: {event_time_data['date']}"); return None
+        except ValueError: logging.warning(f"Ostrz.: Nie sparsowano date: {event_time_data['date']}"); return None
     return None
 
-def get_free_slots(calendar_id, start_datetime, end_datetime):
+# ZMIANA: Dodano argument target_date
+def get_free_time_ranges(calendar_id, start_datetime, end_datetime, target_date=None):
+    """Znajduje ciągłe zakresy wolnego czasu w kalendarzu Google, opcjonalnie dla konkretnej daty."""
     service = get_calendar_service(); tz = _get_timezone()
-    if not service: print("Błąd: Usługa kalendarza niedostępna w get_free_slots."); return []
+    if not service: logging.error("Błąd: Usługa kalendarza niedostępna w get_free_time_ranges."); return []
     if start_datetime.tzinfo is None: start_datetime = tz.localize(start_datetime)
     else: start_datetime = start_datetime.astimezone(tz)
     if end_datetime.tzinfo is None: end_datetime = tz.localize(end_datetime)
     else: end_datetime = end_datetime.astimezone(tz)
-    print(f"Szukanie wolnych slotów ({APPOINTMENT_DURATION_MINUTES} min) w '{calendar_id}'"); print(f"Zakres: {start_datetime:%Y-%m-%d %H:%M %Z} do {end_datetime:%Y-%m-%d %H:%M %Z}")
-    try:
-        events_result = service.events().list(calendarId=calendar_id, timeMin=start_datetime.isoformat(), timeMax=end_datetime.isoformat(), singleEvents=True, orderBy='startTime').execute()
-        events = events_result.get('items', [])
-    except HttpError as error: print(f'Błąd API pobierania wydarzeń: {error}'); return []
-    except Exception as e: print(f"Błąd pobierania wydarzeń: {e}"); return []
 
-    free_slots_starts = []; current_day = start_datetime.date(); end_day = end_datetime.date()
-    appointment_duration = datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
-    while current_day <= end_day:
-        day_start_limit = tz.localize(datetime.datetime.combine(current_day, datetime.time(WORK_START_HOUR, 0)))
-        day_end_limit = tz.localize(datetime.datetime.combine(current_day, datetime.time(WORK_END_HOUR, 0)))
-        check_start_time = max(start_datetime, day_start_limit); check_end_time = min(end_datetime, day_end_limit)
-        if check_start_time >= check_end_time: current_day += datetime.timedelta(days=1); continue
-        potential_slot_start = check_start_time; busy_times = []
-        for event in events:
-            start = parse_event_time(event['start'], tz)
-            if isinstance(start, datetime.date):
-                if start == current_day: busy_times.append({'start': day_start_limit, 'end': day_end_limit})
-            elif isinstance(start, datetime.datetime):
-                end = parse_event_time(event['end'], tz)
-                if isinstance(end, datetime.datetime):
-                    if end > day_start_limit and start < day_end_limit:
-                        effective_start = max(start, day_start_limit); effective_end = min(end, day_end_limit)
-                        if effective_start < effective_end: busy_times.append({'start': effective_start, 'end': effective_end})
-                else: print(f"Ostrz.: Wydarzenie '{event.get('summary','?')}' ma nieprawidłowy koniec ({type(end)})")
-        if not busy_times: merged_busy_times = []
+    # ZMIANA: Dostosowanie logowania i zakresu, jeśli podano target_date
+    log_target_date_info = f" (tylko data: {target_date})" if target_date else ""
+    logging.info(f"Szukanie zakresów (min. {APPOINTMENT_DURATION_MINUTES} min) w '{calendar_id}'{log_target_date_info}")
+    logging.info(f"Zakres: {start_datetime:%Y-%m-%d %H:%M %Z} - {end_datetime:%Y-%m-%d %H:%M %Z}")
+
+    # ZMIANA: Dostosuj timeMin i timeMax jeśli szukamy tylko w konkretnym dniu
+    query_start_dt = start_datetime
+    query_end_dt = end_datetime
+    if target_date:
+        query_start_dt = max(start_datetime, tz.localize(datetime.datetime.combine(target_date, datetime.time(0, 0))))
+        query_end_dt = min(end_datetime, tz.localize(datetime.datetime.combine(target_date, datetime.time(23, 59, 59))))
+        if query_start_dt >= query_end_dt:
+             logging.warning(f"Data docelowa {target_date} poza zakresem {start_datetime.date()} - {end_datetime.date()} lub nieprawidłowy zakres. Brak zakresów.")
+             return []
+
+    try:
+        events_result = service.events().list(calendarId=calendar_id, timeMin=query_start_dt.isoformat(), timeMax=query_end_dt.isoformat(), singleEvents=True, orderBy='startTime').execute()
+        events = events_result.get('items', []); logging.info(f"Pobrano {len(events)} wydarzeń.")
+    except Exception as e: logging.error(f'Błąd API pobierania wydarzeń: {e}', exc_info=True); return []
+
+    free_ranges = []; current_time = query_start_dt; appointment_duration_td = datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+    busy_times = []
+    for event in events:
+        start = parse_event_time(event.get('start'), tz); end = parse_event_time(event.get('end'), tz)
+        if isinstance(start, datetime.datetime) and isinstance(end, datetime.datetime):
+            # Używamy query_start_dt i query_end_dt do ograniczenia
+            if end > query_start_dt and start < query_end_dt:
+                 effective_start = max(start, query_start_dt); effective_end = min(end, query_end_dt)
+                 if effective_start < effective_end: busy_times.append({'start': effective_start, 'end': effective_end})
+        elif isinstance(start, datetime.date):
+            event_date = start
+            # Sprawdź, czy dzień wydarzenia całodniowego jest w zakresie zapytania
+            if query_start_dt.date() <= event_date <= query_end_dt.date():
+                day_start = tz.localize(datetime.datetime.combine(event_date, datetime.time(0,0)))
+                day_end = tz.localize(datetime.datetime.combine(event_date, datetime.time(23,59,59)))
+                effective_start = max(day_start, query_start_dt); effective_end = min(day_end, query_end_dt)
+                if effective_start < effective_end: busy_times.append({'start': effective_start, 'end': effective_end})
+
+    busy_times.sort(key=lambda x: x['start'])
+    merged_busy_times = []
+    if busy_times:
+        merged_busy_times.append(busy_times[0])
+        for current in busy_times[1:]:
+            last = merged_busy_times[-1]
+            if current['start'] <= last['end']: last['end'] = max(last['end'], current['end'])
+            else: merged_busy_times.append(current)
+
+    # Znajdź luki między zajętymi przedziałami, respektując godziny pracy
+    for busy in merged_busy_times:
+        free_start = current_time; free_end = busy['start']
+        current_check_date = free_start.date()
+        # Sprawdzaj dzień po dniu, jeśli luka jest długa
+        while current_check_date <= free_end.date():
+            day_start_work = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_START_HOUR, 0)))
+            day_end_work = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_END_HOUR, 0)))
+            eff_start = max(free_start, day_start_work); eff_end = min(free_end, day_end_work)
+            if eff_end > eff_start and eff_end - eff_start >= appointment_duration_td:
+                free_ranges.append({'start': eff_start, 'end': eff_end})
+                logging.debug(f"  + Zakres (między): {eff_start:%Y-%m-%d %H:%M} - {eff_end:%Y-%m-%d %H:%M}")
+            # Jeśli koniec luki jest w następnym dniu, przygotuj się na sprawdzenie następnego dnia
+            if free_end.date() > current_check_date:
+                current_check_date += datetime.timedelta(days=1)
+                # Ustaw free_start na początek godzin pracy następnego dnia
+                free_start = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_START_HOUR, 0)))
+            else:
+                break # Skończyliśmy sprawdzać tę lukę
+        current_time = max(current_time, busy['end'])
+
+    # Sprawdź lukę po ostatnim zajętym wydarzeniu
+    free_start = current_time; free_end = query_end_dt # Użyj końca zapytania
+    current_check_date = free_start.date()
+    while current_check_date <= free_end.date():
+        day_start_work = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_START_HOUR, 0)))
+        day_end_work = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_END_HOUR, 0)))
+        eff_start = max(free_start, day_start_work); eff_end = min(free_end, day_end_work)
+        if eff_end > eff_start and eff_end - eff_start >= appointment_duration_td:
+            free_ranges.append({'start': eff_start, 'end': eff_end})
+            logging.debug(f"  + Zakres (po): {eff_start:%Y-%m-%d %H:%M} - {eff_end:%Y-%m-%d %H:%M}")
+        if free_end.date() > current_check_date:
+            current_check_date += datetime.timedelta(days=1)
+            free_start = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_START_HOUR, 0)))
         else:
-             busy_times.sort(key=lambda x: x['start']); merged_busy_times = [busy_times[0]]
-             for current_busy in busy_times[1:]:
-                 last_merged = merged_busy_times[-1]
-                 if current_busy['start'] <= last_merged['end']: last_merged['end'] = max(last_merged['end'], current_busy['end'])
-                 else: merged_busy_times.append(current_busy)
-        for busy in merged_busy_times:
-            busy_start = busy['start']; busy_end = busy['end']
-            while potential_slot_start + appointment_duration <= busy_start:
-                 if potential_slot_start >= check_start_time and potential_slot_start + appointment_duration <= check_end_time:
-                     if potential_slot_start.minute % 10 == 0: free_slots_starts.append(potential_slot_start)
-                 current_minute = potential_slot_start.minute; minutes_to_add = 10 - (current_minute % 10);
-                 if minutes_to_add == 0: minutes_to_add = 10
-                 potential_slot_start += datetime.timedelta(minutes=minutes_to_add)
-                 potential_slot_start = potential_slot_start.replace(second=0, microsecond=0)
-            potential_slot_start = max(potential_slot_start, busy_end)
-        while potential_slot_start + appointment_duration <= check_end_time:
-             if potential_slot_start >= check_start_time:
-                 if potential_slot_start.minute % 10 == 0: free_slots_starts.append(potential_slot_start)
-             current_minute = potential_slot_start.minute; minutes_to_add = 10 - (current_minute % 10);
-             if minutes_to_add == 0: minutes_to_add = 10
-             potential_slot_start += datetime.timedelta(minutes=minutes_to_add)
-             potential_slot_start = potential_slot_start.replace(second=0, microsecond=0)
-        current_day += datetime.timedelta(days=1)
-    final_slots = sorted(list(set(slot for slot in free_slots_starts if start_datetime <= slot < end_datetime)))
-    print(f"Znaleziono {len(final_slots)} unikalnych 'ładnych' wolnych slotów."); return final_slots
+            break
 
-def book_appointment(calendar_id, start_time, end_time, summary="Rezerwacja wizyty", description="", user_name=""):
-    service = get_calendar_service(); tz = _get_timezone()
-    if not service: return False, "Błąd: Brak połączenia z usługą kalendarza."
-    if start_time.tzinfo is None: start_time = tz.localize(start_time)
-    else: start_time = start_time.astimezone(tz)
-    if end_time.tzinfo is None: end_time = tz.localize(end_time)
-    else: end_time = end_time.astimezone(tz)
-    event_summary = summary;
-    if user_name: event_summary += f" - {user_name}"
-    event = {'summary': event_summary, 'description': description, 'start': {'dateTime': start_time.isoformat(), 'timeZone': CALENDAR_TIMEZONE,}, 'end': {'dateTime': end_time.isoformat(), 'timeZone': CALENDAR_TIMEZONE,}, 'reminders': {'useDefault': False, 'overrides': [{'method': 'popup', 'minutes': 60},],},}
-    try:
-        print(f"Rezerwacja: {event_summary} od {start_time:%Y-%m-%d %H:%M} do {end_time:%Y-%m-%d %H:%M}")
-        created_event = service.events().insert(calendarId=calendar_id, body=event).execute()
-        print(f"Zarezerwowano. ID: {created_event.get('id')}")
-        day_index = start_time.weekday(); locale_day_name = POLISH_WEEKDAYS[day_index]
-        hour_str = str(start_time.hour); confirm_message = f"Świetnie! Termin na {locale_day_name}, {start_time.strftime(f'%d.%m.%Y o {hour_str}:%M')} został zarezerwowany."
-        return True, confirm_message
-    except HttpError as error:
-        error_details = f"Kod: {error.resp.status}, Powód: {error.resp.reason}"
-        try: error_json = json.loads(error.content.decode('utf-8')); error_details += f" - {error_json.get('error', {}).get('message', '')}"
-        except: pass
-        print(f"Błąd API rezerwacji: {error}, Szczegóły: {error_details}")
-        if error.resp.status == 409: return False, "Niestety, ten termin jest już zajęty."
-        elif error.resp.status == 403: return False, f"Brak uprawnień do zapisu w kalendarzu."
-        elif error.resp.status == 404: return False, f"Nie znaleziono kalendarza '{calendar_id}'."
-        else: return False, f"Błąd API ({error.resp.status}) rezerwacji."
-    except Exception as e: import traceback; print(f"Nieoczekiwany błąd Python rezerwacji: {e}"); traceback.print_exc(); return False, "Błąd systemu rezerwacji."
+    logging.info(f"Znaleziono {len(free_ranges)} zakresów wolnego czasu" + (f" w dniu {target_date}." if target_date else "."))
+    return free_ranges
 
-# ZMIANA: Usunięto find_next_reasonable_slot, AI wybiera
-# def find_next_reasonable_slot(...)
 
-# ZMIANA: Formatowanie listy zakresów dla AI
 def format_ranges_for_ai(ranges):
     """Formatuje listę zakresów na czytelny tekst dla AI."""
     if not ranges: return "Brak dostępnych zakresów czasowych."
     ranges_by_date = defaultdict(list)
     for r in ranges:
         range_date = r['start'].date()
-        # Pokaż tylko zakresy w godzinach pracy
-        eff_start = max(r['start'], _get_timezone().localize(datetime.datetime.combine(range_date, datetime.time(WORK_START_HOUR, 0))))
-        eff_end = min(r['end'], _get_timezone().localize(datetime.datetime.combine(range_date, datetime.time(WORK_END_HOUR, 0))))
-        if eff_end - eff_start >= datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES):
-            ranges_by_date[range_date].append({'start_time': eff_start.strftime('%H:%M'), 'end_time': eff_end.strftime('%H:%M')})
-    formatted = ["Dostępne ZAKRESY czasowe (wizyta trwa 60 minut). Wybierz jeden zakres i wygeneruj z niego DOKŁADNY termin startu (preferuj pełne godziny), dołączając go w znaczniku [SLOT_ISO:...]"]
-    dates_added = 0
+        ranges_by_date[range_date].append({'start_time': r['start'].strftime('%H:%M'), 'end_time': r['end'].strftime('%H:%M')})
+    formatted = ["Oto dostępne zakresy czasowe (wizyta trwa 60 minut). Wybierz zakres i wygeneruj termin (preferuj pełne godziny):"]
     for d in sorted(ranges_by_date.keys()):
         day_name = POLISH_WEEKDAYS[d.weekday()]; date_str = d.strftime('%d.%m.%Y')
         times = [f"{tr['start_time']}-{tr['end_time']}" for tr in ranges_by_date[d]]
-        if times: # Dodaj tylko jeśli są jakieś przedziały w godzinach pracy
-            formatted.append(f"- {day_name}, {date_str}: {'; '.join(times)}")
-            dates_added += 1
-            if dates_added >= 7: break # Ogranicz liczbę dni pokazywanych AI
-    if dates_added == 0: return "Brak dostępnych zakresów czasowych w godzinach pracy."
+        formatted.append(f"- {day_name}, {date_str}: {'; '.join(times)}")
     return "\n".join(formatted)
+
+def get_valid_start_times(calendar_id, check_start, check_end):
+    """Zwraca listę DOKŁADNYCH dozwolonych czasów rozpoczęcia wizyty (co 10 min)."""
+    service = get_calendar_service(); tz = _get_timezone()
+    if not service: return []
+    if check_start.tzinfo is None: check_start = tz.localize(check_start)
+    else: check_start = check_start.astimezone(tz)
+    if check_end.tzinfo is None: check_end = tz.localize(check_end)
+    else: check_end = check_end.astimezone(tz)
+    logging.debug(f"Pobieranie dokładnych slotów w zakresie: {check_start.isoformat()} - {check_end.isoformat()}")
+    try:
+        events_result = service.events().list(calendarId=calendar_id, timeMin=check_start.isoformat(), timeMax=check_end.isoformat(), singleEvents=True, orderBy='startTime').execute()
+        events = events_result.get('items', [])
+    except Exception as e: logging.error(f"Błąd API przy pobieraniu wydarzeń dla weryfikacji: {e}"); return []
+    valid_starts = []; current_day = check_start.date(); end_day = check_end.date(); appointment_duration = datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+    while current_day <= end_day:
+        day_start_limit = tz.localize(datetime.datetime.combine(current_day, datetime.time(WORK_START_HOUR, 0))); day_end_limit = tz.localize(datetime.datetime.combine(current_day, datetime.time(WORK_END_HOUR, 0)))
+        loop_check_start = max(check_start, day_start_limit); loop_check_end = min(check_end, day_end_limit)
+        if loop_check_start >= loop_check_end: current_day += datetime.timedelta(days=1); continue
+        busy_intervals = []
+        for event in events:
+            start = parse_event_time(event.get('start'), tz); end = parse_event_time(event.get('end'), tz)
+            if isinstance(start, datetime.date):
+                if start == current_day: busy_intervals.append({'start': day_start_limit, 'end': day_end_limit})
+            elif isinstance(start, datetime.datetime) and isinstance(end, datetime.datetime):
+                if end > loop_check_start and start < loop_check_end:
+                    eff_start = max(start, loop_check_start); eff_end = min(end, loop_check_end)
+                    if eff_start < eff_end: busy_intervals.append({'start': eff_start, 'end': eff_end})
+        merged_busy_times = []
+        if busy_intervals:
+             busy_intervals.sort(key=lambda x: x['start']); merged_busy_times.append(busy_intervals[0])
+             for current in busy_intervals[1:]: last = merged_busy_times[-1];
+                 if current['start'] <= last['end']: last['end'] = max(last['end'], current['end'])
+                 else: merged_busy_times.append(current)
+        potential_start = loop_check_start
+        for busy in merged_busy_times:
+            while potential_start + appointment_duration <= busy['start']:
+                if potential_start.minute % 10 == 0: valid_starts.append(potential_start)
+                minutes_to_add = 10 - (potential_start.minute % 10) if potential_start.minute % 10 != 0 else 10
+                potential_start += datetime.timedelta(minutes=minutes_to_add); potential_start = potential_start.replace(second=0, microsecond=0)
+            potential_start = max(potential_start, busy['end'])
+        while potential_start + appointment_duration <= loop_check_end:
+             if potential_start.minute % 10 == 0: valid_starts.append(potential_start)
+             minutes_to_add = 10 - (potential_start.minute % 10) if potential_start.minute % 10 != 0 else 10
+             potential_start += datetime.timedelta(minutes=minutes_to_add); potential_start = potential_start.replace(second=0, microsecond=0)
+        current_day += datetime.timedelta(days=1)
+    final_starts = sorted(list(set(s for s in valid_starts if check_start <= s < check_end)))
+    logging.debug(f"Znaleziono {len(final_starts)} dokładnych slotów w wąskim zakresie.")
+    return final_starts
+
+def is_slot_actually_free(proposed_start_dt, calendar_id):
+    """Sprawdza, czy DOKŁADNIE proponowany slot jest możliwy do zarezerwowania."""
+    try:
+        tz = _get_timezone()
+        if proposed_start_dt.tzinfo is None: proposed_start_dt = tz.localize(proposed_start_dt)
+        else: proposed_start_dt = proposed_start_dt.astimezone(tz)
+        if not (WORK_START_HOUR <= proposed_start_dt.hour < WORK_END_HOUR): logging.info(f"Weryfikacja slotu {proposed_start_dt.isoformat()}: INVALID (Poza godzinami)"); return False
+        if proposed_start_dt.minute % 10 != 0: logging.info(f"Weryfikacja slotu {proposed_start_dt.isoformat()}: INVALID (Nie co 10 min)"); return False
+        check_start = proposed_start_dt; check_end = proposed_start_dt + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+        service = get_calendar_service();
+        if not service: return False
+        events_result = service.events().list(calendarId=calendar_id, timeMin=check_start.isoformat(), timeMax=check_end.isoformat(), maxResults=1).execute()
+        items = events_result.get('items', [])
+        is_free = not items; logging.info(f"Weryfikacja slotu {proposed_start_dt.isoformat()}: {'FREE' if is_free else 'BUSY'}"); return is_free
+    except Exception as e: logging.error(f"Błąd weryfikacji slotu {proposed_start_dt.isoformat()}: {e}", exc_info=True); return False
 
 def format_slot_for_user(slot_start):
     """Formatuje pojedynczy slot (datetime) na czytelny tekst dla użytkownika."""
     if not isinstance(slot_start, datetime.datetime): return ""
     try:
         day_index = slot_start.weekday(); day_name = POLISH_WEEKDAYS[day_index]
-        hour_str = str(slot_start.hour) # Godzina bez zera
+        hour_str = slot_start.strftime('%#H') if os.name != 'nt' else slot_start.strftime('%H')
+        try: hour_str = str(slot_start.hour)
+        except Exception: pass
         return f"{day_name}, {slot_start.strftime(f'%d.%m.%Y o {hour_str}:%M')}"
     except Exception as e: logging.error(f"Błąd formatowania slotu: {e}", exc_info=True); return slot_start.isoformat()
 
-# --- Inicjalizacja Vertex AI ---
+def book_appointment(calendar_id, start_time, end_time, summary="Rezerwacja wizyty", description="", user_name=""):
+    """Rezerwuje wizytę w kalendarzu Google."""
+    service = get_calendar_service(); tz = _get_timezone()
+    if not service: return False, "Błąd: Brak połączenia z usługą kalendarza."
+    if start_time.tzinfo is None: start_time = tz.localize(start_time)
+    else: start_time = start_time.astimezone(tz)
+    if end_time.tzinfo is None: end_time = tz.localize(end_time)
+    else: end_time = end_time.astimezone(tz)
+    event_summary = summary
+    if user_name: event_summary += f" - {user_name}"
+    event = {'summary': event_summary, 'description': description, 'start': {'dateTime': start_time.isoformat(), 'timeZone': CALENDAR_TIMEZONE,}, 'end': {'dateTime': end_time.isoformat(), 'timeZone': CALENDAR_TIMEZONE,}, 'reminders': {'useDefault': False, 'overrides': [{'method': 'popup', 'minutes': 60},], },}
+    try:
+        logging.info(f"Próba rezerwacji: '{event_summary}' od {start_time:%Y-%m-%d %H:%M} do {end_time:%Y-%m-%d %H:%M}")
+        created_event = service.events().insert(calendarId=calendar_id, body=event).execute()
+        event_id = created_event.get('id'); logging.info(f"Rezerwacja OK. ID: {event_id}")
+        day_index = start_time.weekday(); locale_day_name = POLISH_WEEKDAYS[day_index]
+        hour_str = start_time.strftime('%#H') if os.name != 'nt' else start_time.strftime('%H')
+        try: hour_str = str(start_time.hour)
+        except Exception: pass
+        confirm_message = f"Świetnie! Termin na {locale_day_name}, {start_time.strftime(f'%d.%m.%Y o {hour_str}:%M')} został zarezerwowany."
+        return True, confirm_message
+    except HttpError as error:
+        error_details = f"Kod: {error.resp.status}, Powód: {error.resp.reason}"
+        try: error_json = json.loads(error.content.decode('utf-8')); msg = error_json.get('error', {}).get('message', '');
+        except: pass
+        logging.error(f"Błąd API rezerwacji: {error}, Szczegóły: {error_details}", exc_info=True)
+        if error.resp.status == 409: return False, "Niestety, ten termin został właśnie zajęty. Czy chcesz spróbować znaleźć inny?"
+        elif error.resp.status == 403: return False, f"Brak uprawnień do zapisu w '{calendar_id}'."
+        elif error.resp.status == 404: return False, f"Nie znaleziono kalendarza '{calendar_id}'."
+        else: return False, f"Błąd API ({error.resp.status}) rezerwacji."
+    except Exception as e: logging.error(f"Nieoczekiwany błąd Python rezerwacji: {e}", exc_info=True); return False, "Błąd systemu rezerwacji."
+
+# =====================================================================
+# === Inicjalizacja Vertex AI =========================================
+# =====================================================================
+
 gemini_model = None
 try:
-    print(f"Inicjalizowanie Vertex AI: Projekt={PROJECT_ID}, Lokalizacja={LOCATION}")
-    vertexai.init(project=PROJECT_ID, location=LOCATION); print("Inicjalizacja Vertex AI OK.")
-    print(f"Ładowanie modelu: {MODEL_ID}")
-    gemini_model = GenerativeModel(MODEL_ID); print("Model załadowany OK.")
-except Exception as e: print(f"!!! KRYTYCZNY BŁĄD inicjalizacji Vertex AI: {e} !!!")
+    logging.info(f"Inicjalizowanie Vertex AI: Projekt={PROJECT_ID}, Lokalizacja={LOCATION}")
+    vertexai.init(project=PROJECT_ID, location=LOCATION); logging.info("Inicjalizacja Vertex AI OK.")
+    logging.info(f"Ładowanie modelu: {MODEL_ID}"); gemini_model = GenerativeModel(MODEL_ID); logging.info(f"Model {MODEL_ID} OK.")
+except Exception as e: logging.critical(f"KRYTYCZNY BŁĄD inicjalizacji Vertex AI: {e}", exc_info=True)
 
-# --- Funkcje wysyłania wiadomości FB ---
+GENERATION_CONFIG_DEFAULT = GenerationConfig(temperature=0.7, top_p=0.95, top_k=40, max_output_tokens=1024)
+GENERATION_CONFIG_PROPOSAL = GenerationConfig(temperature=0.5, top_p=0.95, top_k=40, max_output_tokens=1024)
+GENERATION_CONFIG_FEEDBACK = GenerationConfig(temperature=0.1, top_p=0.95, top_k=40, max_output_tokens=100)
+SAFETY_SETTINGS = {HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE, HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE, HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE, HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,}
+
+# =====================================================================
+# === FUNKCJE WYSYŁANIA WIADOMOŚCI FB ================================
+# =====================================================================
+
 def _send_single_message(recipient_id, message_text):
-    print(f"--- Wysyłanie fragm. do {recipient_id} (dł: {len(message_text)}) ---"); params = {"access_token": PAGE_ACCESS_TOKEN}
+    """Wysyła pojedynczy fragment wiadomości przez Facebook Graph API."""
+    logging.info(f"--- Wysyłanie fragm. do {recipient_id} (dł: {len(message_text)}) ---")
+    params = {"access_token": PAGE_ACCESS_TOKEN}
     payload = {"recipient": {"id": recipient_id}, "message": {"text": message_text}, "messaging_type": "RESPONSE"}
-    if not PAGE_ACCESS_TOKEN or len(PAGE_ACCESS_TOKEN) < 50: print(f"!!! [{recipient_id}] Brak TOKENA. Nie wysłano."); return False
+    if not PAGE_ACCESS_TOKEN: logging.error(f"!!! [{recipient_id}] Brak tokena!"); return False
+    elif len(PAGE_ACCESS_TOKEN) < 50: logging.error(f"!!! [{recipient_id}] Token za krótki!"); return False
     try:
-        r = requests.post(FACEBOOK_GRAPH_API_URL, params=params, json=payload, timeout=30); r.raise_for_status(); response_json = r.json()
-        if response_json.get('error'): print(f"!!! BŁĄD FB API: {response_json['error']} !!!"); return False
-        return True
-    except requests.exceptions.Timeout: print(f"!!! BŁĄD TIMEOUT wysyłania do {recipient_id} !!!"); return False
-    except requests.exceptions.RequestException as e:
-        print(f"!!! BŁĄD wysyłania do {recipient_id}: {e} !!!")
-        if hasattr(e, 'response') and e.response is not None:
-            try: print(f"Odpowiedź FB (błąd): {e.response.json()}")
-            except json.JSONDecodeError: print(f"Odpowiedź FB (błąd, nie JSON): {e.response.text}")
-        return False
+        r = requests.post(FACEBOOK_GRAPH_API_URL, params=params, json=payload, timeout=30)
+        r.raise_for_status()
+        response_json = r.json()
+        if 'error' in response_json: logging.error(f"!!! BŁĄD FB API wysyłania: {response_json['error']}"); return False
+        logging.info(f"--- Fragment wysłany OK ---"); return True
+    except requests.exceptions.Timeout: logging.error(f"!!! BŁĄD TIMEOUT wysyłania"); return False
+    except requests.exceptions.HTTPError as err: logging.error(f"!!! BŁĄD HTTP {err.response.status_code}: {err}"); return False
+    except Exception as e: logging.error(f"!!! BŁĄD wysyłania: {e}", exc_info=True); return False
 
 def send_message(recipient_id, full_message_text):
-    if not full_message_text or not isinstance(full_message_text, str) or not full_message_text.strip(): print(f"[{recipient_id}] Pominięto pustą wiadomość."); return
-    message_len = len(full_message_text); print(f"[{recipient_id}] Przygotowanie wiad. (dł: {message_len}).")
-    if message_len <= MESSAGE_CHAR_LIMIT: _send_single_message(recipient_id, full_message_text)
+    """Wysyła wiadomość do użytkownika, dzieląc ją na fragmenty w razie potrzeby."""
+    if not full_message_text or not isinstance(full_message_text, str) or not full_message_text.strip():
+        logging.warning(f"[{recipient_id}] Pusta wiadomość."); return
+    logging.info(f"[{recipient_id}] Przygotowanie wiad. (dł: {len(full_message_text)}).")
+    if len(full_message_text) <= MESSAGE_CHAR_LIMIT:
+        _send_single_message(recipient_id, full_message_text)
     else:
-        chunks = []; remaining_text = full_message_text; print(f"[{recipient_id}] Dzielenie wiad. (limit: {MESSAGE_CHAR_LIMIT})...")
-        while remaining_text:
-            if len(remaining_text) <= MESSAGE_CHAR_LIMIT: chunks.append(remaining_text.strip()); break
-            split_index = -1
-            for delimiter in ['\n\n', '\n', '. ', '! ', '? ', ' ']:
-                search_limit = MESSAGE_CHAR_LIMIT - (len(delimiter) -1) if len(delimiter) > 1 else MESSAGE_CHAR_LIMIT
-                temp_index = remaining_text.rfind(delimiter, 0, search_limit)
-                if temp_index != -1: split_index = temp_index + len(delimiter); break
-            if split_index == -1: split_index = MESSAGE_CHAR_LIMIT
-            chunk = remaining_text[:split_index].strip()
-            if chunk: chunks.append(chunk)
-            remaining_text = remaining_text[split_index:].strip()
-        num_chunks = len(chunks); print(f"[{recipient_id}] Podzielono na {num_chunks} fragmentów.")
-        send_success_count = 0
-        for i, chunk in enumerate(chunks):
-            print(f"[{recipient_id}] Wysyłanie fragm. {i+1}/{num_chunks} (dł: {len(chunk)})...")
-            if not _send_single_message(recipient_id, chunk): print(f"!!! [{recipient_id}] Anulowano resztę po błędzie fragm. {i+1} !!!"); break
-            send_success_count += 1
-            if i < num_chunks - 1: print(f"[{recipient_id}] Oczekiwanie {MESSAGE_DELAY_SECONDS}s..."); time.sleep(MESSAGE_DELAY_SECONDS)
-        print(f"--- [{recipient_id}] Zakończono wysyłanie {send_success_count}/{num_chunks} fragm. ---")
+        chunks = []
+        remaining = full_message_text
+        logging.info(f"[{recipient_id}] Dzielenie wiad...")
+        while remaining:
+            if len(remaining) <= MESSAGE_CHAR_LIMIT:
+                chunks.append(remaining.strip())
+                break
+            idx = -1
+            for d in ['\n\n', '\n', '. ', '! ', '? ', ' ']:
+                lim = MESSAGE_CHAR_LIMIT - (len(d)-1) if len(d)>1 else MESSAGE_CHAR_LIMIT
+                t_idx = remaining.rfind(d, 0, lim + len(d))
+                if t_idx != -1 and t_idx <= MESSAGE_CHAR_LIMIT :
+                    idx = t_idx + len(d)
+                    break
+            if idx == -1:
+                idx = MESSAGE_CHAR_LIMIT
+                logging.warning(f"[{recipient_id}] Cięcie na limicie.")
+            chunk = remaining[:idx].strip()
+            if chunk:
+                chunks.append(chunk)
+            remaining = remaining[idx:].strip()
+        logging.info(f"[{recipient_id}] Podzielono na {len(chunks)} fragm.")
+        ok_count = 0
+        for i, ch in enumerate(chunks):
+            logging.info(f"[{recipient_id}] Wysyłanie {i+1}/{len(chunks)}...")
+            if not _send_single_message(recipient_id, ch):
+                logging.error(f"!!! [{recipient_id}] Anulowano resztę.")
+                break
+            ok_count += 1
+            if i < len(chunks) - 1:
+                time.sleep(MESSAGE_DELAY_SECONDS)
+        logging.info(f"--- [{recipient_id}] Wysłano {ok_count}/{len(chunks)} fragm. ---")
 
-# --- INSTRUKCJA SYSTEMOWA (dla AI proponującego termin) ---
-# ZMIANA: Usunięto wzmiankę o MAX_SLOTS_FOR_AI z promptu
-SYSTEM_INSTRUCTION_TEXT_PROPOSE = """Jesteś profesjonalnym asystentem klienta 'Zakręcone Korepetycje'. Twoim zadaniem jest przeanalizowanie historii rozmowy i listy dostępnych zakresów czasowych, a następnie wybranie **jednego**, najbardziej odpowiedniego terminu i zaproponowanie go użytkownikowi.
+# =====================================================================
+# === INSTRUKCJE SYSTEMOWE DLA AI =====================================
+# =====================================================================
 
-**Kontekst:** Rozmawiasz o korepetycjach online. Użytkownik chce umówić lekcję próbną (płatną).
+SYSTEM_INSTRUCTION_GENERAL = f"""Jesteś profesjonalnym i przyjaznym asystentem klienta 'Zakręcone Korepetycje'. Pomagasz w sprawach związanych z korepetycjami online.
+
+**Twoje Główne Zadania:**
+1.  Odpowiadaj na pytania dotyczące: przedmiotów (matematyka, j. polski, j. angielski), poziomów (klasy 4 SP - matura), cennika (poniżej), formy zajęć (online, 60 min), pierwszej lekcji próbnej (płatna wg cennika).
+2.  Prowadź naturalną, uprzejmą rozmowę po polsku.
+3.  **Analizuj intencje:** Czy użytkownik chce się umówić lub pyta o terminy?
+4.  **Jeśli intencja umówienia:** Odpowiedź MUSI zawierać znacznik `{INTENT_SCHEDULE_MARKER}` oraz krótkie potwierdzenie (np. "Jasne, sprawdzę terminy."). Przykład: "OK, sprawdzę wolne terminy dla 8 klasy. {INTENT_SCHEDULE_MARKER}"
+5.  **Jeśli BRAK intencji umówienia:** Odpowiedz normalnie, BEZ znacznika `{INTENT_SCHEDULE_MARKER}`.
+6.  Pamiętaj o historii rozmowy.
+
+**Cennik (60 min):** 4-8 SP: 60 zł; 1-3 LO/Tech(P): 65 zł; 1-3 LO/Tech(R): 70 zł; 4 LO/Tech(P): 70 zł; 4 LO/Tech(R): 75 zł.
+
+**Ważne:** Znacznik `{INTENT_SCHEDULE_MARKER}` jest kluczowy. Używaj go **tylko** gdy użytkownik chce się umówić.
+"""
+
+SYSTEM_INSTRUCTION_PROPOSE = f"""Jesteś asystentem AI proponującym terminy dla 'Zakręcone Korepetycje'. Wybierz **jeden zakres**, wygeneruj w nim **jeden konkretny termin** ({APPOINTMENT_DURATION_MINUTES} min) i zaproponuj go.
+
+**Kontekst:** Użytkownik chce umówić lekcję próbną. Masz listę ZAKRESÓW wolnego czasu.
 
 **Dostępne zakresy czasowe:**
-{available_ranges_text}
+{{available_ranges_text}}
 
 **Twoje zadanie:**
-1.  Analizuj historię rozmowy pod kątem preferencji (dzień, pora dnia, godzina).
-2.  Wybierz **jeden** zakres z listy "Dostępne zakresy czasowe", który pasuje do preferencji lub jest "rozsądny" (popołudnie w tyg. >= {pref_weekday}h, weekend >= {pref_weekend}h).
-3.  W wybranym zakresie **wygeneruj DOKŁADNY czas startu** ({duration} min wizyta). **Preferuj PEŁNE GODZINY** (np. 16:00, 17:00) jeśli to możliwe w danym zakresie.
-4.  **BARDZO WAŻNE:** Upewnij się, że `wygenerowany_czas + {duration} minut` **mieści się w wybranym zakresie**.
+1.  Analizuj historię rozmowy pod kątem preferencji (np. "popołudniu", "wtorek").
+2.  Wybierz **jeden** zakres pasujący do preferencji lub "rozsądny" (popołudnie w tyg., od {PREFERRED_WEEKEND_START_HOUR} w weekend).
+3.  W wybranym zakresie **wygeneruj DOKŁADNY czas startu**. **Preferuj PEŁNE GODZINY** (np. 16:00).
+4.  **BARDZO WAŻNE:** Upewnij się, że `wygenerowany_czas + {APPOINTMENT_DURATION_MINUTES} minut` **mieści się w wybranym zakresie**.
 5.  Sformułuj krótką, uprzejmą propozycję wygenerowanego terminu (polski format daty/dnia).
-6.  **KLUCZOWE:** Odpowiedź **MUSI** zawierać znacznik `{slot_marker_prefix}WYGENEROWANY_ISO_STRING{slot_marker_suffix}` z poprawnym ISO 8601 **wygenerowanego** terminu.
+6.  **KLUCZOWE:** Odpowiedź **MUSI** zawierać znacznik `{SLOT_ISO_MARKER_PREFIX}WYGENEROWANY_ISO_STRING{SLOT_ISO_MARKER_SUFFIX}` z poprawnym ISO 8601 **wygenerowanego** terminu.
 
 **Przykład (zakres "Środa, 07.05.2025: 16:00-18:30"):**
-*   Dobry: "Proponuję: Środa, 07.05.2025 o 17:00. Pasuje? {slot_marker_prefix}2025-05-07T17:00:00+02:00{slot_marker_suffix}"
+*   Dobry: "Proponuję: Środa, 07.05.2025 o 17:00. Pasuje? {SLOT_ISO_MARKER_PREFIX}2025-05-07T17:00:00+02:00{SLOT_ISO_MARKER_SUFFIX}"
 *   Zły (nie mieści się): 18:00
 
 **Zasady:** Generuj JEDEN termin. Preferuj pełne godziny. Sprawdź zakres. ZAWSZE dołączaj znacznik ISO. Bez cennika itp.
-""".format(
-    pref_weekday=PREFERRED_WEEKDAY_START_HOUR,
-    pref_weekend=PREFERRED_WEEKEND_START_HOUR,
-    duration=APPOINTMENT_DURATION_MINUTES,
-    slot_marker_prefix=SLOT_ISO_MARKER_PREFIX,
-    slot_marker_suffix=SLOT_ISO_MARKER_SUFFIX
-    )
-# ---------------------------------------------------------------------
+"""
 
-# --- INSTRUKCJA SYSTEMOWA (dla AI interpretującego feedback) ---
-SYSTEM_INSTRUCTION_TEXT_FEEDBACK = """Jesteś asystentem AI analizującym odpowiedź użytkownika na propozycję terminu.
+# ZMIANA: Zaktualizowana instrukcja FEEDBACK z nowymi preferencjami
+SYSTEM_INSTRUCTION_FEEDBACK = f"""Jesteś asystentem AI analizującym odpowiedź użytkownika na propozycję terminu.
 
 **Kontekst:** Zaproponowano użytkownikowi termin.
-**Ostatnia propozycja:** "{last_proposal_text}"
-**Odpowiedź użytkownika:** "{user_feedback}"
+**Ostatnia propozycja:** "{{last_proposal_text}}"
+**Odpowiedź użytkownika:** "{{user_feedback}}"
 
 **Zadanie:** Zwróć **TYLKO JEDEN** z poniższych znaczników:
-*   `[ACCEPT]`: Akceptacja (tak, ok, pasuje).
-*   `[REJECT PREFERENCE='any']`: Odrzucenie, brak preferencji (nie pasuje, inny).
-*   `[REJECT PREFERENCE='later']`: Chce później tego samego dnia lub ogólnie później.
-*   `[REJECT PREFERENCE='earlier']`: Chce wcześniej tego samego dnia (za późno).
-*   `[REJECT PREFERENCE='afternoon']`: Za wcześnie, chce popołudniu.
-*   `[REJECT PREFERENCE='next_day']`: Chce inny dzień, jutro.
-*   `[REJECT PREFERENCE='specific_day' DAY='NAZWA_DNIA']`: Chce konkretny dzień.
-*   `[REJECT PREFERENCE='specific_hour' HOUR='GODZINA']`: Chce konkretną godzinę.
-*   `[REJECT PREFERENCE='specific_datetime' DAY='NAZWA_DNIA' HOUR='GODZINA']`: Chce konkretny dzień i godzinę.
-*   `[REJECT PREFERENCE='specific_day_later' DAY='NAZWA_DNIA']`: Chce konkretny dzień, ale później.
-*   `[REJECT PREFERENCE='specific_day_earlier' DAY='NAZWA_DNIA']`: Chce konkretny dzień, ale wcześniej.
+*   `[ACCEPT]`: Akceptacja (tak, ok, pasuje, rezerwuję).
+*   `[REJECT_FIND_NEXT PREFERENCE='any']`: Odrzucenie, brak preferencji (nie pasuje, inny).
+*   `[REJECT_FIND_NEXT PREFERENCE='later']`: Odrzucenie, preferencja późniejszego czasu *danego dnia* (za wcześnie, popołudniu).
+*   `[REJECT_FIND_NEXT PREFERENCE='earlier']`: Odrzucenie, preferencja wcześniejszego czasu *danego dnia* (za późno, rano).
+*   `[REJECT_FIND_NEXT PREFERENCE='next_day']`: Odrzucenie, prośba o inny dzień.
+*   `[REJECT_FIND_NEXT PREFERENCE='specific_day' DAY='NAZWA_DNIA']`: Odrzucenie, prośba o **tylko** konkretny dzień (bez preferencji czasowej). NAZWA_DNIA = pełna polska nazwa z dużej litery.
+*   `[REJECT_FIND_NEXT PREFERENCE='specific_hour' HOUR='GODZINA']`: Odrzucenie, prośba o **tylko** konkretną godzinę (bez dnia). GODZINA = liczba.
+*   `[REJECT_FIND_NEXT PREFERENCE='specific_datetime' DAY='NAZWA_DNIA' HOUR='GODZINA']`: Odrzucenie, podany **konkretny dzień I konkretna godzina** (np. piątek 18).
+*   **`[REJECT_FIND_NEXT PREFERENCE='specific_day_later' DAY='NAZWA_DNIA']`**: Odrzucenie, podany **dzień i ogólna preferencja późniejszej pory** (np. poniedziałek wieczorem, wtorek po 15).
+*   **`[REJECT_FIND_NEXT PREFERENCE='specific_day_earlier' DAY='NAZWA_DNIA']`**: Odrzucenie, podany **dzień i ogólna preferencja wcześniejszej pory** (np. środa rano, czwartek przed 12).
 *   `[CLARIFY]`: Niejasna odpowiedź, pytanie niezwiązane.
 
-**Ważne:** Dokładnie jeden znacznik. Preferuj bardziej szczegółowe znaczniki (np. `specific_datetime` nad `specific_day`).
+**Ważne:** Dokładnie jeden znacznik. Znaczniki z dniem i godziną/porą (`specific_datetime`, `specific_day_later`, `specific_day_earlier`) mają pierwszeństwo przed znacznikami tylko z dniem (`specific_day`) lub tylko z godziną/porą (`specific_hour`, `later`, `earlier`).
 """
-# ---------------------------------------------------------------------
 
-# --- Funkcja interakcji z Gemini (proponowanie slotu) ---
-def get_gemini_slot_proposal(user_psid, history, available_ranges):
-    if not gemini_model: logging.error(f"!!! [{user_psid}] Model niezaładowany!"); return None, None
-    if not available_ranges: logging.warning(f"[{user_psid}]: Brak zakresów dla AI."); return "Niestety, brak wolnych terminów.", None
+# =====================================================================
+# === FUNKCJE INTERAKCJI Z GEMINI AI ==================================
+# =====================================================================
 
-    ranges_text = format_ranges_for_ai(available_ranges) # Użyj nowej funkcji formatującej
-    logging.info(f"[{user_psid}] Przekazuję {len(available_ranges)} zakresów do AI.")
+def _call_gemini(user_psid, prompt_content, generation_config, model_purpose="", max_retries=1):
+    """Wewnętrzna funkcja do wywoływania modelu Gemini z opcją ponowienia."""
+    if not gemini_model:
+        logging.error(f"!!! [{user_psid}] Model {MODEL_ID} niezaładowany! ({model_purpose}).")
+        return None
+    if not prompt_content:
+        logging.warning(f"[{user_psid}] Pusty prompt dla {model_purpose}.")
+        return None
+
+    attempt = 0
+    while attempt <= max_retries:
+        attempt += 1
+        logging.info(f"\n--- [{user_psid}] Wywołanie Gemini ({MODEL_ID}) - {model_purpose} (Próba: {attempt}/{max_retries + 1}) ---")
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            try: # Logowanie JSON promptu
+                prompt_dict=[{'role':c.role,'parts':[{'text':p.text} for p in c.parts if hasattr(p,'text')]} if isinstance(c,Content) else repr(c) for c in prompt_content]
+                logging.debug(f"--- Prompt dla {user_psid} ---\n{json.dumps(prompt_dict, indent=2, ensure_ascii=False)}\n--- Koniec Promptu ---")
+            except Exception as log_err:
+                logging.error(f"Błąd logowania promptu: {log_err}")
+
+        try:
+            response = gemini_model.generate_content(prompt_content, generation_config=generation_config, safety_settings=SAFETY_SETTINGS, stream=False)
+            if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
+                 logging.warning(f"[{user_psid}] Prompt zablokowany (Próba {attempt}): {response.prompt_feedback.block_reason_message}")
+                 return None
+            if not response.candidates:
+                 logging.warning(f"[{user_psid}] Brak kandydatów (Próba {attempt}).")
+                 return None
+            candidate = response.candidates[0]
+            finish_reason = candidate.finish_reason.name
+            if finish_reason != "STOP" and finish_reason != "MAX_TOKENS":
+                 logging.warning(f"[{user_psid}] Zakończono: {finish_reason} (Próba {attempt})")
+                 if finish_reason == "SAFETY": return None
+                 return None # Dla innych błędów też nie ponawiaj
+            if finish_reason == "STOP" and (not candidate.content or not candidate.content.parts):
+                logging.warning(f"[{user_psid}] Brak treści mimo STOP (Próba {attempt}).")
+                if attempt <= max_retries:
+                    logging.warning(f"    Ponawiam próbę {attempt + 1}...")
+                    time.sleep(1)
+                    continue
+                else:
+                    logging.error(f"!!! [{user_psid}] Max prób ({max_retries + 1}) dla pustej odpowiedzi. Zwracam None.")
+                    return None
+            generated_text = candidate.content.parts[0].text.strip()
+            logging.info(f"[{user_psid}] Gemini ({model_purpose}) OK (Próba {attempt}): '{generated_text[:200]}...'")
+            return generated_text
+        except Exception as e:
+            logging.error(f"!!! BŁĄD Gemini ({model_purpose}, Próba {attempt}): {e}", exc_info=True)
+            return None
+    logging.error(f"!!! [{user_psid}] Pętla _call_gemini zakończona.")
+    return None
+
+def get_gemini_general_response(user_psid, user_input, history):
+    """Wywołuje AI do prowadzenia rozmowy i wykrywania intencji umówienia."""
+    if not user_input: return None
     history_for_ai = [m for m in history if m.role in ('user','model')]
-    instr = SYSTEM_INSTRUCTION_TEXT_PROPOSE.format(available_ranges_text=ranges_text) # Wypełnij szablon
-    prompt = [Content(role="user", parts=[Part.from_text(instr)]), Content(role="model", parts=[Part.from_text(f"OK. Wygeneruję termin {APPOINTMENT_DURATION_MINUTES} min.")])] + history_for_ai
-    # Usuwanie starych wiadomości z promptu (jak poprzednio)...
-    while len(prompt) > (MAX_HISTORY_TURNS * 2 + 2) and len(prompt) > 2: prompt.pop(2); if len(prompt) > 2: prompt.pop(2)
+    user_c = Content(role="user", parts=[Part.from_text(user_input)])
+    prompt = [
+        Content(role="user", parts=[Part.from_text(SYSTEM_INSTRUCTION_GENERAL)]),
+        Content(role="model", parts=[Part.from_text("Rozumiem.")])
+    ] + history_for_ai + [user_c]
+
+    while len(prompt) > (MAX_HISTORY_TURNS * 2 + 3) and len(prompt) > 3:
+        logging.warning(f"[{user_psid}] Prompt General za długi ({len(prompt)}). Usuwam turę.")
+        prompt.pop(2)
+        if len(prompt) > 3:
+             prompt.pop(2)
+
+    response_text = _call_gemini(user_psid, prompt, GENERATION_CONFIG_DEFAULT, "General Conversation & Intent Detection", 1)
+    return response_text
+
+def get_gemini_slot_proposal(user_psid, history, available_ranges):
+    """Wywołuje AI, aby wygenerowało jeden slot z podanych zakresów."""
+    if not available_ranges:
+        logging.warning(f"[{user_psid}]: Brak zakresów dla AI ({MODEL_ID}).")
+        return None, None
+    ranges_text = format_ranges_for_ai(available_ranges)
+    logging.info(f"[{user_psid}] Przekazuję {len(available_ranges)} zakresów do AI ({MODEL_ID}).")
+    history_for_ai = [m for m in history if m.role in ('user','model')]
+    instr = SYSTEM_INSTRUCTION_PROPOSE.format(available_ranges_text=ranges_text)
+    prompt = [
+        Content(role="user", parts=[Part.from_text(instr)]),
+        Content(role="model", parts=[Part.from_text(f"OK. Wygeneruję termin ({APPOINTMENT_DURATION_MINUTES} min) w zakresie, preferując pełne godziny i dodam [{SLOT_ISO_MARKER_PREFIX}ISO].")])
+    ] + history_for_ai
+
+    while len(prompt) > (MAX_HISTORY_TURNS * 2 + 2) and len(prompt) > 2:
+         logging.warning(f"[{user_psid}] Prompt Proposal za długi ({len(prompt)}). Usuwam turę.")
+         prompt.pop(2)
+         if len(prompt) > 2:
+             prompt.pop(2)
 
     generated_text = _call_gemini(user_psid, prompt, GENERATION_CONFIG_PROPOSAL, "Slot Proposal from Ranges", 1)
     if not generated_text: return None, None
@@ -453,195 +660,410 @@ def get_gemini_slot_proposal(user_psid, history, available_ranges):
         text_for_user = re.sub(rf"\{SLOT_ISO_MARKER_PREFIX}.*?\{SLOT_ISO_MARKER_SUFFIX}", "", generated_text).strip()
         text_for_user = re.sub(r'\s+', ' ', text_for_user).strip()
         logging.info(f"[{user_psid}] AI wygenerowało: {extracted_iso}. Text: '{text_for_user}'")
-        try: # Sprawdź poprawność ISO i czy termin jest możliwy w zakresie
-            proposed_start = datetime.datetime.fromisoformat(extracted_iso).astimezone(_get_timezone())
-            is_possible = False
-            for r in available_ranges:
-                if r['start'] <= proposed_start < r['end'] and proposed_start + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES) <= r['end']:
-                    is_possible = True; break
-            if is_possible:
-                 # Dodatkowa weryfikacja z Google API dla pewności
-                 if is_slot_actually_free(proposed_start, TARGET_CALENDAR_ID):
-                     return text_for_user, extracted_iso
-                 else:
-                     logging.warning(f"!!! AI Error [{user_psid}]: Wygenerowany slot {extracted_iso} okazał się zajęty po weryfikacji API!")
-                     return None, None # Nie proponuj zajętego
-            else:
-                 logging.error(f"!!! AI Error [{user_psid}]: Wygenerowany ISO '{extracted_iso}' poza dostępnymi zakresami!")
-                 return None, None
-        except ValueError: logging.error(f"!!! AI Error: Zły format ISO '{extracted_iso}'!"); return None, None
-    else: logging.error(f"!!! AI Error [{user_psid}]: Brak znacznika ISO! Odp: '{generated_text}'"); return None, None
+        try:
+            datetime.datetime.fromisoformat(extracted_iso) # Walidacja formatu
+            return text_for_user, extracted_iso
+        except ValueError:
+            logging.error(f"!!! AI Error [{user_psid}]: Zły format ISO '{extracted_iso}'!")
+            return None, None
+    else:
+        logging.error(f"!!! AI Error [{user_psid}]: Brak znacznika ISO w odpowiedzi! Odp: '{generated_text}'")
+        return None, None
 
-# --- Funkcja interakcji z Gemini (interpretacja feedbacku) ---
 def get_gemini_feedback_decision(user_psid, user_feedback, history, last_proposal_text):
-     if not gemini_model: logging.error(f"!!! [{user_psid}] Model niezaładowany!"); return "[CLARIFY]"
-     user_content = Content(role="user", parts=[Part.from_text(user_feedback)])
-     history_to_send = [h for h in history if not (isinstance(h, dict) and h.get('role') == 'system')] # Wyślij bez kontekstu
-     max_messages = MAX_HISTORY_TURNS * 2
-     if len(history_to_send) > max_messages: history_to_send = history_to_send[-max_messages:]
-     instr = SYSTEM_INSTRUCTION_TEXT_FEEDBACK.format(last_proposal_text=last_proposal_text, user_feedback=user_feedback)
-     prompt = [Content(role="user", parts=[Part.from_text(instr)])] + history_to_send + [user_content]
-     # Usuwanie starych wiadomości z promptu (jak poprzednio)...
-     while len(prompt) > (MAX_HISTORY_TURNS * 2 + 3) and len(prompt) > 3: prompt.pop(1); if len(prompt) > 3: prompt.pop(1)
+    """Wywołuje AI do interpretacji odpowiedzi użytkownika na propozycję terminu."""
+    if not user_feedback: return "[CLARIFY]"
+    history_for_ai=[m for m in history if m.role in ('user','model')]
+    user_c=Content(role="user", parts=[Part.from_text(user_feedback)])
+    instr=SYSTEM_INSTRUCTION_FEEDBACK.format(last_proposal_text=last_proposal_text, user_feedback=user_feedback)
+    prompt = [
+        Content(role="user", parts=[Part.from_text(instr)]),
+        Content(role="model", parts=[Part.from_text("OK. Zwrócę jeden znacznik.")])
+    ] + history_for_ai + [user_c]
 
-     decision = _call_gemini(user_psid, prompt, GENERATION_CONFIG_FEEDBACK, "Feedback Interpretation", 1)
-     if not decision: return "[CLARIFY]"
-     if decision.startswith("[") and decision.endswith("]"):
-         logging.info(f"[{user_psid}] AI feedback: {decision}"); return decision
-     else: logging.warning(f"Ostrz. [{user_psid}]: AI nie zwróciło znacznika: '{decision}'. CLARIFY."); return "[CLARIFY]"
+    while len(prompt) > (MAX_HISTORY_TURNS * 2 + 3) and len(prompt) > 3:
+        logging.warning(f"[{user_psid}] Prompt Feedback za długi ({len(prompt)}). Usuwam turę.")
+        prompt.pop(2)
+        if len(prompt) > 3:
+             prompt.pop(2)
 
-# --- Funkcja interakcji z Gemini (ogólna rozmowa) ---
-def get_gemini_general_response(user_psid, current_user_message, history):
-    if not gemini_model: logging.error(f"!!! [{user_psid}] Model niezaładowany!"); return "Przepraszam, błąd AI."
-    user_content = Content(role="user", parts=[Part.from_text(current_user_message)])
-    history_to_send = [h for h in history if not (isinstance(h, dict) and h.get('role') == 'system')]
-    max_messages = MAX_HISTORY_TURNS * 2
-    if len(history_to_send) > max_messages: history_to_send = history_to_send[-max_messages:]
-    prompt = [Content(role="user", parts=[Part.from_text(SYSTEM_INSTRUCTION_GENERAL)]), Content(role="model", parts=[Part.from_text("Rozumiem.")])] + history_to_send + [user_content]
-    # Usuwanie starych wiadomości z promptu...
-    while len(prompt) > (MAX_HISTORY_TURNS * 2 + 2) and len(prompt) > 2: prompt.pop(2); if len(prompt) > 2: prompt.pop(2)
-    response_text = _call_gemini(user_psid, prompt, GENERATION_CONFIG_DEFAULT, "General Conversation", 1)
-    if response_text: return response_text
-    else: return "Przepraszam, wystąpił błąd." # Generyczna odpowiedź
+    decision = _call_gemini(user_psid, prompt, GENERATION_CONFIG_FEEDBACK, "Feedback Interpretation", 1)
+    if not decision: return "[CLARIFY]"
+    if decision.startswith("[") and decision.endswith("]"):
+        logging.info(f"[{user_psid}] AI feedback: {decision}")
+        return decision
+    else:
+        logging.warning(f"Ostrz. [{user_psid}]: AI nie zwróciło znacznika: '{decision}'. CLARIFY.")
+        return "[CLARIFY]"
 
-# --- Obsługa Weryfikacji Webhooka (GET) ---
+# =====================================================================
+# === OBSŁUGA WEBHOOKA FACEBOOKA =====================================
+# =====================================================================
+
 @app.route('/webhook', methods=['GET'])
 def webhook_verification():
-    logging.info("--- GET weryfikacja ---"); hub_mode = request.args.get('hub.mode'); hub_token = request.args.get('hub.verify_token'); hub_challenge = request.args.get('hub.challenge')
-    logging.info(f"Mode:{hub_mode},Token:{'OK' if hub_token==VERIFY_TOKEN else 'BŁĄD'},Challenge:{'Jest' if hub_challenge else 'Brak'}")
-    if hub_mode == 'subscribe' and hub_token == VERIFY_TOKEN: logging.info("Weryfikacja GET OK!"); return Response(hub_challenge, status=200)
-    else: logging.warning("Weryfikacja GET FAILED."); return Response("Verification failed", status=403)
+    """Obsługuje weryfikację webhooka przez Facebooka (GET request)."""
+    logging.info("--- GET weryfikacja ---")
+    hub_mode=request.args.get('hub.mode')
+    hub_token=request.args.get('hub.verify_token')
+    hub_challenge=request.args.get('hub.challenge')
+    if hub_mode=='subscribe' and hub_token==VERIFY_TOKEN:
+        logging.info("Weryfikacja GET OK!")
+        return Response(hub_challenge, status=200)
+    else:
+        logging.warning("Weryfikacja GET FAILED.")
+        return Response("Verification failed", status=403)
 
-# --- Główna Obsługa Webhooka (POST) ---
 @app.route('/webhook', methods=['POST'])
 def webhook_handle():
+    """Obsługuje przychodzące zdarzenia z Facebooka (POST request)."""
     logging.info(f"\n{'='*30} {datetime.datetime.now():%Y-%m-%d %H:%M:%S} POST {'='*30}")
-    raw_data = request.data.decode('utf-8'); data = None
+    raw_data = request.data.decode('utf-8')
+    data = None
     try:
         data = json.loads(raw_data)
+        logging.debug(f"Odebrane dane: {json.dumps(data, indent=2)}")
         if data and data.get("object") == "page":
             for entry in data.get("entry", []):
-                page_id = entry.get("id"); timestamp = entry.get("time");
                 for event in entry.get("messaging", []):
                     sender_id = event.get("sender", {}).get("id")
-                    if not sender_id: continue
+                    recipient_id = event.get("recipient", {}).get("id")
+                    if not sender_id or not recipient_id or sender_id == recipient_id:
+                        continue # Skip invalid or echo events
+
                     logging.info(f"--- Zdarzenie dla PSID: {sender_id} ---")
                     history, context = load_history(sender_id)
                     last_iso = context.get('last_proposed_slot_iso')
-                    is_context = last_iso and context.get('message_index_in_file', -1) == len(load_history(sender_id)[0]) # Sprawdź index vs długość historii bez kontekstu
-
-                    if is_context: logging.info(f"    Aktywny kontekst: {last_iso}")
-                    elif last_iso: logging.info(f"    Kontekst stary. Reset."); last_iso = None
+                    is_context = bool(last_iso)
+                    if is_context:
+                        logging.info(f"    Aktywny kontekst: {last_iso}")
 
                     if message_data := event.get("message"):
                         if message_data.get("is_echo"): continue
-                        user_input = message_data.get("text", "").strip()
-                        user_content = Content(role="user", parts=[Part.from_text(user_input)]) if user_input else None
-                        history_for_ai = [h for h in history if not (isinstance(h, dict) and h.get('role') == 'system')]
 
-                        action = None; msg_result = None; ctx_save = None; model_resp = None
-                        pref = 'any'; day = None; hour = None # Domyślne preferencje
-                        proposal_text = None; proposed_iso = None # Dla nowej propozycji
+                        user_input = None
+                        user_content = None
+                        history_saved = False # Flaga zapisu historii po intencji
 
-                        if ENABLE_TYPING_DELAY and user_input: time.sleep(MIN_TYPING_DELAY_SECONDS)
+                        if text := message_data.get("text"):
+                            user_input = text.strip()
+                            logging.info(f"      Txt: '{user_input}'")
+                            if not user_input: continue
+                            user_content = Content(role="user", parts=[Part.from_text(user_input)])
+                        elif attachments := message_data.get("attachments"):
+                            att_type = attachments[0].get('type','?')
+                            logging.info(f"      Załącznik: {att_type}.")
+                            user_content = Content(role="user", parts=[Part.from_text(f"[Załącznik:{att_type}]")])
+                            msg = "Nie obsługuję załączników."
+                            send_message(sender_id, msg)
+                            model_resp = Content(role="model", parts=[Part.from_text(msg)])
+                            save_history(sender_id, history + [user_content, model_resp])
+                            continue
+                        else:
+                            logging.warning(f"      Nieznany typ msg: {message_data}")
+                            user_content = Content(role="user", parts=[Part.from_text("[Nieznany typ]")])
+                            msg = "Nie rozumiem."
+                            send_message(sender_id, msg)
+                            model_resp = Content(role="model", parts=[Part.from_text(msg)])
+                            save_history(sender_id, history + [user_content, model_resp])
+                            continue
 
-                        if is_context and user_input: # Feedback do terminu
-                            logging.info("      Oczekiwano na feedback. Pytanie AI...")
-                            last_dt = datetime.datetime.fromisoformat(last_iso)
-                            decision = get_gemini_feedback_decision(sender_id, user_input, history_for_ai, format_slot_for_user(last_dt))
+                        # Inicjalizacja zmiennych dla cyklu request/response
+                        action = None
+                        msg_now = None
+                        msg_result = None
+                        ctx_save = None
+                        model_resp = None
+                        pref = 'any'
+                        day = None
+                        hour = None
+
+                        if ENABLE_TYPING_DELAY and user_input:
+                            delay = max(MIN_TYPING_DELAY_SECONDS, min(MAX_TYPING_DELAY_SECONDS, len(user_input)/TYPING_CHARS_PER_SECOND))
+                            logging.info(f"      Typing... ({delay:.2f}s)")
+                            time.sleep(delay)
+
+                        # Główna logika decyzyjna
+                        if is_context and last_iso: # SCENARIUSZ 1: Feedback
+                            logging.info(f"      SCENARIUSZ: Feedback dla {last_iso}")
+                            last_proposal = history[-1].parts[0].text if history and history[-1].role=='model' else "?"
+                            decision = get_gemini_feedback_decision(sender_id, user_input, history, last_proposal)
+
                             if decision == "[ACCEPT]": action = 'book'
                             elif decision and decision.startswith("[REJECT_FIND_NEXT"):
                                 action = 'find_and_propose'
-                                pref_match = re.search(r"PREFERENCE='([^']*)'", decision); pref = pref_match.group(1) if pref_match else 'any'
+                                m_pref = re.search(r"PREFERENCE='([^']*)'", decision)
+                                pref = m_pref.group(1) if m_pref else 'any'
+                                # Parsowanie DAY i HOUR dla odpowiednich preferencji
                                 if pref in ['specific_day', 'specific_datetime', 'specific_day_later', 'specific_day_earlier']:
-                                    m_day=re.search(r"DAY='([^']*)'",decision); day=m_day.group(1) if m_day else None
+                                    m_day=re.search(r"DAY='([^']*)'",decision)
+                                    day=m_day.group(1) if m_day else None
                                 if pref in ['specific_hour', 'specific_datetime']:
-                                    m_hour=re.search(r"HOUR='(\d+)'",decision); hour=int(m_hour.group(1)) if m_hour and m_hour.group(1).isdigit() else None
-                            elif decision == "[CLARIFY]": action = 'send_clarification'; msg_result = "Nie jestem pewien. Czy termin pasuje?"
-                            else: action = 'send_error'; msg_result = "Problem z przetworzeniem."
-                        elif user_input: # Normalna rozmowa
-                            logging.info("      -> Gemini (normalna rozmowa)...")
-                            response = get_gemini_general_response(sender_id, user_input, history_for_ai)
-                            if response and INTENT_SCHEDULE_MARKER in response:
-                                logging.info(f"      AI wykryło intencję [{INTENT_SCHEDULE_MARKER}].")
-                                action = 'find_and_propose' # Pierwsze szukanie
-                                msg_result = response.split(INTENT_SCHEDULE_MARKER,1)[0].strip() # Tekst przed znacznikiem
-                                if not msg_result: msg_result = "Dobrze, sprawdzę dostępne terminy." # Domyślny tekst
-                                pref = 'any'; day = None; hour = None # Użyj domyślnych preferencji
-                            elif response: action = 'send_gemini_response'; msg_result = response
-                            else: action = 'send_error'; msg_result = "Błąd AI."
-                        elif attachments := message_data.get("attachments"):
-                            att_type = attachments[0].get('type','?'); logging.info(f"      Załącznik: {att_type}.")
-                            user_content = Content(role="user", parts=[Part.from_text(f"[Załącznik:{att_type}]")])
-                            msg_result = "Nie obsługuję załączników."; action = 'send_error'
-                        else: logging.warning(f"      Nieznany msg: {message_data}"); action = 'send_error'; msg_result="Nie rozumiem."
+                                    m_hour=re.search(r"HOUR='(\d+)'",decision)
+                                    hour=int(m_hour.group(1)) if m_hour and m_hour.group(1).isdigit() else None
+                                logging.info(f"      Odrzucono. Pref: {pref}, Dzień: {day}, Godz: {hour}")
+                                msg_now = "Rozumiem. Poszukam innego terminu."
+                            elif decision == "[CLARIFY]":
+                                action='send_clarification'
+                                msg_result="Nie jestem pewien. Czy termin pasuje?"
+                                ctx_save={'role':'system','type':'last_proposal','slot_iso':last_iso}
+                            else:
+                                action='send_error'; msg_result="Problem z przetworzeniem."
+                            if action != 'send_clarification': ctx_save = None # Reset kontekstu
+                        else: # SCENARIUSZ 2: Normalna rozmowa
+                            logging.info(f"      SCENARIUSZ: Normalna rozmowa.")
+                            response = get_gemini_general_response(sender_id, user_input, history)
+                            if response:
+                                if INTENT_SCHEDULE_MARKER in response:
+                                    logging.info(f"      AI wykryło intencję [{INTENT_SCHEDULE_MARKER}].")
+                                    action = 'find_and_propose'
+                                    text_before = response.split(INTENT_SCHEDULE_MARKER,1)[0].strip()
+                                    msg_now = text_before or "Sprawdzę terminy."
+                                    pref = 'any'; day = None; hour = None # Reset preferencji
+                                    model_resp = Content(role="model", parts=[Part.from_text(msg_now)])
+                                else:
+                                    action = 'send_gemini_response'
+                                    msg_result = response
+                            else:
+                                action = 'send_error'
+                                msg_result = "Nie mogę wygenerować odpowiedzi."
+
+                        logging.info(f"      Akcja: {action}")
+                        if msg_now:
+                            send_message(sender_id, msg_now)
+                            if action == 'find_and_propose' and model_resp:
+                                save_history(sender_id, history + [user_content, model_resp])
+                                history.extend([user_content, model_resp])
+                                history_saved = True
 
                         # Wykonanie akcji
-                        logging.info(f"      Akcja: {action}")
                         if action == 'book':
-                            # ... (logika book_appointment jak poprzednio) ...
-                            try: tz = _get_timezone(); start = datetime.datetime.fromisoformat(last_iso).astimezone(tz); end = start + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES); prof=get_user_profile(sender_id); name=prof.get('first_name','') if prof else ''; ok, msg=book_appointment(TARGET_CALENDAR_ID, start, end, "Rezerwacja FB", f"PSID:{sender_id}\nImię:{name}", name); msg_result=msg; ctx_save=None
-                            except Exception as e: logging.error(f"BŁĄD book: {e}"); msg_result="Błąd rezerwacji."; ctx_save=None
-                        elif action == 'find_and_propose':
-                            try: # Blok szukania i proponowania przez AI
-                                tz = _get_timezone(); now = datetime.datetime.now(tz)
-                                search_start = now; after_dt = now
-                                if last_iso: # Jeśli to kolejne szukanie
-                                    last_dt = datetime.datetime.fromisoformat(last_iso).astimezone(tz)
-                                    after_dt = last_dt # Szukaj PO ostatnim
-                                    search_start = last_dt + datetime.timedelta(minutes=1) # Domyślny start
-                                    # Skoryguj search_start wg preferencji... (jak poprzednio)
-                                    if pref in ['specific_day', 'specific_datetime', 'specific_day_later', 'specific_day_earlier'] and day:
-                                        try: wd=POLISH_WEEKDAYS.index(day.capitalize()); ahead=(wd-now.weekday()+7)%7; if ahead==0 and now.time()>=datetime.time(WORK_END_HOUR): ahead=7; search_start = tz.localize(datetime.datetime.combine(now.date()+datetime.timedelta(days=ahead), datetime.time(WORK_START_HOUR,0)))
-                                        except ValueError: pass
-                                    elif pref == 'next_day': search_start = tz.localize(datetime.datetime.combine(last_dt.date()+datetime.timedelta(days=1),datetime.time(WORK_START_HOUR,0)))
-                                    elif pref == 'later': base_start = last_dt+datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES); later_start = last_dt+datetime.timedelta(hours=3); search_start=max(base_start,later_start);
-                                    elif pref == 'afternoon': afternoon_start = tz.localize(datetime.datetime.combine(last_dt.date(),datetime.time(PREFERRED_WEEKDAY_START_HOUR,0))); search_start=max(search_start, afternoon_start)
-                                    search_start = max(search_start, now) # Nie w przeszłości
+                            try:
+                                tz = _get_timezone()
+                                start = datetime.datetime.fromisoformat(last_iso).astimezone(tz)
+                                if is_slot_actually_free(start, TARGET_CALENDAR_ID):
+                                    end = start + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+                                    profile = get_user_profile(sender_id); name = profile.get('first_name', 'FB User') if profile else 'FB User'
+                                    success, msg = book_appointment(TARGET_CALENDAR_ID, start, end, "Korepetycje (FB)", f"PSID:{sender_id}\nImię:{name}", name)
+                                    msg_result = msg
+                                    if not success: logging.warning(f"Rezerwacja API nieudana: {msg}")
+                                else:
+                                    logging.warning(f"[{sender_id}] Slot {last_iso} zajęty!")
+                                    msg_result="Niestety, ten termin został właśnie zajęty. Szukamy innego?"
+                                ctx_save = None
+                            except Exception as book_err:
+                                logging.error(f"!!! BŁĄD rezerwacji: {book_err}", exc_info=True)
+                                msg_result="Błąd systemu rezerwacji."; ctx_save = None
 
+                        elif action == 'find_and_propose':
+                            try:
+                                tz = _get_timezone(); now = datetime.datetime.now(tz)
+                                search_start = now
+                                reference_date = None # Data z ostatniej propozycji
+                                search_next_day = False # Czy szukać od następnego dnia
+
+                                if last_iso: # Odczytaj datę referencyjną
+                                    try:
+                                        last_dt = datetime.datetime.fromisoformat(last_iso).astimezone(tz)
+                                        reference_date = last_dt.date()
+                                    except ValueError: logging.warning(f"Nie sparsowano daty z last_iso: {last_iso}")
+
+                                # --- Ustalanie search_start i target_date ---
+                                target_date_for_search = None # Domyślnie szukaj we wszystkich dniach
+
+                                if last_iso and pref != 'any':
+                                    try:
+                                        last_dt = datetime.datetime.fromisoformat(last_iso).astimezone(tz)
+                                        base_start = last_dt + datetime.timedelta(minutes=10)
+
+                                        # Ustalanie search_start
+                                        if pref == 'later':
+                                            # Zacznij szukać później tego samego dnia
+                                            search_start = last_dt + datetime.timedelta(hours=1) # Np. godzinę później
+                                            search_start = max(search_start, base_start)
+                                            target_date_for_search = reference_date # Spróbuj najpierw ten sam dzień
+                                        elif pref == 'earlier':
+                                            # Zacznij szukać od początku tego samego dnia
+                                            search_start = tz.localize(datetime.datetime.combine(last_dt.date(), datetime.time(WORK_START_HOUR,0)))
+                                            target_date_for_search = reference_date # Spróbuj najpierw ten sam dzień
+                                        elif pref == 'next_day':
+                                            search_start = tz.localize(datetime.datetime.combine(last_dt.date()+datetime.timedelta(days=1), datetime.time(WORK_START_HOUR,0)))
+                                            target_date_for_search = None # Szukaj od następnego dnia
+                                        elif pref in ['specific_day','specific_datetime', 'specific_day_later', 'specific_day_earlier'] and day:
+                                            try:
+                                                wd=POLISH_WEEKDAYS.index(day); ahead=(wd-now.weekday()+7)%7
+                                                if ahead==0 and now.time()>=datetime.time(WORK_END_HOUR,0): ahead=7
+                                                target_date_for_search = now.date()+datetime.timedelta(days=ahead)
+                                                search_start = tz.localize(datetime.datetime.combine(target_date_for_search, datetime.time(WORK_START_HOUR,0)))
+                                            except ValueError: logging.warning(f"Zły dzień: {day}."); search_start = now; target_date_for_search = None
+                                        elif pref == 'specific_hour':
+                                            search_start = now # Szukaj od teraz, potem filtruj godzinę
+                                            target_date_for_search = None
+                                        search_start = max(search_start, now) # Nigdy w przeszłości
+                                    except Exception as date_err: logging.error(f"Błąd search_start: {date_err}", exc_info=True); search_start = now; target_date_for_search = None
+                                else:
+                                    search_start = now; target_date_for_search = None
+
+                                logging.info(f"      Szukanie zakresów od: {search_start:%Y-%m-%d %H:%M:%S %Z}" + (f" (data: {target_date_for_search})" if target_date_for_search else ""))
                                 search_end = tz.localize(datetime.datetime.combine((search_start + datetime.timedelta(days=MAX_SEARCH_DAYS)).date(), datetime.time(WORK_END_HOUR, 0)))
-                                if ENABLE_TYPING_DELAY: time.sleep(MIN_TYPING_DELAY_SECONDS)
-                                free_ranges = get_free_time_ranges(TARGET_CALENDAR_ID, search_start, search_end)
-                                if free_ranges:
-                                    logging.info(f"      Przekazanie {len(free_ranges)} zakresów do AI...")
-                                    proposal_text, proposed_iso = get_gemini_slot_proposal(sender_id, history_for_gemini + ([user_content] if user_content else []), free_ranges)
+
+                                # --- Główna logika szukania i filtrowania ---
+                                relevant_ranges = []
+                                attempt_next_days = False
+
+                                # 1. Spróbuj znaleźć w dniu docelowym (jeśli dotyczy 'later', 'earlier' lub konkretnego dnia)
+                                if target_date_for_search and pref in ['later', 'earlier', 'specific_day', 'specific_datetime', 'specific_day_later', 'specific_day_earlier']:
+                                    logging.info(f"      Próba 1: Szukanie w dniu {target_date_for_search} z preferencją '{pref}'...")
+                                    same_day_ranges = get_free_time_ranges(TARGET_CALENDAR_ID, search_start, search_end, target_date=target_date_for_search)
+
+                                    # Filtrowanie wg preferencji czasowej dla tego dnia
+                                    if pref == 'later':
+                                        relevant_ranges = [r for r in same_day_ranges if r['start'] > last_dt + datetime.timedelta(minutes=10)] # Ściśle później niż ostatnia propozycja
+                                    elif pref == 'earlier':
+                                        relevant_ranges = [r for r in same_day_ranges if r['end'] < last_dt] # Ściśle wcześniej
+                                    elif pref == 'specific_day_later':
+                                        relevant_ranges = [r for r in same_day_ranges if r['end'].hour > PREFERRED_WEEKDAY_START_HOUR or (r['end'].hour == PREFERRED_WEEKDAY_START_HOUR and r['end'].minute > 0)]
+                                    elif pref == 'specific_day_earlier':
+                                        relevant_ranges = [r for r in same_day_ranges if r['start'].hour < EARLY_HOUR_LIMIT]
+                                    elif pref in ['specific_hour', 'specific_datetime'] and hour is not None:
+                                        relevant_ranges = [r for r in same_day_ranges if r['start'].hour <= hour < r['end'].hour or (hour == r['start'].hour and r['start'].minute == 0 and hour < r['end'].hour)]
+                                    else: # specific_day (bez preferencji czasowej)
+                                        relevant_ranges = same_day_ranges
+
+                                    if relevant_ranges:
+                                        logging.info(f"      Znaleziono {len(relevant_ranges)} pasujących zakresów w dniu {target_date_for_search}.")
+                                    else:
+                                        logging.info(f"      Brak pasujących zakresów w dniu {target_date_for_search} dla preferencji '{pref}'. Spróbuję kolejne dni.")
+                                        if pref in ['later', 'earlier']: # Tylko dla later/earlier próbuj następne dni z zachowaniem preferencji
+                                             attempt_next_days = True
+                                             search_start = tz.localize(datetime.datetime.combine(reference_date + datetime.timedelta(days=1), datetime.time(WORK_START_HOUR, 0))) # Start od następnego dnia
+                                             search_start = max(search_start, now) # Upewnij się, że nie jest w przeszłości
+                                             target_date_for_search = None # Już nie ograniczaj do daty
+
+
+                                # 2. Jeśli nie znaleziono w dniu docelowym LUB szukano od początku bez konkretnej daty
+                                if not relevant_ranges and (attempt_next_days or target_date_for_search is None):
+                                     if attempt_next_days:
+                                         logging.info(f"      Próba 2: Szukanie od {search_start:%Y-%m-%d} z preferencją '{pref}'...")
+                                     else:
+                                         logging.info(f"      Szukanie we wszystkich dniach od {search_start:%Y-%m-%d %H:%M}...")
+
+                                     all_ranges = get_free_time_ranges(TARGET_CALENDAR_ID, search_start, search_end, target_date=None) # Teraz szukaj wszędzie
+
+                                     # Zastosuj filtrowanie ogólne dla later/earlier lub godzinowe/dzienne
+                                     if pref == 'later':
+                                         relevant_ranges = [r for r in all_ranges if r['start'].hour >= PREFERRED_WEEKDAY_START_HOUR]
+                                     elif pref == 'earlier':
+                                         relevant_ranges = [r for r in all_ranges if r['start'].hour < EARLY_HOUR_LIMIT]
+                                     elif pref in ['specific_hour','specific_datetime'] and hour is not None:
+                                         potential_ranges = [r for r in all_ranges if r['start'].hour <= hour < r['end'].hour or (hour == r['start'].hour and r['start'].minute == 0 and hour < r['end'].hour)]
+                                         if potential_ranges: relevant_ranges = potential_ranges
+                                         else: relevant_ranges = all_ranges # Jeśli filtr nic nie dał, pokaż wszystkie
+                                     # Dla specific_day i any - nie filtruj dodatkowo
+                                     else:
+                                         relevant_ranges = all_ranges
+
+                                     logging.info(f"      Po ew. filtrowaniu ogólnym znaleziono {len(relevant_ranges)} zakresów.")
+
+
+                                # 3. Przetwarzanie znalezionych zakresów (relevant_ranges)
+                                if relevant_ranges:
+                                    logging.info(f"      Przekazanie {len(relevant_ranges)} zakresów do AI...")
+                                    proposal_text, proposed_iso = get_gemini_slot_proposal(sender_id, history, relevant_ranges)
+                                    verified_iso = None
                                     if proposal_text and proposed_iso:
-                                        msg_result = proposal_text
-                                        ctx_save = {'role': 'system', 'type': 'last_proposal', 'slot_iso': proposed_iso}
-                                    else: msg_result = proposal_text or "Problem z wyborem terminu."; ctx_save = None # Błąd AI lub brak slotu
-                                else: msg_result = "Brak wolnych terminów."; ctx_save = None
-                            except Exception as find_err: logging.error(f"BŁĄD find/propose: {find_err}", exc_info=True); msg_result = "Błąd szukania."; ctx_save = None
-                        # Wysyłanie wiadomości, jeśli jest coś do wysłania
-                        if msg_result: send_message(sender_id, msg_result); model_resp = Content(role="model", parts=[Part.from_text(msg_result)])
-                        # Zapis historii
+                                        try: # Weryfikacja
+                                            prop_start = datetime.datetime.fromisoformat(proposed_iso).astimezone(tz)
+                                            if is_slot_actually_free(prop_start, TARGET_CALENDAR_ID):
+                                                verified_iso = proposed_iso; msg_result = proposal_text; ctx_save = {'role':'system','type':'last_proposal','slot_iso':verified_iso}
+                                                logging.info(f"      AI wygenerowało poprawny slot: {verified_iso}")
+                                            else: logging.warning(f"[{sender_id}] AI wygenerowało zajęty ({proposed_iso})! Fallback.")
+                                        except ValueError: logging.error(f"!!! AI Error: Zły format ISO '{proposed_iso}'. Fallback.");
+                                    else: logging.warning(f"[{sender_id}] AI nie zwróciło propozycji. Fallback.")
+
+                                    if not verified_iso: # Fallback
+                                        logging.info(f"      Fallback: szukanie...")
+                                        fallback_slot = None
+                                        for r in relevant_ranges: # Przeszukaj relevant_ranges
+                                             possible_slots = get_valid_start_times(TARGET_CALENDAR_ID, r['start'], r['end'])
+                                             # Filtrowanie fallbacku wg preferencji
+                                             if pref in ['specific_hour','specific_datetime'] and hour is not None: possible_slots = [s for s in possible_slots if s.hour == hour]
+                                             elif pref == 'later' or pref == 'specific_day_later': possible_slots = [s for s in possible_slots if s.hour >= PREFERRED_WEEKDAY_START_HOUR]
+                                             elif pref == 'earlier' or pref == 'specific_day_earlier': possible_slots = [s for s in possible_slots if s.hour < EARLY_HOUR_LIMIT]
+                                             if possible_slots: fallback_slot = possible_slots[0]; break
+                                        if fallback_slot:
+                                            fallback_iso = fallback_slot.isoformat()
+                                            msg_result = f"Proponuję najbliższy termin: {format_slot_for_user(fallback_slot)}. Pasuje?"
+                                            ctx_save = {'role': 'system', 'type': 'last_proposal', 'slot_iso': fallback_iso}; logging.info(f"      Fallback wybrał: {fallback_iso}")
+                                        else: logging.error(f"[{sender_id}] Fallback nie znalazł slotów!"); msg_result = "Problem ze znalezieniem terminu."; ctx_save = None
+                                else: # Brak zakresów po wszystkich próbach
+                                    logging.info("      Brak pasujących zakresów."); msg_result = "Niestety, brak wolnych terminów spełniających kryteria."; ctx_save = None
+                            except Exception as find_err:
+                                logging.error(f"!!! BŁĄD find/propose: {find_err}", exc_info=True)
+                                msg_result = "Błąd sprawdzania dostępności."; ctx_save = None
+                        elif action == 'send_gemini_response' or action == 'send_clarification' or action == 'send_error':
+                            pass # Wiadomość już ustawiona w msg_result
+                        else:
+                            logging.error(f"!!! Nierozpoznana akcja: {action}")
+                            msg_result = "Błąd bota."; ctx_save = None
+
+                        # Finalne wysłanie wiadomości i zapis historii
+                        if msg_result:
+                             send_message(sender_id, msg_result)
+                             if not model_resp: # Utwórz obiekt Content, jeśli nie powstał wcześniej
+                                model_resp = Content(role="model", parts=[Part.from_text(msg_result)])
+
                         if user_content and not history_saved:
-                            hist_to_save = history + [user_content]
-                            if model_resp: hist_to_save.append(model_resp)
-                            save_history(sender_id, hist_to_save, context_to_save=ctx_save)
-                        elif history_saved and ctx_save: # Zapisz tylko nowy kontekst
-                             latest_hist, _ = load_history(sender_id); save_history(sender_id, latest_hist, context_to_save=ctx_save)
-                    # ... (postback, read, delivery - jak poprzednio) ...
-                    elif event.get("postback"): pass # Logika postback jak poprzednio
+                             history_to_save = history + [user_content]
+                             if model_resp:
+                                 history_to_save.append(model_resp)
+                             logging.info(f"      Zapisuję historię. Kontekst: {ctx_save}")
+                             save_history(sender_id, history_to_save, context_to_save=ctx_save)
+                        elif not user_content:
+                             logging.warning(f"[{sender_id}] Brak user_content do zapisu.")
+                        elif history_saved: # Historia zapisana wcześniej, zapisz tylko ewentualny nowy kontekst
+                             logging.info(f"      Historia zapisana. Kontekst dla nast. kroku: {ctx_save}")
+                             if ctx_save:
+                                  latest_hist, _ = load_history(sender_id)
+                                  save_history(sender_id, latest_hist, context_to_save=ctx_save)
+                    elif event.get("postback"):
+                         data = event["postback"]; payload = data.get("payload"); title = data.get("title", payload); logging.info(f"    Postback: T:'{title}', P:'{payload}'")
+                         text = f"Kliknięto: '{title}' ({payload})."; user_c = Content(role="user", parts=[Part.from_text(text)])
+                         resp = get_gemini_general_response(sender_id, text, history)
+                         if resp and INTENT_SCHEDULE_MARKER not in resp: send_message(sender_id, resp); model_c = Content(role="model", parts=[Part.from_text(resp)]); save_history(sender_id, history + [user_c, model_c])
+                         elif resp and INTENT_SCHEDULE_MARKER in resp: txt_before = resp.split(INTENT_SCHEDULE_MARKER,1)[0].strip(); msg = txt_before + "\nChcesz szukać terminu?" if txt_before else "Chcesz umówić?"; send_message(sender_id, msg); model_c = Content(role="model", parts=[Part.from_text(msg)]); save_history(sender_id, history + [user_c, model_c])
+                         else: msg = "Problem."; send_message(sender_id, msg); model_c = Content(role="model", parts=[Part.from_text(msg)]); save_history(sender_id, history + [user_c, model_c])
                     elif event.get("read"): logging.info(f"    Odczytane.")
                     elif event.get("delivery"): pass
                     else: logging.warning(f"    Nieobsługiwany event: {json.dumps(event)}")
             return Response("EVENT_RECEIVED", status=200)
-        else: logging.warning(f"POST nie 'page': {data.get('object') if data else 'Brak'}"); return Response("OK", status=200)
-    except json.JSONDecodeError as e: logging.error(f"!!! BŁĄD JSON: {e}\nDane: {raw_data[:500]}"); return Response("Invalid JSON", status=400)
-    except Exception as e: logging.error(f"!!! KRYTYCZNY BŁĄD POST: {e}", exc_info=True); return Response("ERROR", status=200)
+        else:
+            logging.warning(f"Otrzymano POST nie 'page': {data.get('object') if data else 'Brak'}")
+            return Response("OK", status=200)
+    except json.JSONDecodeError as e:
+        logging.error(f"!!! BŁĄD JSON: {e}\nDane: {raw_data[:500]}")
+        return Response("Invalid JSON", status=400)
+    except Exception as e:
+        logging.error(f"!!! KRYTYCZNY BŁĄD POST: {e}", exc_info=True)
+        return Response("ERROR", status=200)
 
-# --- Uruchomienie Serwera ---
+# =====================================================================
+# === URUCHOMIENIE SERWERA APLIKACJI ==================================
+# =====================================================================
+
 if __name__ == '__main__':
-    ensure_dir(HISTORY_DIR); port = int(os.environ.get("PORT", 8080)); debug = os.environ.get("FLASK_DEBUG", "False").lower() in ("true", "1", "yes")
+    ensure_dir(HISTORY_DIR)
+    port = int(os.environ.get("PORT", 8080))
+    debug = os.environ.get("FLASK_DEBUG", "False").lower() in ("true", "1", "yes")
     print("\n" + "="*50 + "\n--- START KONFIGURACJI BOTA ---")
-    # ... (logi startowe jak poprzednio) ...
     if not VERIFY_TOKEN or VERIFY_TOKEN == "KOLAGEN": print("!!! OSTRZ.: FB_VERIFY_TOKEN domyślny!")
     else: print("  FB_VERIFY_TOKEN: OK")
     if not PAGE_ACCESS_TOKEN: print("\n!!! KRYTYCZNE: FB_PAGE_ACCESS_TOKEN PUSTY!\n");
     elif len(PAGE_ACCESS_TOKEN) < 50: print("\n!!! KRYTYCZNE: FB_PAGE_ACCESS_TOKEN ZBYT KRÓTKI!\n")
     else:
         print("  FB_PAGE_ACCESS_TOKEN: Ustawiony (OK)")
-        if PAGE_ACCESS_TOKEN=="EACNAHFzEhkUBO4ypcoyQfWIgNc0YLZA1aCr9n3BzpvSJLoBTJnv5rWZBmc7HlqF6uUWt1uAp6aDZB8ZAb0RRT45qVIfGnciQX6wBKrZColGARfVLXP5Ic6Ptrj5AUvom4Rt12hyBxcjIJGes76fvdvBhiBZCJ0ZCVfkQMZBZCBatJshSZA8hFuRyKd58b50wkhVCMZCuwZDZD": print("\n!!! UWAGA: Używany DOMYŚLNY PAGE_ACCESS_TOKEN!\n")
+        if PAGE_ACCESS_TOKEN=="EACNAHFzEhkUBO4ypcoyQfWIgNc0YLZA1aCr9n3BzpvSJLoBTJnv5rWZBmc7HlqF6uUWt1uAp6aDZB8ZAb0RRT45qVIfGnciQX6wBKrZColGARfVLXP5Ic6Ptrj5AUvom4Rt12hyBxcjIJGes76fvdvBhiBZCJ0ZCVfkQMZBZCBatJshSZA8hFuRyKd58b50wkhVCMZCuwZDZD":
+             print("\n!!! UWAGA: Używany jest DOMYŚLNY PAGE_ACCESS_TOKEN!\n")
     print(f"  Historia: {HISTORY_DIR}"); print(f"  Projekt Vertex: {PROJECT_ID}"); print(f"  Lokalizacja Vertex: {LOCATION}")
     print(f"  Model Vertex: {MODEL_ID}"); print(f"  Kalendarz ID: {TARGET_CALENDAR_ID}")
     print(f"  Symulacja pisania: {'On' if ENABLE_TYPING_DELAY else 'Off'}")
@@ -657,4 +1079,7 @@ if __name__ == '__main__':
     if not debug:
         try: from waitress import serve; print("Start Waitress..."); serve(app, host='0.0.0.0', port=port)
         except ImportError: print("Waitress brak. Start serwera dev."); app.run(host='0.0.0.0', port=port, debug=False)
-    else: print("Start serwera dev w trybie DEBUG..."); logging.getLogger().setLevel(logging.DEBUG); print("Logowanie DEBUG włączone."); app.run(host='0.0.0.0', port=port, debug=True)
+    else:
+        print("Start serwera dev w trybie DEBUG...")
+        logging.getLogger().setLevel(logging.DEBUG); print("Logowanie DEBUG włączone.")
+        app.run(host='0.0.0.0', port=port, debug=True)
