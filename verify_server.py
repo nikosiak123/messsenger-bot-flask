@@ -29,7 +29,7 @@ app = Flask(__name__)
 
 # --- Konfiguracja Ogólna ---
 VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "KOLAGEN") # Zmień na swój token weryfikacyjny
-# ZASADA 1 (Zaktualizowana): UŻYTO DOMYŚLNEGO TOKENU PODANEGO PRZEZ UŻYTKOWNIKA
+# ZASADA 1: Ustalenie wartości PAGE_ACCESS_TOKEN tylko raz, pobierając ze zmiennej środowiskowej lub używając wartości domyślnej
 PAGE_ACCESS_TOKEN = os.environ.get("FB_PAGE_ACCESS_TOKEN", "EACNAHFzEhkUBO4ypcoyQfWIgNc0YLZA1aCr9n3BzpvSJLoBTJnv5rWZBmc7HlqF6uUWt1uAp6aDZB8ZAb0RRT45qVIfGnciQX6wBKrZColGARfVLXP5Ic6Ptrj5AUvom4Rt12hyBxcjIJGes76fvdvBhiBZCJ0ZCVfkQMZBZCBatJshSZA8hFuRyKd58b50wkhVCMZCuwZDZD")
 PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "linear-booth-450221-k1") # Zmień na swój Project ID
 LOCATION = os.environ.get("GCP_LOCATION", "us-central1") # Zmień na swoją lokalizację
@@ -100,8 +100,9 @@ def ensure_dir(directory):
 
 def get_user_profile(psid):
     """Pobiera podstawowe informacje o profilu użytkownika z Facebooka."""
-    if not PAGE_ACCESS_TOKEN or PAGE_ACCESS_TOKEN == "EACNAHFzEhkUBO5fkUaM58QhzyLYaiXmQk71sj85c9OsuhZAYOd5UyZCugih6PlWyZCuNEtGaFtB1V6BMPLgZBEbJuZAU1EmwUoB4ZCFZAXHh7BnoTyEb7XthBdgsHCWzzaH4ZB3WOaMjP0H4ZBtrn0JFbnMV6tEoLy3J7HN3vZBsTYzpHWiDDZBNqzQIVGmdBiur7nhmwZDZD":
-        logging.warning(f"[{psid}] Używany jest domyślny lub pusty PAGE_ACCESS_TOKEN. Realne pobieranie profilu może nie działać. Profil niepobrany.")
+    # Usunięto porównanie z konkretnym tokenem, zostaje sprawdzenie czy istnieje i czy nie jest za krótki
+    if not PAGE_ACCESS_TOKEN:
+        logging.warning(f"[{psid}] Brak skonfigurowanego PAGE_ACCESS_TOKEN. Pobieranie profilu niemożliwe.")
         return None
     elif len(PAGE_ACCESS_TOKEN) < 50:
         logging.warning(f"[{psid}] PAGE_ACCESS_TOKEN wydaje się za krótki. Profil niepobrany.")
@@ -591,9 +592,10 @@ def _send_single_message(recipient_id, message_text):
         "messaging_type": "RESPONSE"
     }
 
-    if not PAGE_ACCESS_TOKEN or PAGE_ACCESS_TOKEN == "EACNAHFzEhkUBO5fkUaM58QhzyLYaiXmQk71sj85c9OsuhZAYOd5UyZCugih6PlWyZCuNEtGaFtB1V6BMPLgZBEbJuZAU1EmwUoB4ZCFZAXHh7BnoTyEb7XthBdgsHCWzzaH4ZB3WOaMjP0H4ZBtrn0JFbnMV6tEoLy3J7HN3vZBsTYzpHWiDDZBNqzQIVGmdBiur7nhmwZDZD":
-        logging.error(f"!!! [{recipient_id}] Próba wysłania wiadomości z PUSTYM lub DOMYŚLNYM tokenem! Wiadomość NIE wysłana.")
-        return False
+    # Usunięto porównanie z konkretnym tokenem
+    if not PAGE_ACCESS_TOKEN:
+         logging.error(f"!!! [{recipient_id}] Brak skonfigurowanego PAGE_ACCESS_TOKEN! Wiadomość NIE wysłana.")
+         return False
     elif len(PAGE_ACCESS_TOKEN) < 50:
          logging.error(f"!!! [{recipient_id}] PAGE_ACCESS_TOKEN wydaje się za krótki! Wiadomość NIE wysłana.")
          return False
@@ -1026,7 +1028,6 @@ def webhook_handle():
 
                         user_input_text = None
                         user_content = None
-                        # **POPRAWKA: Zawsze inicjalizuj history_saved_after_intent**
                         history_saved_after_intent = False
 
                         if "text" in message_data:
@@ -1044,7 +1045,6 @@ def webhook_handle():
                             no_attachment_message = "Przepraszam, obecnie nie potrafię przetwarzać załączników."
                             send_message(sender_id, no_attachment_message)
                             model_content = Content(role="model", parts=[Part.from_text(no_attachment_message)])
-                            # Zapisz przed continue
                             save_history(sender_id, history + [user_content, model_content], context_to_save=None)
                             continue
                         else:
@@ -1054,7 +1054,6 @@ def webhook_handle():
                             unknown_message_reply = "Przepraszam, nie rozumiem tej wiadomości."
                             send_message(sender_id, unknown_message_reply)
                             model_content = Content(role="model", parts=[Part.from_text(unknown_message_reply)])
-                            # Zapisz przed continue
                             save_history(sender_id, history + [user_content, model_content], context_to_save=None)
                             continue
 
@@ -1067,7 +1066,6 @@ def webhook_handle():
                         preference = 'any'
                         requested_day_str = None
                         requested_hour_int = None
-                        # history_saved_after_intent jest już zainicjalizowane na False
 
                         if ENABLE_TYPING_DELAY and user_input_text:
                             delay = max(MIN_TYPING_DELAY_SECONDS, min(MAX_TYPING_DELAY_SECONDS, len(user_input_text) / TYPING_CHARS_PER_SECOND))
@@ -1145,9 +1143,6 @@ def webhook_handle():
 
                         logging.info(f"      Akcja do wykonania: {action_to_perform}")
 
-                        # **POPRAWKA: Inicjalizacja history_saved_after_intent PRZED blokiem if text_to_send_immediately**
-                        # Już zainicjalizowane na False wcześniej
-
                         if text_to_send_immediately:
                             send_message(sender_id, text_to_send_immediately)
                             if not model_response_content and action_to_perform == 'find_and_propose' and gemini_response and INTENT_SCHEDULE_MARKER in gemini_response:
@@ -1155,10 +1150,7 @@ def webhook_handle():
                                 save_history(sender_id, history + [user_content, model_response_content], context_to_save=None)
                                 history.append(user_content)
                                 history.append(model_response_content)
-                                # Ustaw flagę dopiero PO zapisie
                                 history_saved_after_intent = True
-                            # else: # Nie potrzebujemy else do ustawiania na False, bo jest już domyślnie
-                            #    history_saved_after_intent = False
 
 
                         if action_to_perform == 'book':
@@ -1294,7 +1286,6 @@ def webhook_handle():
                              if not model_response_content:
                                 model_response_content = Content(role="model", parts=[Part.from_text(text_to_send_as_result)])
 
-                        # **POPRAWKA: Użycie zainicjalizowanej zmiennej**
                         if user_content and not history_saved_after_intent:
                              history_to_save = history + [user_content]
                              if model_response_content:
@@ -1358,7 +1349,6 @@ def webhook_handle():
         return Response("Invalid JSON format", status=400)
     except Exception as e:
         logging.error(f"!!! KRYTYCZNY BŁĄD podczas przetwarzania POST webhooka: {e}", exc_info=True)
-        # Zwróć 200 OK, aby Facebook nie próbował ponownie wysyłać tego samego zdarzenia
         return Response("Internal server error processing event", status=200)
 
 
@@ -1378,25 +1368,30 @@ if __name__ == '__main__':
     else:
         print("  FB_VERIFY_TOKEN: Ustawiony (OK)")
 
-    # ZASADA 1: Sprawdzenie zgodności z nowym podanym tokenem
-    if PAGE_ACCESS_TOKEN == "EACNAHFzEhkUBO5fkUaM58QhzyLYaiXmQk71sj85c9OsuhZAYOd5UyZCugih6PlWyZCuNEtGaFtB1V6BMPLgZBEbJuZAU1EmwUoB4ZCFZAXHh7BnoTyEb7XthBdgsHCWzzaH4ZB3WOaMjP0H4ZBtrn0JFbnMV6tEoLy3J7HN3vZBsTYzpHWiDDZBNqzQIVGmdBiur7nhmwZDZD":
-        print("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        print("!!! UWAGA: Używany jest DOMYŚLNY PAGE_ACCESS_TOKEN podany w instrukcji!   !!!")
-        print("!!! Dla rzeczywistego działania bota, zastąp go PRAWDZIWYM tokenem     !!!")
-        print("!!! dostępu do strony Facebook w zmiennej środowiskowej FB_PAGE_ACCESS_TOKEN !!!")
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n")
-    elif not PAGE_ACCESS_TOKEN or len(PAGE_ACCESS_TOKEN) < 50 :
+    # Usunięto porównanie z konkretnym tokenem, sprawdzenie tylko czy istnieje i czy nie jest za krótki
+    if not PAGE_ACCESS_TOKEN:
          print("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-         print("!!! KRYTYCZNE OSTRZEŻENIE: FB_PAGE_ACCESS_TOKEN PUSTY lub ZBYT KRÓTKI!    !!!")
+         print("!!! KRYTYCZNE OSTRZEŻENIE: FB_PAGE_ACCESS_TOKEN JEST PUSTY!               !!!")
+         print("!!! Bot NIE BĘDZIE MÓGŁ WYSYŁAĆ WIADOMOŚCI!                       !!!")
+         print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n")
+    elif len(PAGE_ACCESS_TOKEN) < 50 :
+         print("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+         print("!!! KRYTYCZNE OSTRZEŻENIE: FB_PAGE_ACCESS_TOKEN ZBYT KRÓTKI!             !!!")
          print("!!! Bot NIE BĘDZIE MÓGŁ WYSYŁAĆ WIADOMOŚCI!                       !!!")
          print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n")
     else:
         print("  FB_PAGE_ACCESS_TOKEN: Ustawiony (wydaje się OK)")
+        # Dodatkowe ostrzeżenie, jeśli używany jest *nowy* domyślny token z instrukcji
+        if PAGE_ACCESS_TOKEN == "EACNAHFzEhkUBO4ypcoyQfWIgNc0YLZA1aCr9n3BzpvSJLoBTJnv5rWZBmc7HlqF6uUWt1uAp6aDZB8ZAb0RRT45qVIfGnciQX6wBKrZColGARfVLXP5Ic6Ptrj5AUvom4Rt12hyBxcjIJGes76fvdvBhiBZCJ0ZCVfkQMZBZCBatJshSZA8hFuRyKd58b50wkhVCMZCuwZDZD":
+             print("\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+             print("!!! UWAGA: Używany jest DOMYŚLNY PAGE_ACCESS_TOKEN podany w instrukcji!   !!!")
+             print("!!! Dla rzeczywistego działania bota, zastąp go PRAWDZIWYM tokenem     !!!")
+             print("!!! dostępu do strony Facebook w zmiennej środowiskowej FB_PAGE_ACCESS_TOKEN !!!")
+             print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n")
 
     print(f"  Katalog historii konwersacji: {HISTORY_DIR}")
     print(f"  Projekt Google Cloud (Vertex AI): {PROJECT_ID}")
     print(f"  Lokalizacja Vertex AI: {LOCATION}")
-    # ZASADA 2: Wypisanie używanego modelu
     print(f"  Model Vertex AI: {MODEL_ID} (zgodnie z wymaganiem)")
     print(f"  Plik klucza Google Calendar: {SERVICE_ACCOUNT_FILE} {'(OK)' if os.path.exists(SERVICE_ACCOUNT_FILE) else '(BRAK PLIKU!)'}")
     if not os.path.exists(SERVICE_ACCOUNT_FILE):
