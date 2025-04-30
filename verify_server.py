@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# verify_server.py (wersja z AI GENERUJĄCYM termin z ZAKRESÓW - poprawiona składnia)
+# verify_server.py (wersja z AI GENERUJĄCYM termin z ZAKRESÓW - poprawiona składnia v2)
 
 from flask import Flask, request, Response
 import os
@@ -279,7 +279,7 @@ def parse_event_time(event_time_data, default_tz):
             logging.warning(f"Ostrz.: Nie sparsowano dateTime: {dt_str}")
             return None
         if dt.tzinfo is None:
-            dt = pytz.utc.localize(dt) # Assume UTC if no timezone info
+            dt = pytz.utc.localize(dt)
         return dt.astimezone(default_tz)
     elif 'date' in event_time_data:
         try:
@@ -358,14 +358,12 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
              day_end_work = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_END_HOUR, 0)))
              eff_start = max(free_start, day_start_work)
              eff_end = min(free_end, day_end_work)
-
              if eff_end > eff_start and eff_end - eff_start >= appointment_duration_td:
                  free_ranges.append({'start': eff_start, 'end': eff_end})
                  logging.debug(f"  + Zakres (między): {eff_start:%Y-%m-%d %H:%M} - {eff_end:%Y-%m-%d %H:%M}")
-
              if free_end.date() > current_check_date:
                  current_check_date += datetime.timedelta(days=1)
-                 free_start = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_START_HOUR, 0))) # Start from work start next day
+                 free_start = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_START_HOUR, 0)))
              else:
                  break
         current_time = max(current_time, busy['end'])
@@ -736,6 +734,7 @@ def _call_gemini(user_psid, prompt_content, generation_config, model_purpose="",
                 logging.debug(f"--- Prompt dla {user_psid} ---\n{json.dumps(prompt_dict, indent=2, ensure_ascii=False)}\n--- Koniec Promptu ---")
             except Exception as log_err:
                 logging.error(f"Błąd logowania promptu: {log_err}")
+
         try:
             response = gemini_model.generate_content(prompt_content, generation_config=generation_config, safety_settings=SAFETY_SETTINGS, stream=False)
             if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
@@ -952,7 +951,6 @@ def webhook_handle():
                                 action = 'find_and_propose'
                                 m_pref = re.search(r"PREFERENCE='([^']*)'", decision)
                                 pref = m_pref.group(1) if m_pref else 'any'
-                                # Poprawione parsowanie dla DAY i HOUR
                                 if pref in ['specific_day', 'specific_datetime']:
                                     m_day=re.search(r"DAY='([^']*)'",decision)
                                     day=m_day.group(1) if m_day else None
@@ -967,7 +965,7 @@ def webhook_handle():
                                 ctx_save={'role':'system','type':'last_proposal','slot_iso':last_iso}
                             else:
                                 action='send_error'; msg_result="Problem z przetworzeniem."
-                            if action != 'send_clarification': ctx_save = None
+                            if action != 'send_clarification': ctx_save = None # Reset kontekstu
                         else: # SCENARIUSZ 2: Normalna rozmowa
                             logging.info(f"      SCENARIUSZ: Normalna rozmowa.")
                             response = get_gemini_general_response(sender_id, user_input, history)
@@ -1008,7 +1006,7 @@ def webhook_handle():
                                 else:
                                     logging.warning(f"[{sender_id}] Slot {last_iso} zajęty!")
                                     msg_result="Niestety, ten termin został właśnie zajęty. Szukamy innego?"
-                                ctx_save = None
+                                ctx_save = None # Zawsze resetuj po próbie book
                             except Exception as book_err:
                                 logging.error(f"!!! BŁĄD rezerwacji: {book_err}", exc_info=True)
                                 msg_result="Błąd systemu rezerwacji."; ctx_save = None
@@ -1018,18 +1016,36 @@ def webhook_handle():
                                 tz = _get_timezone(); now = datetime.datetime.now(tz); search_start = now
                                 if last_iso and pref != 'any':
                                     try: # Ustalanie search_start wg preferencji
-                                        last_dt = datetime.datetime.fromisoformat(last_iso).astimezone(tz); base_start = last_dt + datetime.timedelta(minutes=10)
-                                        if pref == 'later': search_start = base_start + datetime.timedelta(hours=1); if last_dt.weekday()<5 and last_dt.hour<PREFERRED_WEEKDAY_START_HOUR: search_start = max(search_start, tz.localize(datetime.datetime.combine(last_dt.date(), datetime.time(PREFERRED_WEEKDAY_START_HOUR,0))))
-                                        elif pref == 'earlier': search_start = now
-                                        elif pref == 'next_day': search_start = tz.localize(datetime.datetime.combine(last_dt.date()+datetime.timedelta(days=1), datetime.time(WORK_START_HOUR,0)))
+                                        last_dt = datetime.datetime.fromisoformat(last_iso).astimezone(tz)
+                                        base_start = last_dt + datetime.timedelta(minutes=10)
+                                        if pref == 'later':
+                                            search_start = base_start + datetime.timedelta(hours=1)
+                                            # Poprawiony warunek - bez średnika, w nowej linii
+                                            if last_dt.weekday()<5 and last_dt.hour<PREFERRED_WEEKDAY_START_HOUR:
+                                                afternoon_start = tz.localize(datetime.datetime.combine(last_dt.date(), datetime.time(PREFERRED_WEEKDAY_START_HOUR,0)))
+                                                search_start = max(search_start, afternoon_start)
+                                        elif pref == 'earlier':
+                                            search_start = now
+                                        elif pref == 'next_day':
+                                            search_start = tz.localize(datetime.datetime.combine(last_dt.date()+datetime.timedelta(days=1), datetime.time(WORK_START_HOUR,0)))
                                         elif pref in ['specific_day','specific_datetime'] and day:
-                                            try: wd=POLISH_WEEKDAYS.index(day); ahead=(wd-now.weekday()+7)%7; if ahead==0 and now.time()>=datetime.time(WORK_END_HOUR,0): ahead=7
-                                            search_start = tz.localize(datetime.datetime.combine(now.date()+datetime.timedelta(days=ahead), datetime.time(WORK_START_HOUR,0)))
-                                            except ValueError: logging.warning(f"Zły dzień: {day}."); search_start = now
-                                        elif pref == 'specific_hour': search_start = now
-                                        search_start = max(search_start, now)
-                                    except Exception as date_err: logging.error(f"Błąd search_start: {date_err}", exc_info=True); search_start = now
-                                else: search_start = now
+                                            try:
+                                                wd=POLISH_WEEKDAYS.index(day)
+                                                ahead=(wd-now.weekday()+7)%7
+                                                if ahead==0 and now.time()>=datetime.time(WORK_END_HOUR,0):
+                                                    ahead=7
+                                                search_start = tz.localize(datetime.datetime.combine(now.date()+datetime.timedelta(days=ahead), datetime.time(WORK_START_HOUR,0)))
+                                            except ValueError:
+                                                logging.warning(f"Zły dzień: {day}.")
+                                                search_start = now
+                                        elif pref == 'specific_hour':
+                                            search_start = now # Filtrowanie po godzinie później
+                                        search_start = max(search_start, now) # Nigdy nie szukaj w przeszłości
+                                    except Exception as date_err:
+                                        logging.error(f"Błąd ustalania search_start: {date_err}", exc_info=True)
+                                        search_start = now
+                                else: # Pierwsze szukanie lub odrzucenie 'any'
+                                    search_start = now
 
                                 logging.info(f"      Szukanie zakresów od: {search_start:%Y-%m-%d %H:%M:%S %Z}")
                                 search_end = tz.localize(datetime.datetime.combine((search_start + datetime.timedelta(days=MAX_SEARCH_DAYS)).date(), datetime.time(WORK_END_HOUR, 0)))
@@ -1037,19 +1053,25 @@ def webhook_handle():
                                 free_ranges = get_free_time_ranges(TARGET_CALENDAR_ID, search_start, search_end)
                                 if free_ranges:
                                     relevant_ranges = free_ranges
+                                    # Filtrowanie zakresów wg godziny i/lub dnia
                                     if pref in ['specific_hour','specific_datetime'] and hour is not None:
                                         potential_ranges = [r for r in free_ranges if r['start'].hour <= hour < r['end'].hour or (hour == r['start'].hour and r['start'].minute == 0 and hour < r['end'].hour)]
                                         if potential_ranges: relevant_ranges = potential_ranges; logging.info(f"Przefiltrowano zakresy do godz. {hour}. Liczba: {len(relevant_ranges)}")
                                         else: logging.info(f"Brak zakresów o godz. {hour}.")
-                                    # Dodatkowe filtrowanie jeśli podano tylko dzień (w pref=specific_day lub specific_datetime)
-                                    elif pref in ['specific_day', 'specific_datetime'] and day:
-                                         # Już uwzględnione w search_start, ale można dodać warunek na weekday dla pewności
-                                         try:
-                                             target_wd_idx = POLISH_WEEKDAYS.index(day)
-                                             relevant_ranges = [r for r in relevant_ranges if r['start'].weekday() == target_wd_idx]
-                                             logging.info(f"Przefiltrowano zakresy do dnia: {day}. Liczba: {len(relevant_ranges)}")
-                                         except ValueError:
-                                             logging.warning(f"Ignoruję nieznany dzień '{day}' przy filtrowaniu zakresów.")
+                                    # Dodatkowe filtrowanie po dniu (jeśli godzina nie wyfiltrowała lub nie była podana)
+                                    if pref in ['specific_day', 'specific_datetime'] and day and (pref != 'specific_hour' or hour is None or not relevant_ranges): # Apply day filter if hour didn't filter or wasn't specified
+                                        try:
+                                            target_wd_idx = POLISH_WEEKDAYS.index(day)
+                                            day_filtered_ranges = [r for r in relevant_ranges if r['start'].weekday() == target_wd_idx]
+                                            if day_filtered_ranges:
+                                                 relevant_ranges = day_filtered_ranges
+                                                 logging.info(f"Przefiltrowano zakresy do dnia: {day}. Liczba: {len(relevant_ranges)}")
+                                            else:
+                                                 logging.info(f"Brak zakresów w dniu: {day}. Używam poprzednio filtrowanych (jeśli były).")
+                                                 # Jeśli filtrowanie po dniu nic nie dało, a były wyniki po godzinie, użyj ich
+                                                 # Jeśli nie było filtrowania po godzinie, to relevant_ranges pozostanie pusty
+                                        except ValueError:
+                                            logging.warning(f"Ignoruję nieznany dzień '{day}' przy filtrowaniu zakresów.")
 
 
                                     if not relevant_ranges:
@@ -1059,14 +1081,19 @@ def webhook_handle():
                                         proposal_text, proposed_iso = get_gemini_slot_proposal(sender_id, history, relevant_ranges)
                                         verified_iso = None
                                         if proposal_text and proposed_iso:
-                                            try:
+                                            try: # Weryfikacja
                                                 prop_start = datetime.datetime.fromisoformat(proposed_iso).astimezone(tz)
                                                 if is_slot_actually_free(prop_start, TARGET_CALENDAR_ID):
-                                                    verified_iso = proposed_iso; msg_result = proposal_text; ctx_save = {'role':'system','type':'last_proposal','slot_iso':verified_iso}
+                                                    verified_iso = proposed_iso
+                                                    msg_result = proposal_text
+                                                    ctx_save = {'role':'system','type':'last_proposal','slot_iso':verified_iso}
                                                     logging.info(f"      AI wygenerowało poprawny slot: {verified_iso}")
-                                                else: logging.warning(f"[{sender_id}] AI wygenerowało zajęty ({proposed_iso})! Fallback.")
-                                            except ValueError: logging.error(f"!!! AI Error: Zły format ISO '{proposed_iso}'. Fallback.");
-                                        else: logging.warning(f"[{sender_id}] AI nie zwróciło propozycji. Fallback.")
+                                                else:
+                                                    logging.warning(f"[{sender_id}] AI wygenerowało zajęty ({proposed_iso})! Fallback.")
+                                            except ValueError:
+                                                logging.error(f"!!! AI Error: Zły format ISO '{proposed_iso}'. Fallback.");
+                                        else:
+                                            logging.warning(f"[{sender_id}] AI nie zwróciło propozycji. Fallback.")
 
                                         if not verified_iso: # Fallback
                                             logging.info(f"      Fallback: szukanie...")
@@ -1077,28 +1104,43 @@ def webhook_handle():
                                                  if pref in ['specific_hour','specific_datetime'] and hour is not None:
                                                      possible_slots = [s for s in possible_slots if s.hour == hour]
                                                  if possible_slots:
-                                                     fallback_slot = possible_slots[0]; break
+                                                     fallback_slot = possible_slots[0]; break # Znaleziono pierwszy pasujący
                                             if fallback_slot:
                                                 fallback_iso = fallback_slot.isoformat()
                                                 msg_result = f"Proponuję najbliższy termin: {format_slot_for_user(fallback_slot)}. Pasuje?"
                                                 ctx_save = {'role': 'system', 'type': 'last_proposal', 'slot_iso': fallback_iso}; logging.info(f"      Fallback wybrał: {fallback_iso}")
-                                            else: logging.error(f"[{sender_id}] Fallback nie znalazł slotów!"); msg_result = "Problem ze znalezieniem terminu."; ctx_save = None
-                                else: logging.info("      Brak zakresów."); msg_result = "Brak wolnych terminów."; ctx_save = None
-                            except Exception as find_err: logging.error(f"!!! BŁĄD find/propose: {find_err}", exc_info=True); msg_result = "Błąd sprawdzania dostępności."; ctx_save = None
-                        elif action == 'send_gemini_response' or action == 'send_clarification' or action == 'send_error': pass
-                        else: logging.error(f"!!! Nierozpoznana akcja: {action}"); msg_result = "Błąd bota."; ctx_save = None
+                                            else:
+                                                logging.error(f"[{sender_id}] Fallback nie znalazł slotów!"); msg_result = "Problem ze znalezieniem terminu."; ctx_save = None
+                                else:
+                                    logging.info("      Brak zakresów."); msg_result = "Brak wolnych terminów."; ctx_save = None
+                            except Exception as find_err:
+                                logging.error(f"!!! BŁĄD find/propose: {find_err}", exc_info=True)
+                                msg_result = "Błąd sprawdzania dostępności."; ctx_save = None
+                        elif action == 'send_gemini_response' or action == 'send_clarification' or action == 'send_error':
+                            pass # Wiadomość już ustawiona w msg_result
+                        else:
+                            logging.error(f"!!! Nierozpoznana akcja: {action}")
+                            msg_result = "Błąd bota."; ctx_save = None
 
+                        # Finalne wysłanie wiadomości i zapis historii
                         if msg_result:
                              send_message(sender_id, msg_result)
-                             if not model_resp: model_resp = Content(role="model", parts=[Part.from_text(msg_result)])
+                             if not model_resp: # Utwórz obiekt Content, jeśli nie powstał wcześniej (np. przy wykryciu intencji)
+                                model_resp = Content(role="model", parts=[Part.from_text(msg_result)])
+
                         if user_content and not history_saved:
                              history_to_save = history + [user_content]
-                             if model_resp: history_to_save.append(model_resp)
-                             logging.info(f"      Zapisuję historię. Kontekst: {ctx_save}"); save_history(sender_id, history_to_save, context_to_save=ctx_save)
-                        elif not user_content: logging.warning(f"[{sender_id}] Brak user_content do zapisu.")
-                        elif history_saved:
+                             if model_resp:
+                                 history_to_save.append(model_resp)
+                             logging.info(f"      Zapisuję historię. Kontekst: {ctx_save}")
+                             save_history(sender_id, history_to_save, context_to_save=ctx_save)
+                        elif not user_content:
+                             logging.warning(f"[{sender_id}] Brak user_content do zapisu.")
+                        elif history_saved: # Historia zapisana wcześniej, zapisz tylko ewentualny nowy kontekst
                              logging.info(f"      Historia zapisana. Kontekst dla nast. kroku: {ctx_save}")
-                             if ctx_save: latest_hist, _ = load_history(sender_id); save_history(sender_id, latest_hist, context_to_save=ctx_save)
+                             if ctx_save:
+                                  latest_hist, _ = load_history(sender_id)
+                                  save_history(sender_id, latest_hist, context_to_save=ctx_save)
                     elif event.get("postback"):
                          data = event["postback"]; payload = data.get("payload"); title = data.get("title", payload); logging.info(f"    Postback: T:'{title}', P:'{payload}'")
                          text = f"Kliknięto: '{title}' ({payload})."; user_c = Content(role="user", parts=[Part.from_text(text)])
