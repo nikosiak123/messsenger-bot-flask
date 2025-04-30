@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# verify_server.py (wersja z AI GENERUJĄCYM termin z ZAKRESÓW - obsługa dnia+pory)
+# verify_server.py (wersja z AI GENERUJĄCYM termin z ZAKRESÓW - obsługa dnia+pory v2)
 
 from flask import Flask, request, Response
 import os
@@ -55,7 +55,7 @@ APPOINTMENT_DURATION_MINUTES = 60
 WORK_START_HOUR = 7
 WORK_END_HOUR = 22
 TARGET_CALENDAR_ID = 'f19e189826b9d6e36950da347ac84d5501ecbd6bed0d76c8641be61a67749c67@group.calendar.google.com'
-PREFERRED_WEEKDAY_START_HOUR = 16 # Godzina "popołudniowa"
+PREFERRED_WEEKDAY_START_HOUR = 16 # Godzina "popołudniowa" / "później"
 PREFERRED_WEEKEND_START_HOUR = 10
 MAX_SEARCH_DAYS = 14
 EARLY_HOUR_LIMIT = 12 # Górna granica dla preferencji "earlier"
@@ -124,8 +124,7 @@ def load_history(user_psid):
             if isinstance(entry, dict) and entry.get('role') == 'system' and entry.get('type') == 'last_proposal': last_system_entry_index = i; break
         for i, msg_data in enumerate(history_data):
             if isinstance(msg_data, dict) and msg_data.get('role') in ('user', 'model') and 'parts' in msg_data:
-                text_parts = []
-                valid_parts = True
+                text_parts = []; valid_parts = True
                 for part_data in msg_data['parts']:
                     if isinstance(part_data, dict) and 'text' in part_data and isinstance(part_data['text'], str): text_parts.append(Part.from_text(part_data['text']))
                     else: logging.warning(f"Ostrz. [{user_psid}]: Niepoprawna część w historii (idx {i})"); valid_parts = False; break
@@ -195,33 +194,52 @@ def parse_event_time(event_time_data, default_tz):
         except ValueError: logging.warning(f"Ostrz.: Nie sparsowano date: {event_time_data['date']}"); return None
     return None
 
-def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
-    """Znajduje ciągłe zakresy wolnego czasu w kalendarzu Google."""
+# ZMIANA: Dodano argument target_date
+def get_free_time_ranges(calendar_id, start_datetime, end_datetime, target_date=None):
+    """Znajduje ciągłe zakresy wolnego czasu w kalendarzu Google, opcjonalnie dla konkretnej daty."""
     service = get_calendar_service(); tz = _get_timezone()
     if not service: logging.error("Błąd: Usługa kalendarza niedostępna w get_free_time_ranges."); return []
     if start_datetime.tzinfo is None: start_datetime = tz.localize(start_datetime)
     else: start_datetime = start_datetime.astimezone(tz)
     if end_datetime.tzinfo is None: end_datetime = tz.localize(end_datetime)
     else: end_datetime = end_datetime.astimezone(tz)
-    logging.info(f"Szukanie zakresów (min. {APPOINTMENT_DURATION_MINUTES} min) w '{calendar_id}'")
+
+    # ZMIANA: Dostosowanie logowania i zakresu, jeśli podano target_date
+    log_target_date_info = f" (tylko data: {target_date})" if target_date else ""
+    logging.info(f"Szukanie zakresów (min. {APPOINTMENT_DURATION_MINUTES} min) w '{calendar_id}'{log_target_date_info}")
     logging.info(f"Zakres: {start_datetime:%Y-%m-%d %H:%M %Z} - {end_datetime:%Y-%m-%d %H:%M %Z}")
+
+    # ZMIANA: Dostosuj timeMin i timeMax jeśli szukamy tylko w konkretnym dniu
+    query_start_dt = start_datetime
+    query_end_dt = end_datetime
+    if target_date:
+        query_start_dt = max(start_datetime, tz.localize(datetime.datetime.combine(target_date, datetime.time(0, 0))))
+        query_end_dt = min(end_datetime, tz.localize(datetime.datetime.combine(target_date, datetime.time(23, 59, 59))))
+        if query_start_dt >= query_end_dt:
+             logging.warning(f"Data docelowa {target_date} poza zakresem {start_datetime.date()} - {end_datetime.date()} lub nieprawidłowy zakres. Brak zakresów.")
+             return []
+
     try:
-        events_result = service.events().list(calendarId=calendar_id, timeMin=start_datetime.isoformat(), timeMax=end_datetime.isoformat(), singleEvents=True, orderBy='startTime').execute()
+        events_result = service.events().list(calendarId=calendar_id, timeMin=query_start_dt.isoformat(), timeMax=query_end_dt.isoformat(), singleEvents=True, orderBy='startTime').execute()
         events = events_result.get('items', []); logging.info(f"Pobrano {len(events)} wydarzeń.")
     except Exception as e: logging.error(f'Błąd API pobierania wydarzeń: {e}', exc_info=True); return []
 
-    free_ranges = []; current_time = start_datetime; appointment_duration_td = datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+    free_ranges = []; current_time = query_start_dt; appointment_duration_td = datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
     busy_times = []
     for event in events:
         start = parse_event_time(event.get('start'), tz); end = parse_event_time(event.get('end'), tz)
         if isinstance(start, datetime.datetime) and isinstance(end, datetime.datetime):
-            if end > start_datetime and start < end_datetime:
-                 effective_start = max(start, start_datetime); effective_end = min(end, end_datetime)
+            # Używamy query_start_dt i query_end_dt do ograniczenia
+            if end > query_start_dt and start < query_end_dt:
+                 effective_start = max(start, query_start_dt); effective_end = min(end, query_end_dt)
                  if effective_start < effective_end: busy_times.append({'start': effective_start, 'end': effective_end})
         elif isinstance(start, datetime.date):
-            event_date = start; day_start = tz.localize(datetime.datetime.combine(event_date, datetime.time(0,0))); day_end = tz.localize(datetime.datetime.combine(event_date, datetime.time(23,59,59)))
-            if day_end > start_datetime and day_start < end_datetime:
-                effective_start = max(day_start, start_datetime); effective_end = min(day_end, end_datetime)
+            event_date = start
+            # Sprawdź, czy dzień wydarzenia całodniowego jest w zakresie zapytania
+            if query_start_dt.date() <= event_date <= query_end_dt.date():
+                day_start = tz.localize(datetime.datetime.combine(event_date, datetime.time(0,0)))
+                day_end = tz.localize(datetime.datetime.combine(event_date, datetime.time(23,59,59)))
+                effective_start = max(day_start, query_start_dt); effective_end = min(day_end, query_end_dt)
                 if effective_start < effective_end: busy_times.append({'start': effective_start, 'end': effective_end})
 
     busy_times.sort(key=lambda x: x['start'])
@@ -233,25 +251,31 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
             if current['start'] <= last['end']: last['end'] = max(last['end'], current['end'])
             else: merged_busy_times.append(current)
 
+    # Znajdź luki między zajętymi przedziałami, respektując godziny pracy
     for busy in merged_busy_times:
         free_start = current_time; free_end = busy['start']
         current_check_date = free_start.date()
-        while True:
-             day_start_work = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_START_HOUR, 0)))
-             day_end_work = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_END_HOUR, 0)))
-             eff_start = max(free_start, day_start_work); eff_end = min(free_end, day_end_work)
-             if eff_end > eff_start and eff_end - eff_start >= appointment_duration_td:
-                 free_ranges.append({'start': eff_start, 'end': eff_end})
-                 logging.debug(f"  + Zakres (między): {eff_start:%Y-%m-%d %H:%M} - {eff_end:%Y-%m-%d %H:%M}")
-             if free_end.date() > current_check_date:
-                 current_check_date += datetime.timedelta(days=1)
-                 free_start = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_START_HOUR, 0)))
-             else: break
+        # Sprawdzaj dzień po dniu, jeśli luka jest długa
+        while current_check_date <= free_end.date():
+            day_start_work = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_START_HOUR, 0)))
+            day_end_work = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_END_HOUR, 0)))
+            eff_start = max(free_start, day_start_work); eff_end = min(free_end, day_end_work)
+            if eff_end > eff_start and eff_end - eff_start >= appointment_duration_td:
+                free_ranges.append({'start': eff_start, 'end': eff_end})
+                logging.debug(f"  + Zakres (między): {eff_start:%Y-%m-%d %H:%M} - {eff_end:%Y-%m-%d %H:%M}")
+            # Jeśli koniec luki jest w następnym dniu, przygotuj się na sprawdzenie następnego dnia
+            if free_end.date() > current_check_date:
+                current_check_date += datetime.timedelta(days=1)
+                # Ustaw free_start na początek godzin pracy następnego dnia
+                free_start = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_START_HOUR, 0)))
+            else:
+                break # Skończyliśmy sprawdzać tę lukę
         current_time = max(current_time, busy['end'])
 
-    free_start = current_time; free_end = end_datetime
+    # Sprawdź lukę po ostatnim zajętym wydarzeniu
+    free_start = current_time; free_end = query_end_dt # Użyj końca zapytania
     current_check_date = free_start.date()
-    while True:
+    while current_check_date <= free_end.date():
         day_start_work = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_START_HOUR, 0)))
         day_end_work = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_END_HOUR, 0)))
         eff_start = max(free_start, day_start_work); eff_end = min(free_end, day_end_work)
@@ -261,10 +285,12 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
         if free_end.date() > current_check_date:
             current_check_date += datetime.timedelta(days=1)
             free_start = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_START_HOUR, 0)))
-        else: break
+        else:
+            break
 
-    logging.info(f"Znaleziono {len(free_ranges)} zakresów wolnego czasu.")
+    logging.info(f"Znaleziono {len(free_ranges)} zakresów wolnego czasu" + (f" w dniu {target_date}." if target_date else "."))
     return free_ranges
+
 
 def format_ranges_for_ai(ranges):
     """Formatuje listę zakresów na czytelny tekst dla AI."""
@@ -310,8 +336,7 @@ def get_valid_start_times(calendar_id, check_start, check_end):
         merged_busy_times = []
         if busy_intervals:
              busy_intervals.sort(key=lambda x: x['start']); merged_busy_times.append(busy_intervals[0])
-             for current in busy_intervals[1:]:
-                 last = merged_busy_times[-1]
+             for current in busy_intervals[1:]: last = merged_busy_times[-1];
                  if current['start'] <= last['end']: last['end'] = max(last['end'], current['end'])
                  else: merged_busy_times.append(current)
         potential_start = loop_check_start
@@ -508,7 +533,7 @@ SYSTEM_INSTRUCTION_PROPOSE = f"""Jesteś asystentem AI proponującym terminy dla
 **Zasady:** Generuj JEDEN termin. Preferuj pełne godziny. Sprawdź zakres. ZAWSZE dołączaj znacznik ISO. Bez cennika itp.
 """
 
-# ZMIANA: Zaktualizowana instrukcja dla AI interpretującego feedback
+# ZMIANA: Zaktualizowana instrukcja FEEDBACK z nowymi preferencjami
 SYSTEM_INSTRUCTION_FEEDBACK = f"""Jesteś asystentem AI analizującym odpowiedź użytkownika na propozycję terminu.
 
 **Kontekst:** Zaproponowano użytkownikowi termin.
@@ -528,9 +553,7 @@ SYSTEM_INSTRUCTION_FEEDBACK = f"""Jesteś asystentem AI analizującym odpowiedź
 *   **`[REJECT_FIND_NEXT PREFERENCE='specific_day_earlier' DAY='NAZWA_DNIA']`**: Odrzucenie, podany **dzień i ogólna preferencja wcześniejszej pory** (np. środa rano, czwartek przed 12).
 *   `[CLARIFY]`: Niejasna odpowiedź, pytanie niezwiązane.
 
-**Ważne:
-** Dokładnie jeden znacznik. Znaczniki z dniem i godziną/porą (`specific_datetime`, `specific_day_later`, `specific_day_earlier`) mają pierwszeństwo przed znacznikami tylko z dniem (`specific_day`) lub tylko z godziną/porą (`specific_hour`, `later`, `earlier`).
-** Nie zmieniaj dnia jeśli nie zostało o tym wspomniane w preferencjach, np. na preferencję "wcześniej" gdzie nie ma wspomnianego dnia tygodnia, nie zmieniaj go
+**Ważne:** Dokładnie jeden znacznik. Znaczniki z dniem i godziną/porą (`specific_datetime`, `specific_day_later`, `specific_day_earlier`) mają pierwszeństwo przed znacznikami tylko z dniem (`specific_day`) lub tylko z godziną/porą (`specific_hour`, `later`, `earlier`).
 """
 
 # =====================================================================
@@ -551,7 +574,7 @@ def _call_gemini(user_psid, prompt_content, generation_config, model_purpose="",
         attempt += 1
         logging.info(f"\n--- [{user_psid}] Wywołanie Gemini ({MODEL_ID}) - {model_purpose} (Próba: {attempt}/{max_retries + 1}) ---")
         if logging.getLogger().isEnabledFor(logging.DEBUG):
-            try:
+            try: # Logowanie JSON promptu
                 prompt_dict=[{'role':c.role,'parts':[{'text':p.text} for p in c.parts if hasattr(p,'text')]} if isinstance(c,Content) else repr(c) for c in prompt_content]
                 logging.debug(f"--- Prompt dla {user_psid} ---\n{json.dumps(prompt_dict, indent=2, ensure_ascii=False)}\n--- Koniec Promptu ---")
             except Exception as log_err:
@@ -569,11 +592,8 @@ def _call_gemini(user_psid, prompt_content, generation_config, model_purpose="",
             finish_reason = candidate.finish_reason.name
             if finish_reason != "STOP" and finish_reason != "MAX_TOKENS":
                  logging.warning(f"[{user_psid}] Zakończono: {finish_reason} (Próba {attempt})")
-                 # Jeśli zablokowane, nie ponawiaj
-                 if finish_reason == "SAFETY":
-                    return None
-                 # Przy innych błędach też nie ponawiamy na razie
-                 return None
+                 if finish_reason == "SAFETY": return None
+                 return None # Dla innych błędów też nie ponawiaj
             if finish_reason == "STOP" and (not candidate.content or not candidate.content.parts):
                 logging.warning(f"[{user_psid}] Brak treści mimo STOP (Próba {attempt}).")
                 if attempt <= max_retries:
@@ -774,14 +794,13 @@ def webhook_handle():
                                 action = 'find_and_propose'
                                 m_pref = re.search(r"PREFERENCE='([^']*)'", decision)
                                 pref = m_pref.group(1) if m_pref else 'any'
-                                # ZMIANA: Parsowanie DAY i HOUR dla nowych preferencji
+                                # Parsowanie DAY i HOUR dla odpowiednich preferencji
                                 if pref in ['specific_day', 'specific_datetime', 'specific_day_later', 'specific_day_earlier']:
                                     m_day=re.search(r"DAY='([^']*)'",decision)
                                     day=m_day.group(1) if m_day else None
                                 if pref in ['specific_hour', 'specific_datetime']:
                                     m_hour=re.search(r"HOUR='(\d+)'",decision)
                                     hour=int(m_hour.group(1)) if m_hour and m_hour.group(1).isdigit() else None
-                                # Nie parsujemy godziny dla 'specific_day_later' i 'specific_day_earlier', bo jej tam nie ma
                                 logging.info(f"      Odrzucono. Pref: {pref}, Dzień: {day}, Godz: {hour}")
                                 msg_now = "Rozumiem. Poszukam innego terminu."
                             elif decision == "[CLARIFY]":
@@ -838,116 +857,147 @@ def webhook_handle():
 
                         elif action == 'find_and_propose':
                             try:
-                                tz = _get_timezone(); now = datetime.datetime.now(tz); search_start = now
+                                tz = _get_timezone(); now = datetime.datetime.now(tz)
+                                search_start = now
+                                reference_date = None # Data z ostatniej propozycji
+                                search_next_day = False # Czy szukać od następnego dnia
+
+                                if last_iso: # Odczytaj datę referencyjną
+                                    try:
+                                        last_dt = datetime.datetime.fromisoformat(last_iso).astimezone(tz)
+                                        reference_date = last_dt.date()
+                                    except ValueError: logging.warning(f"Nie sparsowano daty z last_iso: {last_iso}")
+
+                                # --- Ustalanie search_start i target_date ---
+                                target_date_for_search = None # Domyślnie szukaj we wszystkich dniach
+
                                 if last_iso and pref != 'any':
-                                    try: # Ustalanie search_start wg preferencji
+                                    try:
                                         last_dt = datetime.datetime.fromisoformat(last_iso).astimezone(tz)
                                         base_start = last_dt + datetime.timedelta(minutes=10)
-                                        # ZMIANA: Uwzględnienie nowych preferencji przy ustalaniu search_start
+
+                                        # Ustalanie search_start
                                         if pref == 'later':
-                                            search_start = base_start + datetime.timedelta(hours=1)
-                                            if last_dt.weekday()<5 and last_dt.hour<PREFERRED_WEEKDAY_START_HOUR:
-                                                afternoon_start = tz.localize(datetime.datetime.combine(last_dt.date(), datetime.time(PREFERRED_WEEKDAY_START_HOUR,0)))
-                                                search_start = max(search_start, afternoon_start)
+                                            # Zacznij szukać później tego samego dnia
+                                            search_start = last_dt + datetime.timedelta(hours=1) # Np. godzinę później
+                                            search_start = max(search_start, base_start)
+                                            target_date_for_search = reference_date # Spróbuj najpierw ten sam dzień
                                         elif pref == 'earlier':
-                                            search_start = now
+                                            # Zacznij szukać od początku tego samego dnia
+                                            search_start = tz.localize(datetime.datetime.combine(last_dt.date(), datetime.time(WORK_START_HOUR,0)))
+                                            target_date_for_search = reference_date # Spróbuj najpierw ten sam dzień
                                         elif pref == 'next_day':
                                             search_start = tz.localize(datetime.datetime.combine(last_dt.date()+datetime.timedelta(days=1), datetime.time(WORK_START_HOUR,0)))
-                                        elif pref in ['specific_day', 'specific_datetime', 'specific_day_later', 'specific_day_earlier'] and day: # Użyj dnia jeśli podany w którejkolwiek z tych opcji
+                                            target_date_for_search = None # Szukaj od następnego dnia
+                                        elif pref in ['specific_day','specific_datetime', 'specific_day_later', 'specific_day_earlier'] and day:
                                             try:
-                                                wd=POLISH_WEEKDAYS.index(day)
-                                                ahead=(wd-now.weekday()+7)%7
-                                                if ahead==0 and now.time()>=datetime.time(WORK_END_HOUR,0):
-                                                    ahead=7
-                                                search_start = tz.localize(datetime.datetime.combine(now.date()+datetime.timedelta(days=ahead), datetime.time(WORK_START_HOUR,0)))
-                                            except ValueError:
-                                                logging.warning(f"Zły dzień: {day}.")
-                                                search_start = now
+                                                wd=POLISH_WEEKDAYS.index(day); ahead=(wd-now.weekday()+7)%7
+                                                if ahead==0 and now.time()>=datetime.time(WORK_END_HOUR,0): ahead=7
+                                                target_date_for_search = now.date()+datetime.timedelta(days=ahead)
+                                                search_start = tz.localize(datetime.datetime.combine(target_date_for_search, datetime.time(WORK_START_HOUR,0)))
+                                            except ValueError: logging.warning(f"Zły dzień: {day}."); search_start = now; target_date_for_search = None
                                         elif pref == 'specific_hour':
-                                            search_start = now # Filtrowanie po godzinie później
-                                        search_start = max(search_start, now)
-                                    except Exception as date_err:
-                                        logging.error(f"Błąd ustalania search_start: {date_err}", exc_info=True)
-                                        search_start = now
+                                            search_start = now # Szukaj od teraz, potem filtruj godzinę
+                                            target_date_for_search = None
+                                        search_start = max(search_start, now) # Nigdy w przeszłości
+                                    except Exception as date_err: logging.error(f"Błąd search_start: {date_err}", exc_info=True); search_start = now; target_date_for_search = None
                                 else:
-                                    search_start = now
+                                    search_start = now; target_date_for_search = None
 
-                                logging.info(f"      Szukanie zakresów od: {search_start:%Y-%m-%d %H:%M:%S %Z}")
+                                logging.info(f"      Szukanie zakresów od: {search_start:%Y-%m-%d %H:%M:%S %Z}" + (f" (data: {target_date_for_search})" if target_date_for_search else ""))
                                 search_end = tz.localize(datetime.datetime.combine((search_start + datetime.timedelta(days=MAX_SEARCH_DAYS)).date(), datetime.time(WORK_END_HOUR, 0)))
 
-                                free_ranges = get_free_time_ranges(TARGET_CALENDAR_ID, search_start, search_end)
-                                if free_ranges:
-                                    relevant_ranges = free_ranges
-                                    # ZMIANA: Filtrowanie zakresów wg godziny i/lub dnia/pory
-                                    hour_filtered = False # Flaga czy zastosowano filtr godziny
-                                    if pref in ['specific_hour','specific_datetime'] and hour is not None:
-                                        potential_ranges = [r for r in relevant_ranges if r['start'].hour <= hour < r['end'].hour or (hour == r['start'].hour and r['start'].minute == 0 and hour < r['end'].hour)]
-                                        if potential_ranges:
-                                            relevant_ranges = potential_ranges; hour_filtered = True
-                                            logging.info(f"Przefiltrowano zakresy do godz. {hour}. Liczba: {len(relevant_ranges)}")
-                                        else: logging.info(f"Brak zakresów o godz. {hour}.")
-                                    elif pref == 'specific_day_later': # Preferuj późniejsze godziny
-                                        potential_ranges = [r for r in relevant_ranges if r['end'].hour > PREFERRED_WEEKDAY_START_HOUR or (r['end'].hour == PREFERRED_WEEKDAY_START_HOUR and r['end'].minute > 0)]
-                                        if potential_ranges: relevant_ranges = potential_ranges; logging.info(f"Przefiltrowano zakresy do popołudniowych/wieczornych. Liczba: {len(relevant_ranges)}")
-                                        else: logging.info(f"Brak zakresów popołudniowych/wieczornych.")
-                                    elif pref == 'specific_day_earlier': # Preferuj wcześniejsze godziny
-                                        potential_ranges = [r for r in relevant_ranges if r['start'].hour < EARLY_HOUR_LIMIT]
-                                        if potential_ranges: relevant_ranges = potential_ranges; logging.info(f"Przefiltrowano zakresy do porannych/przedpołudniowych. Liczba: {len(relevant_ranges)}")
-                                        else: logging.info(f"Brak zakresów porannych/przedpołudniowych.")
+                                # --- Główna logika szukania i filtrowania ---
+                                relevant_ranges = []
+                                attempt_next_days = False
 
-                                    # Dodatkowe filtrowanie po dniu (jeśli godzina nie wyfiltrowała lub nie była podana w datetime)
-                                    # i jeśli preferencja to specific_day, specific_datetime, specific_day_later, specific_day_earlier
-                                    if pref in ['specific_day', 'specific_datetime', 'specific_day_later', 'specific_day_earlier'] and day and not hour_filtered:
-                                         try:
-                                             target_wd_idx = POLISH_WEEKDAYS.index(day)
-                                             day_filtered_ranges = [r for r in relevant_ranges if r['start'].weekday() == target_wd_idx]
-                                             if day_filtered_ranges:
-                                                  relevant_ranges = day_filtered_ranges
-                                                  logging.info(f"Przefiltrowano zakresy do dnia: {day}. Liczba: {len(relevant_ranges)}")
-                                             else:
-                                                  logging.info(f"Brak zakresów w dniu: {day}. Używam poprzednio filtrowanych (jeśli były).")
-                                         except ValueError:
-                                             logging.warning(f"Ignoruję nieznany dzień '{day}' przy filtrowaniu.")
+                                # 1. Spróbuj znaleźć w dniu docelowym (jeśli dotyczy 'later', 'earlier' lub konkretnego dnia)
+                                if target_date_for_search and pref in ['later', 'earlier', 'specific_day', 'specific_datetime', 'specific_day_later', 'specific_day_earlier']:
+                                    logging.info(f"      Próba 1: Szukanie w dniu {target_date_for_search} z preferencją '{pref}'...")
+                                    same_day_ranges = get_free_time_ranges(TARGET_CALENDAR_ID, search_start, search_end, target_date=target_date_for_search)
 
+                                    # Filtrowanie wg preferencji czasowej dla tego dnia
+                                    if pref == 'later':
+                                        relevant_ranges = [r for r in same_day_ranges if r['start'] > last_dt + datetime.timedelta(minutes=10)] # Ściśle później niż ostatnia propozycja
+                                    elif pref == 'earlier':
+                                        relevant_ranges = [r for r in same_day_ranges if r['end'] < last_dt] # Ściśle wcześniej
+                                    elif pref == 'specific_day_later':
+                                        relevant_ranges = [r for r in same_day_ranges if r['end'].hour > PREFERRED_WEEKDAY_START_HOUR or (r['end'].hour == PREFERRED_WEEKDAY_START_HOUR and r['end'].minute > 0)]
+                                    elif pref == 'specific_day_earlier':
+                                        relevant_ranges = [r for r in same_day_ranges if r['start'].hour < EARLY_HOUR_LIMIT]
+                                    elif pref in ['specific_hour', 'specific_datetime'] and hour is not None:
+                                        relevant_ranges = [r for r in same_day_ranges if r['start'].hour <= hour < r['end'].hour or (hour == r['start'].hour and r['start'].minute == 0 and hour < r['end'].hour)]
+                                    else: # specific_day (bez preferencji czasowej)
+                                        relevant_ranges = same_day_ranges
 
-                                    if not relevant_ranges:
-                                        logging.info("      Brak zakresów po filtrowaniu."); msg_result = "Niestety, brak terminów pasujących do preferencji."; ctx_save = None
+                                    if relevant_ranges:
+                                        logging.info(f"      Znaleziono {len(relevant_ranges)} pasujących zakresów w dniu {target_date_for_search}.")
                                     else:
-                                        logging.info(f"      Przekazanie {len(relevant_ranges)} zakresów do AI...")
-                                        proposal_text, proposed_iso = get_gemini_slot_proposal(sender_id, history, relevant_ranges)
-                                        verified_iso = None
-                                        if proposal_text and proposed_iso:
-                                            try: # Weryfikacja
-                                                prop_start = datetime.datetime.fromisoformat(proposed_iso).astimezone(tz)
-                                                if is_slot_actually_free(prop_start, TARGET_CALENDAR_ID):
-                                                    verified_iso = proposed_iso; msg_result = proposal_text; ctx_save = {'role':'system','type':'last_proposal','slot_iso':verified_iso}
-                                                    logging.info(f"      AI wygenerowało poprawny slot: {verified_iso}")
-                                                else: logging.warning(f"[{sender_id}] AI wygenerowało zajęty ({proposed_iso})! Fallback.")
-                                            except ValueError: logging.error(f"!!! AI Error: Zły format ISO '{proposed_iso}'. Fallback.");
-                                        else: logging.warning(f"[{sender_id}] AI nie zwróciło propozycji. Fallback.")
+                                        logging.info(f"      Brak pasujących zakresów w dniu {target_date_for_search} dla preferencji '{pref}'. Spróbuję kolejne dni.")
+                                        if pref in ['later', 'earlier']: # Tylko dla later/earlier próbuj następne dni z zachowaniem preferencji
+                                             attempt_next_days = True
+                                             search_start = tz.localize(datetime.datetime.combine(reference_date + datetime.timedelta(days=1), datetime.time(WORK_START_HOUR, 0))) # Start od następnego dnia
+                                             search_start = max(search_start, now) # Upewnij się, że nie jest w przeszłości
+                                             target_date_for_search = None # Już nie ograniczaj do daty
 
-                                        if not verified_iso: # Fallback
-                                            logging.info(f"      Fallback: szukanie...")
-                                            fallback_slot = None
-                                            for r in relevant_ranges:
-                                                 possible_slots = get_valid_start_times(TARGET_CALENDAR_ID, r['start'], r['end'])
-                                                 # Zastosuj filtry pory dnia/godziny również w fallbacku
-                                                 if pref in ['specific_hour','specific_datetime'] and hour is not None:
-                                                     possible_slots = [s for s in possible_slots if s.hour == hour]
-                                                 elif pref == 'specific_day_later':
-                                                     possible_slots = [s for s in possible_slots if s.hour >= PREFERRED_WEEKDAY_START_HOUR]
-                                                 elif pref == 'specific_day_earlier':
-                                                     possible_slots = [s for s in possible_slots if s.hour < EARLY_HOUR_LIMIT]
 
-                                                 if possible_slots:
-                                                     fallback_slot = possible_slots[0]; break
-                                            if fallback_slot:
-                                                fallback_iso = fallback_slot.isoformat()
-                                                msg_result = f"Proponuję najbliższy termin: {format_slot_for_user(fallback_slot)}. Pasuje?"
-                                                ctx_save = {'role': 'system', 'type': 'last_proposal', 'slot_iso': fallback_iso}; logging.info(f"      Fallback wybrał: {fallback_iso}")
-                                            else: logging.error(f"[{sender_id}] Fallback nie znalazł slotów!"); msg_result = "Problem ze znalezieniem terminu."; ctx_save = None
-                                else:
-                                    logging.info("      Brak zakresów."); msg_result = "Brak wolnych terminów."; ctx_save = None
+                                # 2. Jeśli nie znaleziono w dniu docelowym LUB szukano od początku bez konkretnej daty
+                                if not relevant_ranges and (attempt_next_days or target_date_for_search is None):
+                                     if attempt_next_days:
+                                         logging.info(f"      Próba 2: Szukanie od {search_start:%Y-%m-%d} z preferencją '{pref}'...")
+                                     else:
+                                         logging.info(f"      Szukanie we wszystkich dniach od {search_start:%Y-%m-%d %H:%M}...")
+
+                                     all_ranges = get_free_time_ranges(TARGET_CALENDAR_ID, search_start, search_end, target_date=None) # Teraz szukaj wszędzie
+
+                                     # Zastosuj filtrowanie ogólne dla later/earlier lub godzinowe/dzienne
+                                     if pref == 'later':
+                                         relevant_ranges = [r for r in all_ranges if r['start'].hour >= PREFERRED_WEEKDAY_START_HOUR]
+                                     elif pref == 'earlier':
+                                         relevant_ranges = [r for r in all_ranges if r['start'].hour < EARLY_HOUR_LIMIT]
+                                     elif pref in ['specific_hour','specific_datetime'] and hour is not None:
+                                         potential_ranges = [r for r in all_ranges if r['start'].hour <= hour < r['end'].hour or (hour == r['start'].hour and r['start'].minute == 0 and hour < r['end'].hour)]
+                                         if potential_ranges: relevant_ranges = potential_ranges
+                                         else: relevant_ranges = all_ranges # Jeśli filtr nic nie dał, pokaż wszystkie
+                                     # Dla specific_day i any - nie filtruj dodatkowo
+                                     else:
+                                         relevant_ranges = all_ranges
+
+                                     logging.info(f"      Po ew. filtrowaniu ogólnym znaleziono {len(relevant_ranges)} zakresów.")
+
+
+                                # 3. Przetwarzanie znalezionych zakresów (relevant_ranges)
+                                if relevant_ranges:
+                                    logging.info(f"      Przekazanie {len(relevant_ranges)} zakresów do AI...")
+                                    proposal_text, proposed_iso = get_gemini_slot_proposal(sender_id, history, relevant_ranges)
+                                    verified_iso = None
+                                    if proposal_text and proposed_iso:
+                                        try: # Weryfikacja
+                                            prop_start = datetime.datetime.fromisoformat(proposed_iso).astimezone(tz)
+                                            if is_slot_actually_free(prop_start, TARGET_CALENDAR_ID):
+                                                verified_iso = proposed_iso; msg_result = proposal_text; ctx_save = {'role':'system','type':'last_proposal','slot_iso':verified_iso}
+                                                logging.info(f"      AI wygenerowało poprawny slot: {verified_iso}")
+                                            else: logging.warning(f"[{sender_id}] AI wygenerowało zajęty ({proposed_iso})! Fallback.")
+                                        except ValueError: logging.error(f"!!! AI Error: Zły format ISO '{proposed_iso}'. Fallback.");
+                                    else: logging.warning(f"[{sender_id}] AI nie zwróciło propozycji. Fallback.")
+
+                                    if not verified_iso: # Fallback
+                                        logging.info(f"      Fallback: szukanie...")
+                                        fallback_slot = None
+                                        for r in relevant_ranges: # Przeszukaj relevant_ranges
+                                             possible_slots = get_valid_start_times(TARGET_CALENDAR_ID, r['start'], r['end'])
+                                             # Filtrowanie fallbacku wg preferencji
+                                             if pref in ['specific_hour','specific_datetime'] and hour is not None: possible_slots = [s for s in possible_slots if s.hour == hour]
+                                             elif pref == 'later' or pref == 'specific_day_later': possible_slots = [s for s in possible_slots if s.hour >= PREFERRED_WEEKDAY_START_HOUR]
+                                             elif pref == 'earlier' or pref == 'specific_day_earlier': possible_slots = [s for s in possible_slots if s.hour < EARLY_HOUR_LIMIT]
+                                             if possible_slots: fallback_slot = possible_slots[0]; break
+                                        if fallback_slot:
+                                            fallback_iso = fallback_slot.isoformat()
+                                            msg_result = f"Proponuję najbliższy termin: {format_slot_for_user(fallback_slot)}. Pasuje?"
+                                            ctx_save = {'role': 'system', 'type': 'last_proposal', 'slot_iso': fallback_iso}; logging.info(f"      Fallback wybrał: {fallback_iso}")
+                                        else: logging.error(f"[{sender_id}] Fallback nie znalazł slotów!"); msg_result = "Problem ze znalezieniem terminu."; ctx_save = None
+                                else: # Brak zakresów po wszystkich próbach
+                                    logging.info("      Brak pasujących zakresów."); msg_result = "Niestety, brak wolnych terminów spełniających kryteria."; ctx_save = None
                             except Exception as find_err:
                                 logging.error(f"!!! BŁĄD find/propose: {find_err}", exc_info=True)
                                 msg_result = "Błąd sprawdzania dostępności."; ctx_save = None
