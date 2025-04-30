@@ -559,39 +559,39 @@ def book_appointment(calendar_id, start_time, end_time, summary="Rezerwacja FB",
         logging.error(f"Nieoczekiwany błąd Python rezerwacji: {e}", exc_info=True)
         return False, "Wewnętrzny błąd systemu rezerwacji."
 
+# ZMIANA: Funkcja formatująca zakresy dla AI
 def format_ranges_for_ai(ranges):
-    """Formatuje listę zakresów czasowych na czytelny tekst dla AI."""
+    """Formatuje listę zakresów czasowych na bardziej techniczny tekst dla AI."""
     if not ranges:
         return "Brak dostępnych zakresów czasowych."
-    ranges_by_date = defaultdict(list)
     tz = _get_timezone()
-    for r in ranges:
-        range_date = r['start'].date()
-        start_time = r['start'].astimezone(tz)
-        end_time = r['end'].astimezone(tz)
-        ranges_by_date[range_date].append({
-            'start_time': start_time.strftime('%H:%M'),
-            'end_time': end_time.strftime('%H:%M')
-        })
-
     formatted_lines = [
-        f"Dostępne ZAKRESY czasowe (wizyta trwa {APPOINTMENT_DURATION_MINUTES} minut). Wybierz JEDEN zakres i wygeneruj DOKŁADNY termin startu (preferuj pełne godziny), dołączając go w znaczniku [SLOT_ISO:...].",
-        "--- Dostępne Zakresy ---"
-        ]
-    dates_added = 0
-    max_dates_to_show = 7
-    for d in sorted(ranges_by_date.keys()):
-        day_name = POLISH_WEEKDAYS[d.weekday()]
-        date_str = d.strftime('%d.%m.%Y')
-        time_ranges_str = '; '.join(f"{tr['start_time']}-{tr['end_time']}"
-                                  for tr in sorted(ranges_by_date[d], key=lambda x: x['start_time']))
-        if time_ranges_str:
-            formatted_lines.append(f"- {day_name}, {date_str}: {time_ranges_str}")
-            dates_added += 1
-            if dates_added >= max_dates_to_show:
-                formatted_lines.append("- ... (i potencjalnie więcej)")
-                break
-    if dates_added == 0:
+        f"Dostępne ZAKRESY czasowe (wizyta trwa {APPOINTMENT_DURATION_MINUTES} minut). Wybierz JEDEN zakres i wygeneruj DOKŁADNY termin startu (np. 16:00), dołączając go w znaczniku [SLOT_ISO:...]. Pamiętaj, aby termin mieścił się w zakresie.",
+        "--- Dostępne Zakresy (Data YYYY-MM-DD, Dzień, Od Godziny HH:MM, Do Godziny HH:MM) ---"
+    ]
+    slots_added = 0
+    max_slots_to_show = 15 # Pokaż więcej indywidualnych zakresów
+
+    # Sortuj po dacie i godzinie rozpoczęcia
+    sorted_ranges = sorted(ranges, key=lambda r: r['start'])
+
+    for r in sorted_ranges:
+        start_dt = r['start'].astimezone(tz)
+        end_dt = r['end'].astimezone(tz)
+        day_name = POLISH_WEEKDAYS[start_dt.weekday()]
+        # Format YYYY-MM-DD dla AI
+        date_str = start_dt.strftime('%Y-%m-%d')
+        start_time_str = start_dt.strftime('%H:%M')
+        end_time_str = end_dt.strftime('%H:%M')
+
+        # Dodaj każdą linię osobno
+        formatted_lines.append(f"- {date_str}, {day_name}, od {start_time_str}, do {end_time_str}")
+        slots_added += 1
+        if slots_added >= max_slots_to_show:
+            formatted_lines.append("- ... (i potencjalnie więcej)")
+            break
+
+    if slots_added == 0:
         return "Brak dostępnych zakresów czasowych w godzinach pracy."
     return "\n".join(formatted_lines)
 
@@ -799,6 +799,7 @@ def _call_gemini(user_psid, prompt_history, generation_config, task_name, max_re
 
 # ZMIANA: Uproszczona instrukcja dla AI Proponującego
 SYSTEM_INSTRUCTION_TEXT_PROPOSE = """Twoje zadanie: Jesteś systemem wybierającym termin spotkania. Z poniższej listy dostępnych ZAKRESÓW czasowych wybierz DOKŁADNIE JEDEN czas rozpoczęcia wizyty, która trwa {duration} minut. Biorąc pod uwagę historię rozmowy (jeśli zawiera preferencje czasowe), wybierz najbardziej pasujący termin. Preferuj pełne godziny (np. 16:00) jeśli to możliwe w ramach zakresu. Upewnij się, że wybrany czas + {duration} minut mieści się w danym zakresie. Po wybraniu terminu, sformułuj krótką, uprzejmą propozycję dla użytkownika (np. "Proponuję termin: [dzień], [data] o [godzina]. Pasuje?"). Twoja odpowiedź MUSI kończyć się znacznikiem {slot_marker_prefix}WYBRANY_TERMIN_ISO{slot_marker_suffix} z wybranym czasem w formacie ISO 8601. NIE zadawaj ŻADNYCH pytań. NIE pisz o niczym innym. Tylko propozycja terminu i znacznik ISO.
+**BARDZO WAŻNE:** Wybrany przez Ciebie termin MUSI pochodzić z jednego z podanych poniżej "Dostępnych zakresów czasowych". Nie wymyślaj terminów spoza tej listy.
 
 Dostępne zakresy czasowe:
 {available_ranges_text}
