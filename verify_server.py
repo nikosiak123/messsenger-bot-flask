@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# verify_server.py (wersja z AI GENERUJĄCYM termin z ZAKRESÓW - sformatowana)
+# verify_server.py (wersja z AI GENERUJĄCYM termin z ZAKRESÓW - poprawiona składnia)
 
 from flask import Flask, request, Response
 import os
@@ -99,10 +99,10 @@ def ensure_dir(directory):
 def get_user_profile(psid):
     """Pobiera podstawowe informacje o profilu użytkownika z Facebooka."""
     if not PAGE_ACCESS_TOKEN:
-        logging.warning(f"[{psid}] Brak skonfigurowanego PAGE_ACCESS_TOKEN. Pobieranie profilu niemożliwe.")
+        logging.warning(f"[{psid}] Brak tokena. Profil niepobrany.")
         return None
     elif len(PAGE_ACCESS_TOKEN) < 50:
-        logging.warning(f"[{psid}] PAGE_ACCESS_TOKEN wydaje się za krótki. Profil niepobrany.")
+        logging.warning(f"[{psid}] Token za krótki. Profil niepobrany.")
         return None
 
     USER_PROFILE_API_URL_TEMPLATE = f"https://graph.facebook.com/v19.0/{psid}?fields=first_name,last_name,profile_pic&access_token={PAGE_ACCESS_TOKEN}"
@@ -113,8 +113,6 @@ def get_user_profile(psid):
         data = r.json()
         if 'error' in data:
             logging.error(f"BŁĄD FB API (profil) {psid}: {data['error']}")
-            if "access token" in data['error'].get('message', '').lower():
-                 logging.error(f"[{psid}] Błąd tokena dostępu przy pobieraniu profilu. Sprawdź poprawność PAGE_ACCESS_TOKEN.")
             return None
         profile_data = {
             'first_name': data.get('first_name'),
@@ -131,10 +129,7 @@ def get_user_profile(psid):
          logging.error(f"BŁĄD HTTP {http_err.response.status_code} profilu {psid}: {http_err}")
          if http_err.response is not None:
             try:
-                response_json = http_err.response.json()
-                logging.error(f"Odpowiedź FB (błąd HTTP): {response_json}")
-                if "access token" in response_json.get('error',{}).get('message', '').lower():
-                     logging.error(f"[{psid}] Błąd tokena dostępu (HTTP {http_err.response.status_code}) przy pobieraniu profilu.")
+                logging.error(f"Odpowiedź FB (błąd HTTP): {http_err.response.json()}")
             except json.JSONDecodeError:
                 logging.error(f"Odpowiedź FB (błąd HTTP, nie JSON): {http_err.response.text}")
          return None
@@ -180,8 +175,8 @@ def load_history(user_psid):
                         break
                 if valid_parts and text_parts:
                     history.append(Content(role=msg_data['role'], parts=text_parts))
-                elif valid_parts and not text_parts: # Obsługa pustych części (choć nie powinny wystąpić)
-                     logging.warning(f"Ostrz. [{user_psid}]: Puste 'parts' w historii (idx {i})")
+                elif valid_parts:
+                    logging.warning(f"Ostrz. [{user_psid}]: Puste 'parts' w historii (idx {i})")
 
             elif i == last_system_entry_index:
                 if 'slot_iso' in msg_data:
@@ -191,7 +186,7 @@ def load_history(user_psid):
                 else:
                     logging.warning(f"Ostrz. [{user_psid}]: Wpis systemowy bez 'slot_iso' (idx {i})")
             elif isinstance(msg_data, dict) and msg_data.get('role') == 'system':
-                 logging.info(f"[{user_psid}] Pominięto stary kontekst systemowy (idx {i})")
+                pass # Ignoruj stare konteksty
             else:
                 logging.warning(f"Ostrz. [{user_psid}]: Pominięto wpis w historii (idx {i}): {msg_data}")
 
@@ -204,7 +199,6 @@ def load_history(user_psid):
     except Exception as e:
         logging.error(f"BŁĄD [{user_psid}] wczytywania historii: {e}", exc_info=True)
         return [], {}
-
 
 def save_history(user_psid, history, context_to_save=None):
     """Zapisuje historię konwersacji i opcjonalny kontekst systemowy."""
@@ -284,8 +278,8 @@ def parse_event_time(event_time_data, default_tz):
         except ValueError:
             logging.warning(f"Ostrz.: Nie sparsowano dateTime: {dt_str}")
             return None
-        if dt.tzinfo is None: # Assume UTC if no timezone info
-            dt = pytz.utc.localize(dt)
+        if dt.tzinfo is None:
+            dt = pytz.utc.localize(dt) # Assume UTC if no timezone info
         return dt.astimezone(default_tz)
     elif 'date' in event_time_data:
         try:
@@ -359,10 +353,9 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
         free_start = current_time
         free_end = busy['start']
         current_check_date = free_start.date()
-        while True: # Iterate through days if the gap spans multiple days
+        while True:
              day_start_work = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_START_HOUR, 0)))
              day_end_work = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_END_HOUR, 0)))
-             # Effective start/end within work hours for the current day being checked
              eff_start = max(free_start, day_start_work)
              eff_end = min(free_end, day_end_work)
 
@@ -370,17 +363,13 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
                  free_ranges.append({'start': eff_start, 'end': eff_end})
                  logging.debug(f"  + Zakres (między): {eff_start:%Y-%m-%d %H:%M} - {eff_end:%Y-%m-%d %H:%M}")
 
-             # Move to the next day check if the original gap extends beyond the current day
              if free_end.date() > current_check_date:
                  current_check_date += datetime.timedelta(days=1)
-                 # Start checking from the beginning of the next day's work hours
-                 free_start = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_START_HOUR, 0)))
+                 free_start = tz.localize(datetime.datetime.combine(current_check_date, datetime.time(WORK_START_HOUR, 0))) # Start from work start next day
              else:
-                 break # Finished checking this gap
-
+                 break
         current_time = max(current_time, busy['end'])
 
-    # Check the final range after the last busy event
     free_start = current_time
     free_end = end_datetime
     current_check_date = free_start.date()
@@ -505,38 +494,30 @@ def is_slot_actually_free(proposed_start_dt, calendar_id):
         else:
             proposed_start_dt = proposed_start_dt.astimezone(tz)
 
-        # 1. Sprawdź, czy start jest w dozwolonych godzinach pracy
         if not (WORK_START_HOUR <= proposed_start_dt.hour < WORK_END_HOUR):
             logging.info(f"Weryfikacja slotu {proposed_start_dt.isoformat()}: INVALID (Poza godzinami pracy)")
             return False
-
-        # 2. Sprawdź, czy start jest wielokrotnością 10 minut (opcjonalne, ale zgodne z get_valid_start_times)
         if proposed_start_dt.minute % 10 != 0:
-             logging.info(f"Weryfikacja slotu {proposed_start_dt.isoformat()}: INVALID (Nie zaczyna się co 10 minut)")
+             logging.info(f"Weryfikacja slotu {proposed_start_dt.isoformat()}: INVALID (Nie co 10 minut)")
              return False
 
-        # 3. Sprawdź kolizje z istniejącymi wydarzeniami
         check_start = proposed_start_dt
         check_end = proposed_start_dt + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
         service = get_calendar_service()
-        if not service: return False # Błąd usługi kalendarza
+        if not service: return False
 
         events_result = service.events().list(
-            calendarId=calendar_id,
-            timeMin=check_start.isoformat(),
-            timeMax=check_end.isoformat(),
-            maxResults=1 # Potrzebujemy tylko wiedzieć, czy *cokolwiek* istnieje
+            calendarId=calendar_id, timeMin=check_start.isoformat(),
+            timeMax=check_end.isoformat(), maxResults=1
         ).execute()
         items = events_result.get('items', [])
 
-        # Jeśli lista wydarzeń *w tym dokładnym slocie* jest pusta, to jest wolny
         is_free = not items
         logging.info(f"Weryfikacja slotu {proposed_start_dt.isoformat()}: {'FREE' if is_free else 'BUSY'}")
         return is_free
-
     except Exception as e:
-        logging.error(f"Błąd podczas weryfikacji slotu {proposed_start_dt.isoformat()}: {e}", exc_info=True)
-        return False # W razie błędu załóż, że nie jest wolny
+        logging.error(f"Błąd weryfikacji slotu {proposed_start_dt.isoformat()}: {e}", exc_info=True)
+        return False
 
 def format_slot_for_user(slot_start):
     """Formatuje pojedynczy slot (datetime) na czytelny tekst dla użytkownika."""
@@ -548,36 +529,28 @@ def format_slot_for_user(slot_start):
         except Exception: pass
         return f"{day_name}, {slot_start.strftime(f'%d.%m.%Y o {hour_str}:%M')}"
     except Exception as e:
-        logging.error(f"Błąd formatowania slotu dla użytkownika: {e}", exc_info=True)
+        logging.error(f"Błąd formatowania slotu: {e}", exc_info=True)
         return slot_start.isoformat()
 
 def book_appointment(calendar_id, start_time, end_time, summary="Rezerwacja wizyty", description="", user_name=""):
     """Rezerwuje wizytę w kalendarzu Google."""
-    service = get_calendar_service()
-    tz = _get_timezone()
-    if not service:
-        return False, "Błąd: Brak połączenia z usługą kalendarza."
-
+    service = get_calendar_service(); tz = _get_timezone()
+    if not service: return False, "Błąd: Brak połączenia z usługą kalendarza."
     if start_time.tzinfo is None: start_time = tz.localize(start_time)
     else: start_time = start_time.astimezone(tz)
     if end_time.tzinfo is None: end_time = tz.localize(end_time)
     else: end_time = end_time.astimezone(tz)
-
     event_summary = summary
-    if user_name:
-        event_summary += f" - {user_name}"
-
+    if user_name: event_summary += f" - {user_name}"
     event = {
         'summary': event_summary, 'description': description,
         'start': {'dateTime': start_time.isoformat(), 'timeZone': CALENDAR_TIMEZONE,},
         'end': {'dateTime': end_time.isoformat(), 'timeZone': CALENDAR_TIMEZONE,},
         'reminders': {'useDefault': False, 'overrides': [{'method': 'popup', 'minutes': 60},], },}
-
     try:
         logging.info(f"Próba rezerwacji: '{event_summary}' od {start_time:%Y-%m-%d %H:%M} do {end_time:%Y-%m-%d %H:%M}")
         created_event = service.events().insert(calendarId=calendar_id, body=event).execute()
-        event_id = created_event.get('id')
-        logging.info(f"Rezerwacja OK. ID: {event_id}")
+        event_id = created_event.get('id'); logging.info(f"Rezerwacja OK. ID: {event_id}")
         day_index = start_time.weekday(); locale_day_name = POLISH_WEEKDAYS[day_index]
         hour_str = start_time.strftime('%#H') if os.name != 'nt' else start_time.strftime('%H')
         try: hour_str = str(start_time.hour)
@@ -587,8 +560,7 @@ def book_appointment(calendar_id, start_time, end_time, summary="Rezerwacja wizy
     except HttpError as error:
         error_details = f"Kod: {error.resp.status}, Powód: {error.resp.reason}"
         try:
-            error_json = json.loads(error.content.decode('utf-8'))
-            msg = error_json.get('error', {}).get('message', '')
+            error_json = json.loads(error.content.decode('utf-8')); msg = error_json.get('error', {}).get('message', '')
             if msg: error_details += f" - {msg}"
         except: pass
         logging.error(f"Błąd API rezerwacji: {error}, Szczegóły: {error_details}", exc_info=True)
@@ -600,7 +572,6 @@ def book_appointment(calendar_id, start_time, end_time, summary="Rezerwacja wizy
         logging.error(f"Nieoczekiwany błąd Python rezerwacji: {e}", exc_info=True)
         return False, "Błąd systemu rezerwacji."
 
-
 # =====================================================================
 # === Inicjalizacja Vertex AI =========================================
 # =====================================================================
@@ -608,13 +579,9 @@ def book_appointment(calendar_id, start_time, end_time, summary="Rezerwacja wizy
 gemini_model = None
 try:
     logging.info(f"Inicjalizowanie Vertex AI: Projekt={PROJECT_ID}, Lokalizacja={LOCATION}")
-    vertexai.init(project=PROJECT_ID, location=LOCATION)
-    logging.info("Inicjalizacja Vertex AI OK.")
-    logging.info(f"Ładowanie modelu: {MODEL_ID}")
-    gemini_model = GenerativeModel(MODEL_ID)
-    logging.info(f"Model {MODEL_ID} OK.")
-except Exception as e:
-    logging.critical(f"KRYTYCZNY BŁĄD inicjalizacji Vertex AI: {e}", exc_info=True)
+    vertexai.init(project=PROJECT_ID, location=LOCATION); logging.info("Inicjalizacja Vertex AI OK.")
+    logging.info(f"Ładowanie modelu: {MODEL_ID}"); gemini_model = GenerativeModel(MODEL_ID); logging.info(f"Model {MODEL_ID} OK.")
+except Exception as e: logging.critical(f"KRYTYCZNY BŁĄD inicjalizacji Vertex AI: {e}", exc_info=True)
 
 GENERATION_CONFIG_DEFAULT = GenerationConfig(temperature=0.7, top_p=0.95, top_k=40, max_output_tokens=1024)
 GENERATION_CONFIG_PROPOSAL = GenerationConfig(temperature=0.5, top_p=0.95, top_k=40, max_output_tokens=1024)
@@ -626,6 +593,7 @@ SAFETY_SETTINGS = {HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLO
 # =====================================================================
 
 def _send_single_message(recipient_id, message_text):
+    """Wysyła pojedynczy fragment wiadomości przez Facebook Graph API."""
     logging.info(f"--- Wysyłanie fragm. do {recipient_id} (dł: {len(message_text)}) ---")
     params = {"access_token": PAGE_ACCESS_TOKEN}
     payload = {"recipient": {"id": recipient_id}, "message": {"text": message_text}, "messaging_type": "RESPONSE"}
@@ -642,6 +610,7 @@ def _send_single_message(recipient_id, message_text):
     except Exception as e: logging.error(f"!!! BŁĄD wysyłania: {e}", exc_info=True); return False
 
 def send_message(recipient_id, full_message_text):
+    """Wysyła wiadomość do użytkownika, dzieląc ją na fragmenty w razie potrzeby."""
     if not full_message_text or not isinstance(full_message_text, str) or not full_message_text.strip():
         logging.warning(f"[{recipient_id}] Pusta wiadomość."); return
     logging.info(f"[{recipient_id}] Przygotowanie wiad. (dł: {len(full_message_text)}).")
@@ -652,31 +621,40 @@ def send_message(recipient_id, full_message_text):
         remaining = full_message_text
         logging.info(f"[{recipient_id}] Dzielenie wiad...")
         while remaining:
-            if len(remaining) <= MESSAGE_CHAR_LIMIT: chunks.append(remaining.strip()); break
+            if len(remaining) <= MESSAGE_CHAR_LIMIT:
+                chunks.append(remaining.strip())
+                break
             idx = -1
             for d in ['\n\n', '\n', '. ', '! ', '? ', ' ']:
                 lim = MESSAGE_CHAR_LIMIT - (len(d)-1) if len(d)>1 else MESSAGE_CHAR_LIMIT
                 t_idx = remaining.rfind(d, 0, lim + len(d))
-                if t_idx != -1 and t_idx <= MESSAGE_CHAR_LIMIT : idx = t_idx + len(d); break
-            if idx == -1: idx = MESSAGE_CHAR_LIMIT; logging.warning(f"[{recipient_id}] Cięcie na limicie.")
+                if t_idx != -1 and t_idx <= MESSAGE_CHAR_LIMIT :
+                    idx = t_idx + len(d)
+                    break
+            if idx == -1:
+                idx = MESSAGE_CHAR_LIMIT
+                logging.warning(f"[{recipient_id}] Cięcie na limicie.")
             chunk = remaining[:idx].strip()
-            if chunk: chunks.append(chunk)
+            if chunk:
+                chunks.append(chunk)
             remaining = remaining[idx:].strip()
         logging.info(f"[{recipient_id}] Podzielono na {len(chunks)} fragm.")
         ok_count = 0
         for i, ch in enumerate(chunks):
             logging.info(f"[{recipient_id}] Wysyłanie {i+1}/{len(chunks)}...")
-            if not _send_single_message(recipient_id, ch): logging.error(f"!!! [{recipient_id}] Anulowano resztę."); break
+            if not _send_single_message(recipient_id, ch):
+                logging.error(f"!!! [{recipient_id}] Anulowano resztę.")
+                break
             ok_count += 1
-            if i < len(chunks) - 1: time.sleep(MESSAGE_DELAY_SECONDS)
+            if i < len(chunks) - 1:
+                time.sleep(MESSAGE_DELAY_SECONDS)
         logging.info(f"--- [{recipient_id}] Wysłano {ok_count}/{len(chunks)} fragm. ---")
 
 # =====================================================================
 # === INSTRUKCJE SYSTEMOWE DLA AI =====================================
 # =====================================================================
 
-# Instrukcje SYSTEM_INSTRUCTION_GENERAL, SYSTEM_INSTRUCTION_PROPOSE, SYSTEM_INSTRUCTION_FEEDBACK
-# pozostają takie same jak w poprzedniej wersji (zaktualizowana instrukcja PROPOSE dla zakresów)
+# Instrukcje SYSTEM_INSTRUCTION_GENERAL, SYSTEM_INSTRUCTION_PROPOSE (dla zakresów), SYSTEM_INSTRUCTION_FEEDBACK (z obsługą datetime)
 # ... (treść instrukcji jak w poprzedniej odpowiedzi) ...
 SYSTEM_INSTRUCTION_GENERAL = f"""Jesteś profesjonalnym i przyjaznym asystentem klienta 'Zakręcone Korepetycje'. Pomagasz w sprawach związanych z korepetycjami online.
 
@@ -740,30 +718,54 @@ SYSTEM_INSTRUCTION_FEEDBACK = f"""Jesteś asystentem AI analizującym odpowiedź
 # =====================================================================
 
 def _call_gemini(user_psid, prompt_content, generation_config, model_purpose="", max_retries=1):
-    if not gemini_model: logging.error(f"!!! [{user_psid}] Model {MODEL_ID} niezaładowany!"); return None
-    if not prompt_content: logging.warning(f"[{user_psid}] Pusty prompt dla {model_purpose}."); return None
+    """Wewnętrzna funkcja do wywoływania modelu Gemini z opcją ponowienia."""
+    if not gemini_model:
+        logging.error(f"!!! [{user_psid}] Model {MODEL_ID} niezaładowany! ({model_purpose}).")
+        return None
+    if not prompt_content:
+        logging.warning(f"[{user_psid}] Pusty prompt dla {model_purpose}.")
+        return None
+
     attempt = 0
     while attempt <= max_retries:
-        attempt += 1; logging.info(f"\n--- [{user_psid}] Wywołanie Gemini ({MODEL_ID}) - {model_purpose} (Próba: {attempt}/{max_retries + 1}) ---")
+        attempt += 1
+        logging.info(f"\n--- [{user_psid}] Wywołanie Gemini ({MODEL_ID}) - {model_purpose} (Próba: {attempt}/{max_retries + 1}) ---")
         if logging.getLogger().isEnabledFor(logging.DEBUG):
-            try:
+            try: # Logowanie JSON promptu
                 prompt_dict=[{'role':c.role,'parts':[{'text':p.text} for p in c.parts if hasattr(p,'text')]} if isinstance(c,Content) else repr(c) for c in prompt_content]
                 logging.debug(f"--- Prompt dla {user_psid} ---\n{json.dumps(prompt_dict, indent=2, ensure_ascii=False)}\n--- Koniec Promptu ---")
-            except Exception as log_err: logging.error(f"Błąd logowania promptu: {log_err}")
+            except Exception as log_err:
+                logging.error(f"Błąd logowania promptu: {log_err}")
         try:
             response = gemini_model.generate_content(prompt_content, generation_config=generation_config, safety_settings=SAFETY_SETTINGS, stream=False)
-            if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason: logging.warning(f"[{user_psid}] Prompt zablokowany (Próba {attempt}): {response.prompt_feedback.block_reason_message}"); return None
-            if not response.candidates: logging.warning(f"[{user_psid}] Brak kandydatów (Próba {attempt})."); return None
-            candidate = response.candidates[0]; finish_reason = candidate.finish_reason.name
-            if finish_reason != "STOP" and finish_reason != "MAX_TOKENS": logging.warning(f"[{user_psid}] Zakończono: {finish_reason} (Próba {attempt})"); return None
+            if hasattr(response, 'prompt_feedback') and response.prompt_feedback.block_reason:
+                 logging.warning(f"[{user_psid}] Prompt zablokowany (Próba {attempt}): {response.prompt_feedback.block_reason_message}")
+                 return None
+            if not response.candidates:
+                 logging.warning(f"[{user_psid}] Brak kandydatów (Próba {attempt}).")
+                 return None
+            candidate = response.candidates[0]
+            finish_reason = candidate.finish_reason.name
+            if finish_reason != "STOP" and finish_reason != "MAX_TOKENS":
+                 logging.warning(f"[{user_psid}] Zakończono: {finish_reason} (Próba {attempt})")
+                 return None # Nie ponawiaj jeśli zablokowane lub inny błąd
             if finish_reason == "STOP" and (not candidate.content or not candidate.content.parts):
                 logging.warning(f"[{user_psid}] Brak treści mimo STOP (Próba {attempt}).")
-                if attempt <= max_retries: logging.warning(f"    Ponawiam próbę {attempt + 1}..."); time.sleep(1); continue
-                else: logging.error(f"!!! [{user_psid}] Max prób ({max_retries + 1}) dla pustej odpowiedzi. Zwracam None."); return None
+                if attempt <= max_retries:
+                    logging.warning(f"    Ponawiam próbę {attempt + 1}...")
+                    time.sleep(1)
+                    continue
+                else:
+                    logging.error(f"!!! [{user_psid}] Max prób ({max_retries + 1}) dla pustej odpowiedzi. Zwracam None.")
+                    return None
             generated_text = candidate.content.parts[0].text.strip()
-            logging.info(f"[{user_psid}] Gemini ({model_purpose}) OK (Próba {attempt}): '{generated_text[:200]}...'"); return generated_text
-        except Exception as e: logging.error(f"!!! BŁĄD Gemini ({model_purpose}, Próba {attempt}): {e}", exc_info=True); return None
-    logging.error(f"!!! [{user_psid}] Pętla _call_gemini zakończona."); return None
+            logging.info(f"[{user_psid}] Gemini ({model_purpose}) OK (Próba {attempt}): '{generated_text[:200]}...'")
+            return generated_text
+        except Exception as e:
+            logging.error(f"!!! BŁĄD Gemini ({model_purpose}, Próba {attempt}): {e}", exc_info=True)
+            return None
+    logging.error(f"!!! [{user_psid}] Pętla _call_gemini zakończona.")
+    return None
 
 def get_gemini_general_response(user_psid, user_input, history):
     """Wywołuje AI do prowadzenia rozmowy i wykrywania intencji umówienia."""
@@ -784,35 +786,73 @@ def get_gemini_general_response(user_psid, user_input, history):
 
     response_text = _call_gemini(user_psid, prompt, GENERATION_CONFIG_DEFAULT, "General Conversation & Intent Detection", 1)
     return response_text
-# ZMIANA: Funkcja używa ZAKRESÓW
+
 def get_gemini_slot_proposal(user_psid, history, available_ranges):
-    if not available_ranges: logging.warning(f"[{user_psid}]: Brak zakresów dla AI."); return None, None
-    ranges_text = format_ranges_for_ai(available_ranges); logging.info(f"[{user_psid}] Przekazuję {len(available_ranges)} zakresów do AI.")
+    """Wywołuje AI, aby wygenerowało jeden slot z podanych zakresów."""
+    if not available_ranges:
+        logging.warning(f"[{user_psid}]: Brak zakresów dla AI ({MODEL_ID}).")
+        return None, None
+    ranges_text = format_ranges_for_ai(available_ranges)
+    logging.info(f"[{user_psid}] Przekazuję {len(available_ranges)} zakresów do AI ({MODEL_ID}).")
     history_for_ai = [m for m in history if m.role in ('user','model')]
     instr = SYSTEM_INSTRUCTION_PROPOSE.format(available_ranges_text=ranges_text)
-    prompt = [Content(role="user", parts=[Part.from_text(instr)]), Content(role="model", parts=[Part.from_text(f"OK. Wygeneruję termin ({APPOINTMENT_DURATION_MINUTES} min) w zakresie, preferując pełne godziny i dodam [{SLOT_ISO_MARKER_PREFIX}ISO].")])] + history_for_ai
-    while len(prompt)>(MAX_HISTORY_TURNS*2+2) and len(prompt)>2: logging.warning(f"[{user_psid}] Prompt Prop długi. Skracam."); prompt.pop(2); if len(prompt)>2: prompt.pop(2)
+    prompt = [
+        Content(role="user", parts=[Part.from_text(instr)]),
+        Content(role="model", parts=[Part.from_text(f"OK. Wygeneruję termin ({APPOINTMENT_DURATION_MINUTES} min) w zakresie, preferując pełne godziny i dodam [{SLOT_ISO_MARKER_PREFIX}ISO].")])
+    ] + history_for_ai
+
+    # Poprawione przycinanie promptu (bez średników)
+    while len(prompt) > (MAX_HISTORY_TURNS * 2 + 2) and len(prompt) > 2:
+         logging.warning(f"[{user_psid}] Prompt Proposal za długi ({len(prompt)}). Usuwam turę.")
+         prompt.pop(2) # Usuń najstarszą wiadomość użytkownika (po instrukcjach)
+         if len(prompt) > 2: # Upewnij się, że jest co usunąć (odpowiedź modelu)
+             prompt.pop(2) # Usuń odpowiadającą jej wiadomość modelu
+
     generated_text = _call_gemini(user_psid, prompt, GENERATION_CONFIG_PROPOSAL, "Slot Proposal from Ranges", 1)
     if not generated_text: return None, None
+
     iso_match = re.search(rf"\{SLOT_ISO_MARKER_PREFIX}(.*?)\{SLOT_ISO_MARKER_SUFFIX}", generated_text)
     if iso_match:
         extracted_iso = iso_match.group(1)
-        text_for_user = re.sub(rf"\{SLOT_ISO_MARKER_PREFIX}.*?\{SLOT_ISO_MARKER_SUFFIX}", "", generated_text).strip(); text_for_user = re.sub(r'\s+', ' ', text_for_user).strip()
+        text_for_user = re.sub(rf"\{SLOT_ISO_MARKER_PREFIX}.*?\{SLOT_ISO_MARKER_SUFFIX}", "", generated_text).strip()
+        text_for_user = re.sub(r'\s+', ' ', text_for_user).strip()
         logging.info(f"[{user_psid}] AI wygenerowało: {extracted_iso}. Text: '{text_for_user}'")
-        try: datetime.datetime.fromisoformat(extracted_iso); return text_for_user, extracted_iso
-        except ValueError: logging.error(f"!!! AI Error [{user_psid}]: Zły format ISO '{extracted_iso}'!"); return None, None
-    else: logging.error(f"!!! AI Error [{user_psid}]: Brak znacznika ISO w odpowiedzi! Odp: '{generated_text}'"); return None, None
+        try:
+            datetime.datetime.fromisoformat(extracted_iso) # Walidacja formatu
+            return text_for_user, extracted_iso
+        except ValueError:
+            logging.error(f"!!! AI Error [{user_psid}]: Zły format ISO '{extracted_iso}'!")
+            return None, None
+    else:
+        logging.error(f"!!! AI Error [{user_psid}]: Brak znacznika ISO w odpowiedzi! Odp: '{generated_text}'")
+        return None, None
 
 def get_gemini_feedback_decision(user_psid, user_feedback, history, last_proposal_text):
-     if not user_feedback: return "[CLARIFY]"
-     history_for_ai=[m for m in history if m.role in ('user','model')]; user_c=Content(role="user", parts=[Part.from_text(user_feedback)])
-     instr=SYSTEM_INSTRUCTION_FEEDBACK.format(last_proposal_text=last_proposal_text, user_feedback=user_feedback)
-     prompt = [Content(role="user", parts=[Part.from_text(instr)]), Content(role="model", parts=[Part.from_text("OK. Zwrócę jeden znacznik.")])] + history_for_ai + [user_c]
-     while len(prompt)>(MAX_HISTORY_TURNS*2+3) and len(prompt)>3: logging.warning(f"[{user_psid}] Prompt Feed długi. Skracam."); prompt.pop(2); if len(prompt)>3: prompt.pop(2)
-     decision = _call_gemini(user_psid, prompt, GENERATION_CONFIG_FEEDBACK, "Feedback Interpretation", 1)
-     if not decision: return "[CLARIFY]"
-     if decision.startswith("[") and decision.endswith("]"): logging.info(f"[{user_psid}] AI feedback: {decision}"); return decision
-     else: logging.warning(f"Ostrz. [{user_psid}]: AI nie zwróciło znacznika: '{decision}'. CLARIFY."); return "[CLARIFY]"
+    """Wywołuje AI do interpretacji odpowiedzi użytkownika na propozycję terminu."""
+    if not user_feedback: return "[CLARIFY]"
+    history_for_ai=[m for m in history if m.role in ('user','model')]
+    user_c=Content(role="user", parts=[Part.from_text(user_feedback)])
+    instr=SYSTEM_INSTRUCTION_FEEDBACK.format(last_proposal_text=last_proposal_text, user_feedback=user_feedback)
+    prompt = [
+        Content(role="user", parts=[Part.from_text(instr)]),
+        Content(role="model", parts=[Part.from_text("OK. Zwrócę jeden znacznik.")])
+    ] + history_for_ai + [user_c]
+
+    # Poprawione przycinanie promptu (bez średników)
+    while len(prompt) > (MAX_HISTORY_TURNS * 2 + 3) and len(prompt) > 3:
+        logging.warning(f"[{user_psid}] Prompt Feedback za długi ({len(prompt)}). Usuwam turę.")
+        prompt.pop(2) # Usuń najstarszą wiadomość użytkownika (po instrukcjach)
+        if len(prompt) > 3: # Upewnij się, że jest co usunąć (odpowiedź modelu)
+             prompt.pop(2) # Usuń odpowiadającą jej wiadomość modelu
+
+    decision = _call_gemini(user_psid, prompt, GENERATION_CONFIG_FEEDBACK, "Feedback Interpretation", 1)
+    if not decision: return "[CLARIFY]"
+    if decision.startswith("[") and decision.endswith("]"):
+        logging.info(f"[{user_psid}] AI feedback: {decision}")
+        return decision
+    else:
+        logging.warning(f"Ostrz. [{user_psid}]: AI nie zwróciło znacznika: '{decision}'. CLARIFY.")
+        return "[CLARIFY]"
 
 # =====================================================================
 # === OBSŁUGA WEBHOOKA FACEBOOKA =====================================
@@ -820,12 +860,12 @@ def get_gemini_feedback_decision(user_psid, user_feedback, history, last_proposa
 
 @app.route('/webhook', methods=['GET'])
 def webhook_verification():
+    """Obsługuje weryfikację webhooka przez Facebooka (GET request)."""
     logging.info("--- GET weryfikacja ---")
-    hub_mode = request.args.get('hub.mode')
-    hub_token = request.args.get('hub.verify_token')
-    hub_challenge = request.args.get('hub.challenge')
-    logging.info(f"Mode:{hub_mode}, Token OK:{hub_token == VERIFY_TOKEN}, Challenge: {bool(hub_challenge)}")
-    if hub_mode == 'subscribe' and hub_token == VERIFY_TOKEN:
+    hub_mode=request.args.get('hub.mode')
+    hub_token=request.args.get('hub.verify_token')
+    hub_challenge=request.args.get('hub.challenge')
+    if hub_mode=='subscribe' and hub_token==VERIFY_TOKEN:
         logging.info("Weryfikacja GET OK!")
         return Response(hub_challenge, status=200)
     else:
@@ -834,6 +874,7 @@ def webhook_verification():
 
 @app.route('/webhook', methods=['POST'])
 def webhook_handle():
+    """Obsługuje przychodzące zdarzenia z Facebooka (POST request)."""
     logging.info(f"\n{'='*30} {datetime.datetime.now():%Y-%m-%d %H:%M:%S} POST {'='*30}")
     raw_data = request.data.decode('utf-8')
     data = None
@@ -845,11 +886,8 @@ def webhook_handle():
                 for event in entry.get("messaging", []):
                     sender_id = event.get("sender", {}).get("id")
                     recipient_id = event.get("recipient", {}).get("id")
-                    if not sender_id or not recipient_id:
-                        logging.warning("Pominięto event bez sender/recipient.id")
-                        continue
-                    if sender_id == recipient_id:
-                        continue # Skip echo
+                    if not sender_id or not recipient_id or sender_id == recipient_id:
+                        continue # Skip invalid or echo events
 
                     logging.info(f"--- Zdarzenie dla PSID: {sender_id} ---")
                     history, context = load_history(sender_id)
@@ -863,7 +901,7 @@ def webhook_handle():
 
                         user_input = None
                         user_content = None
-                        history_saved = False
+                        history_saved = False # Flaga zapisu historii po intencji
 
                         if text := message_data.get("text"):
                             user_input = text.strip()
@@ -888,6 +926,7 @@ def webhook_handle():
                             save_history(sender_id, history + [user_content, model_resp])
                             continue
 
+                        # Inicjalizacja zmiennych dla cyklu request/response
                         action = None
                         msg_now = None
                         msg_result = None
@@ -902,7 +941,8 @@ def webhook_handle():
                             logging.info(f"      Typing... ({delay:.2f}s)")
                             time.sleep(delay)
 
-                        if is_context and last_iso:
+                        # Główna logika decyzyjna
+                        if is_context and last_iso: # SCENARIUSZ 1: Feedback
                             logging.info(f"      SCENARIUSZ: Feedback dla {last_iso}")
                             last_proposal = history[-1].parts[0].text if history and history[-1].role=='model' else "?"
                             decision = get_gemini_feedback_decision(sender_id, user_input, history, last_proposal)
@@ -910,15 +950,15 @@ def webhook_handle():
                             if decision == "[ACCEPT]": action = 'book'
                             elif decision and decision.startswith("[REJECT_FIND_NEXT"):
                                 action = 'find_and_propose'
-                                m = re.search(r"PREFERENCE='([^']*)'", decision)
-                                pref = m.group(1) if m else 'any'
-                                # ZMIANA: Parsowanie DAY i HOUR dla różnych preferencji
+                                m_pref = re.search(r"PREFERENCE='([^']*)'", decision)
+                                pref = m_pref.group(1) if m_pref else 'any'
+                                # Poprawione parsowanie dla DAY i HOUR
                                 if pref in ['specific_day', 'specific_datetime']:
                                     m_day=re.search(r"DAY='([^']*)'",decision)
                                     day=m_day.group(1) if m_day else None
                                 if pref in ['specific_hour', 'specific_datetime']:
                                     m_hour=re.search(r"HOUR='(\d+)'",decision)
-                                    hour=int(m_hour.group(1)) if m_hour else None
+                                    hour=int(m_hour.group(1)) if m_hour and m_hour.group(1).isdigit() else None
                                 logging.info(f"      Odrzucono. Pref: {pref}, Dzień: {day}, Godz: {hour}")
                                 msg_now = "Rozumiem. Poszukam innego terminu."
                             elif decision == "[CLARIFY]":
@@ -926,9 +966,8 @@ def webhook_handle():
                                 msg_result="Nie jestem pewien. Czy termin pasuje?"
                                 ctx_save={'role':'system','type':'last_proposal','slot_iso':last_iso}
                             else:
-                                action='send_error'
-                                msg_result="Problem z przetworzeniem."
-                            if action != 'send_clarification': ctx_save = None # Reset kontekstu
+                                action='send_error'; msg_result="Problem z przetworzeniem."
+                            if action != 'send_clarification': ctx_save = None
                         else: # SCENARIUSZ 2: Normalna rozmowa
                             logging.info(f"      SCENARIUSZ: Normalna rozmowa.")
                             response = get_gemini_general_response(sender_id, user_input, history)
@@ -952,30 +991,24 @@ def webhook_handle():
                             send_message(sender_id, msg_now)
                             if action == 'find_and_propose' and model_resp:
                                 save_history(sender_id, history + [user_content, model_resp])
-                                history+=[user_content, model_resp]
+                                history.extend([user_content, model_resp]) # Aktualizuj historię w pamięci
                                 history_saved = True
 
+                        # Wykonanie akcji
                         if action == 'book':
                             try:
                                 tz = _get_timezone()
                                 start = datetime.datetime.fromisoformat(last_iso).astimezone(tz)
-                                # Prosta weryfikacja: czy start jest wielokrotnością 10min i w godzinach pracy
-                                if start.minute % 10 == 0 and WORK_START_HOUR <= start.hour < WORK_END_HOUR:
-                                     # Weryfikacja w kalendarzu przed samą rezerwacją (mniejsze ryzyko race condition)
-                                     if is_slot_actually_free(start, TARGET_CALENDAR_ID):
-                                         end = start + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
-                                         profile = get_user_profile(sender_id)
-                                         name = profile.get('first_name', 'FB User') if profile else 'FB User'
-                                         success, msg = book_appointment(TARGET_CALENDAR_ID, start, end, "Korepetycje (FB)", f"PSID:{sender_id}\nImię:{name}", name)
-                                         msg_result = msg
-                                         if not success: logging.warning(f"Rezerwacja API nieudana: {msg}")
-                                     else:
-                                         logging.warning(f"[{sender_id}] Slot {last_iso} zajęty tuż przed rezerwacją!")
-                                         msg_result="Niestety, ten termin został właśnie zajęty. Szukamy innego?"
+                                if is_slot_actually_free(start, TARGET_CALENDAR_ID): # Weryfikacja przed rezerwacją
+                                    end = start + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+                                    profile = get_user_profile(sender_id); name = profile.get('first_name', 'FB User') if profile else 'FB User'
+                                    success, msg = book_appointment(TARGET_CALENDAR_ID, start, end, "Korepetycje (FB)", f"PSID:{sender_id}\nImię:{name}", name)
+                                    msg_result = msg
+                                    if not success: logging.warning(f"Rezerwacja API nieudana: {msg}")
                                 else:
-                                     logging.error(f"!!! BŁĄD [{sender_id}]: Próba rezerwacji nieprawidłowego ISO z kontekstu: {last_iso}")
-                                     msg_result = "Wystąpił błąd przy rezerwacji (nieprawidłowy termin)."
-                                ctx_save = None # Zawsze resetuj po próbie book
+                                    logging.warning(f"[{sender_id}] Slot {last_iso} zajęty!")
+                                    msg_result="Niestety, ten termin został właśnie zajęty. Szukamy innego?"
+                                ctx_save = None
                             except Exception as book_err:
                                 logging.error(f"!!! BŁĄD rezerwacji: {book_err}", exc_info=True)
                                 msg_result="Błąd systemu rezerwacji."; ctx_save = None
@@ -986,16 +1019,12 @@ def webhook_handle():
                                 if last_iso and pref != 'any':
                                     try: # Ustalanie search_start wg preferencji
                                         last_dt = datetime.datetime.fromisoformat(last_iso).astimezone(tz); base_start = last_dt + datetime.timedelta(minutes=10)
-                                        if pref == 'later':
-                                             search_start = base_start + datetime.timedelta(hours=1)
-                                             if last_dt.weekday()<5 and last_dt.hour<PREFERRED_WEEKDAY_START_HOUR: search_start = max(search_start, tz.localize(datetime.datetime.combine(last_dt.date(), datetime.time(PREFERRED_WEEKDAY_START_HOUR,0))))
+                                        if pref == 'later': search_start = base_start + datetime.timedelta(hours=1); if last_dt.weekday()<5 and last_dt.hour<PREFERRED_WEEKDAY_START_HOUR: search_start = max(search_start, tz.localize(datetime.datetime.combine(last_dt.date(), datetime.time(PREFERRED_WEEKDAY_START_HOUR,0))))
                                         elif pref == 'earlier': search_start = now
                                         elif pref == 'next_day': search_start = tz.localize(datetime.datetime.combine(last_dt.date()+datetime.timedelta(days=1), datetime.time(WORK_START_HOUR,0)))
                                         elif pref in ['specific_day','specific_datetime'] and day:
-                                            try:
-                                                wd=POLISH_WEEKDAYS.index(day); ahead=(wd-now.weekday()+7)%7;
-                                                if ahead==0 and now.time()>=datetime.time(WORK_END_HOUR,0): ahead=7
-                                                search_start = tz.localize(datetime.datetime.combine(now.date()+datetime.timedelta(days=ahead), datetime.time(WORK_START_HOUR,0)))
+                                            try: wd=POLISH_WEEKDAYS.index(day); ahead=(wd-now.weekday()+7)%7; if ahead==0 and now.time()>=datetime.time(WORK_END_HOUR,0): ahead=7
+                                            search_start = tz.localize(datetime.datetime.combine(now.date()+datetime.timedelta(days=ahead), datetime.time(WORK_START_HOUR,0)))
                                             except ValueError: logging.warning(f"Zły dzień: {day}."); search_start = now
                                         elif pref == 'specific_hour': search_start = now
                                         search_start = max(search_start, now)
@@ -1008,11 +1037,20 @@ def webhook_handle():
                                 free_ranges = get_free_time_ranges(TARGET_CALENDAR_ID, search_start, search_end)
                                 if free_ranges:
                                     relevant_ranges = free_ranges
-                                    # ZMIANA: Filtrowanie zakresów wg godziny, jeśli podana
                                     if pref in ['specific_hour','specific_datetime'] and hour is not None:
                                         potential_ranges = [r for r in free_ranges if r['start'].hour <= hour < r['end'].hour or (hour == r['start'].hour and r['start'].minute == 0 and hour < r['end'].hour)]
                                         if potential_ranges: relevant_ranges = potential_ranges; logging.info(f"Przefiltrowano zakresy do godz. {hour}. Liczba: {len(relevant_ranges)}")
-                                        else: logging.info(f"Brak zakresów o godz. {hour}. Używam wszystkich.")
+                                        else: logging.info(f"Brak zakresów o godz. {hour}.")
+                                    # Dodatkowe filtrowanie jeśli podano tylko dzień (w pref=specific_day lub specific_datetime)
+                                    elif pref in ['specific_day', 'specific_datetime'] and day:
+                                         # Już uwzględnione w search_start, ale można dodać warunek na weekday dla pewności
+                                         try:
+                                             target_wd_idx = POLISH_WEEKDAYS.index(day)
+                                             relevant_ranges = [r for r in relevant_ranges if r['start'].weekday() == target_wd_idx]
+                                             logging.info(f"Przefiltrowano zakresy do dnia: {day}. Liczba: {len(relevant_ranges)}")
+                                         except ValueError:
+                                             logging.warning(f"Ignoruję nieznany dzień '{day}' przy filtrowaniu zakresów.")
+
 
                                     if not relevant_ranges:
                                         logging.info("      Brak zakresów po filtrowaniu."); msg_result = "Niestety, brak terminów pasujących do preferencji."; ctx_save = None
@@ -1021,26 +1059,25 @@ def webhook_handle():
                                         proposal_text, proposed_iso = get_gemini_slot_proposal(sender_id, history, relevant_ranges)
                                         verified_iso = None
                                         if proposal_text and proposed_iso:
-                                            try: # Weryfikacja
+                                            try:
                                                 prop_start = datetime.datetime.fromisoformat(proposed_iso).astimezone(tz)
                                                 if is_slot_actually_free(prop_start, TARGET_CALENDAR_ID):
                                                     verified_iso = proposed_iso; msg_result = proposal_text; ctx_save = {'role':'system','type':'last_proposal','slot_iso':verified_iso}
                                                     logging.info(f"      AI wygenerowało poprawny slot: {verified_iso}")
-                                                else: logging.warning(f"[{sender_id}] AI wygenerowało zajęty termin ({proposed_iso})! Fallback.")
+                                                else: logging.warning(f"[{sender_id}] AI wygenerowało zajęty ({proposed_iso})! Fallback.")
                                             except ValueError: logging.error(f"!!! AI Error: Zły format ISO '{proposed_iso}'. Fallback.");
                                         else: logging.warning(f"[{sender_id}] AI nie zwróciło propozycji. Fallback.")
 
                                         if not verified_iso: # Fallback
-                                            logging.info(f"      Fallback: szukanie pierwszego slotu...")
+                                            logging.info(f"      Fallback: szukanie...")
                                             fallback_slot = None
-                                            # Przeszukaj *wszystkie* RELEVANT_RANGES (nie tylko pierwszy), aby znaleźć PIERWSZY możliwy slot pasujący do godziny (jeśli była podana)
-                                            for r in relevant_ranges:
+                                            for r in relevant_ranges: # Przeszukaj relevant_ranges
                                                  possible_slots = get_valid_start_times(TARGET_CALENDAR_ID, r['start'], r['end'])
+                                                 # Zastosuj filtr godziny również w fallbacku
                                                  if pref in ['specific_hour','specific_datetime'] and hour is not None:
                                                      possible_slots = [s for s in possible_slots if s.hour == hour]
                                                  if possible_slots:
-                                                     fallback_slot = possible_slots[0]
-                                                     break # Znaleziono pierwszy pasujący, przerwij pętlę
+                                                     fallback_slot = possible_slots[0]; break
                                             if fallback_slot:
                                                 fallback_iso = fallback_slot.isoformat()
                                                 msg_result = f"Proponuję najbliższy termin: {format_slot_for_user(fallback_slot)}. Pasuje?"
@@ -1073,9 +1110,15 @@ def webhook_handle():
                     elif event.get("delivery"): pass
                     else: logging.warning(f"    Nieobsługiwany event: {json.dumps(event)}")
             return Response("EVENT_RECEIVED", status=200)
-        else: logging.warning(f"Otrzymano POST nie 'page': {data.get('object') if data else 'Brak'}"); return Response("OK", status=200)
-    except json.JSONDecodeError as e: logging.error(f"!!! BŁĄD JSON: {e}\nDane: {raw_data[:500]}"); return Response("Invalid JSON", status=400)
-    except Exception as e: logging.error(f"!!! KRYTYCZNY BŁĄD POST: {e}", exc_info=True); return Response("ERROR", status=200)
+        else:
+            logging.warning(f"Otrzymano POST nie 'page': {data.get('object') if data else 'Brak'}")
+            return Response("OK", status=200)
+    except json.JSONDecodeError as e:
+        logging.error(f"!!! BŁĄD JSON: {e}\nDane: {raw_data[:500]}")
+        return Response("Invalid JSON", status=400)
+    except Exception as e:
+        logging.error(f"!!! KRYTYCZNY BŁĄD POST: {e}", exc_info=True)
+        return Response("ERROR", status=200)
 
 # =====================================================================
 # === URUCHOMIENIE SERWERA APLIKACJI ==================================
