@@ -803,60 +803,48 @@ def _call_gemini(user_psid, prompt_content, generation_config, model_purpose="",
                 stream=False
             )
 
-            # Sprawdzenie blokady promptu
             if hasattr(response, 'prompt_feedback') and response.prompt_feedback and response.prompt_feedback.block_reason:
                  logging.warning(f"[{user_psid}] Prompt zablokowany przez Gemini ({MODEL_ID}) (Próba {attempt}). Powód: {response.prompt_feedback.block_reason} ({response.prompt_feedback.block_reason_message})")
                  if response.prompt_feedback.safety_ratings:
                      logging.warning(f"    Oceny bezpieczeństwa promptu: {response.prompt_feedback.safety_ratings}")
-                 return None # Nie ponawiaj, jeśli prompt jest niebezpieczny
+                 return None
 
-            # Sprawdzenie braku kandydatów
             if not response.candidates:
                  logging.warning(f"[{user_psid}] Odpowiedź Gemini ({MODEL_ID}) nie zawiera kandydatów (Próba {attempt}).")
                  if hasattr(response, 'prompt_feedback') and response.prompt_feedback:
                       logging.warning(f"    Prompt Feedback (brak kandydatów): {response.prompt_feedback}")
-                 # Można by rozważyć ponowienie, ale na razie zwracamy None
                  return None
 
-            # Sprawdzenie kandydata
             candidate = response.candidates[0]
             finish_reason_name = candidate.finish_reason.name
 
-            # Sprawdzenie blokady odpowiedzi lub innego nieoczekiwanego zakończenia
             if finish_reason_name != "STOP" and finish_reason_name != "MAX_TOKENS":
                  logging.warning(f"[{user_psid}] Odpowiedź Gemini ({MODEL_ID}) zakończona z powodu innego niż STOP/MAX_TOKENS (Próba {attempt}). Powód: {finish_reason_name}")
                  if candidate.safety_ratings:
                      logging.warning(f"    Oceny bezpieczeństwa odpowiedzi: {candidate.safety_ratings}")
-                 # Nie ponawiaj, jeśli odpowiedź zablokowana (np. SAFETY)
                  if finish_reason_name == "SAFETY":
                      return None
-                 # Dla innych powodów (np. OTHER, UNKNOWN) można by rozważyć ponowienie, ale na razie zwracamy None
                  return None
 
-            # Sprawdzenie pustej zawartości przy poprawnym zakończeniu (STOP)
             if finish_reason_name == "STOP" and (not candidate.content or not candidate.content.parts):
                 logging.warning(f"[{user_psid}] Kandydat w odpowiedzi Gemini ({MODEL_ID}) nie ma zawartości (content/parts), mimo zakończenia STOP (Próba {attempt}).")
                 if candidate.safety_ratings: logging.warning(f"    Oceny bezpieczeństwa: {candidate.safety_ratings}")
-                # ----> Logika ponawiania próby <----
                 if attempt <= max_retries:
                     logging.warning(f"    Ponawianie próby ({attempt + 1}/{max_retries + 1})...")
-                    time.sleep(1) # Krótkie opóźnienie przed ponowieniem
-                    continue # Przejdź do następnej iteracji pętli while
+                    time.sleep(1)
+                    continue
                 else:
                     logging.error(f"!!! [{user_psid}] Osiągnięto maksymalną liczbę prób ({max_retries + 1}) dla pustej odpowiedzi przy STOP. Zwracam None.")
-                    return None # Zwróć None po nieudanych próbach
+                    return None
 
-            # Jeśli wszystko jest OK lub osiągnięto MAX_TOKENS (co jest akceptowalne)
             generated_text = candidate.content.parts[0].text.strip()
             logging.info(f"[{user_psid}] Gemini ({MODEL_ID}, {model_purpose}) odpowiedziało (raw, Próba {attempt}): '{generated_text[:200]}...'")
-            return generated_text # Zwróć poprawną odpowiedź
+            return generated_text
 
         except Exception as e:
             logging.error(f"!!! BŁĄD podczas wywołania Gemini ({MODEL_ID}) dla {user_psid} ({model_purpose}) (Próba {attempt}): {e}", exc_info=True)
-            # Nie ponawiaj próby przy ogólnym błędzie Exception
             return None
 
-    # Jeśli pętla zakończyła się bez zwrócenia wartości (co nie powinno się zdarzyć przy tej logice)
     logging.error(f"!!! [{user_psid}] Pętla _call_gemini zakończyła się nieoczekiwanie po {attempt} próbach.")
     return None
 
@@ -881,7 +869,6 @@ def get_gemini_general_response(user_psid, user_input, history):
         if len(prompt_content) > 3:
              prompt_content.pop(2)
 
-    # Używamy _call_gemini z domyślną 1 próbą ponowienia (max_retries=1)
     response_text = _call_gemini(user_psid, prompt_content, GENERATION_CONFIG_DEFAULT, model_purpose="General Conversation & Intent Detection", max_retries=1)
 
     return response_text
@@ -911,13 +898,9 @@ def get_gemini_slot_proposal(user_psid, history, available_slots):
          if len(prompt_content) > 2:
              prompt_content.pop(2)
 
-    # Używamy _call_gemini z domyślną 1 próbą ponowienia (max_retries=1)
     generated_text = _call_gemini(user_psid, prompt_content, GENERATION_CONFIG_PROPOSAL, model_purpose="Slot Proposal", max_retries=1)
 
     if not generated_text:
-        # Log błędu jest już w _call_gemini lub w tej funkcji poniżej
-        # logowanie błędu o braku odpowiedzi zostało przeniesione do _call_gemini
-        # logging.error(f"!!! BŁĄD [{user_psid}]: AI ({MODEL_ID}) nie zwróciło odpowiedzi przy propozycji slotu.")
         return None, None
 
     iso_match = re.search(rf"\{SLOT_ISO_MARKER_PREFIX}(.*?)\{SLOT_ISO_MARKER_SUFFIX}", generated_text)
@@ -961,13 +944,9 @@ def get_gemini_feedback_decision(user_psid, user_feedback, history, last_proposa
          if len(prompt_content) > 3:
              prompt_content.pop(2)
 
-     # Używamy _call_gemini z domyślną 1 próbą ponowienia (max_retries=1)
-     # Dla feedbacku, gdzie oczekujemy krótkiego znacznika, ryzyko pustej odpowiedzi jest mniejsze, ale retry nie zaszkodzi.
      decision = _call_gemini(user_psid, prompt_content, GENERATION_CONFIG_FEEDBACK, model_purpose="Feedback Interpretation", max_retries=1)
 
      if not decision:
-        # Log błędu jest już w _call_gemini
-        # logging.error(f"!!! BŁĄD [{user_psid}]: AI ({MODEL_ID}) nie zwróciło decyzji przy interpretacji feedbacku. Domyślnie CLARIFY.")
          return "[CLARIFY]"
 
      if decision.startswith("[") and decision.endswith("]"):
@@ -1047,6 +1026,8 @@ def webhook_handle():
 
                         user_input_text = None
                         user_content = None
+                        # **POPRAWKA: Zawsze inicjalizuj history_saved_after_intent**
+                        history_saved_after_intent = False
 
                         if "text" in message_data:
                             user_input_text = message_data["text"].strip()
@@ -1063,6 +1044,7 @@ def webhook_handle():
                             no_attachment_message = "Przepraszam, obecnie nie potrafię przetwarzać załączników."
                             send_message(sender_id, no_attachment_message)
                             model_content = Content(role="model", parts=[Part.from_text(no_attachment_message)])
+                            # Zapisz przed continue
                             save_history(sender_id, history + [user_content, model_content], context_to_save=None)
                             continue
                         else:
@@ -1072,6 +1054,7 @@ def webhook_handle():
                             unknown_message_reply = "Przepraszam, nie rozumiem tej wiadomości."
                             send_message(sender_id, unknown_message_reply)
                             model_content = Content(role="model", parts=[Part.from_text(unknown_message_reply)])
+                            # Zapisz przed continue
                             save_history(sender_id, history + [user_content, model_content], context_to_save=None)
                             continue
 
@@ -1084,6 +1067,7 @@ def webhook_handle():
                         preference = 'any'
                         requested_day_str = None
                         requested_hour_int = None
+                        # history_saved_after_intent jest już zainicjalizowane na False
 
                         if ENABLE_TYPING_DELAY and user_input_text:
                             delay = max(MIN_TYPING_DELAY_SECONDS, min(MAX_TYPING_DELAY_SECONDS, len(user_input_text) / TYPING_CHARS_PER_SECOND))
@@ -1161,19 +1145,20 @@ def webhook_handle():
 
                         logging.info(f"      Akcja do wykonania: {action_to_perform}")
 
+                        # **POPRAWKA: Inicjalizacja history_saved_after_intent PRZED blokiem if text_to_send_immediately**
+                        # Już zainicjalizowane na False wcześniej
+
                         if text_to_send_immediately:
                             send_message(sender_id, text_to_send_immediately)
                             if not model_response_content and action_to_perform == 'find_and_propose' and gemini_response and INTENT_SCHEDULE_MARKER in gemini_response:
                                 model_response_content = Content(role="model", parts=[Part.from_text(text_to_send_immediately)])
-                                # Zapisz historię od razu po wysłaniu wiadomości "sprawdzam terminy", przed długim szukaniem
                                 save_history(sender_id, history + [user_content, model_response_content], context_to_save=None)
-                                # Zaktualizuj bieżącą historię w pamięci, aby następne AI miało ten kontekst
                                 history.append(user_content)
                                 history.append(model_response_content)
-                                # Flaga, żeby nie zapisywać ponownie na końcu, jeśli ta część została wykonana
+                                # Ustaw flagę dopiero PO zapisie
                                 history_saved_after_intent = True
-                            else:
-                                history_saved_after_intent = False
+                            # else: # Nie potrzebujemy else do ustawiania na False, bo jest już domyślnie
+                            #    history_saved_after_intent = False
 
 
                         if action_to_perform == 'book':
@@ -1205,9 +1190,7 @@ def webhook_handle():
                                 now = datetime.datetime.now(tz)
                                 search_start = now
 
-                                # Sprawdź czy `last_proposed_slot_iso` istnieje i czy `preference` nie jest 'any'
-                                # (oznacza to odrzucenie z preferencjami)
-                                if last_proposed_slot_iso and preference != 'any': # Nie sprawdzamy już is_context_current, bo kontekst mógł być zresetowany
+                                if last_proposed_slot_iso and preference != 'any':
                                     try:
                                         last_proposed_dt = datetime.datetime.fromisoformat(last_proposed_slot_iso).astimezone(tz)
                                         base_start = last_proposed_dt + datetime.timedelta(minutes=10)
@@ -1275,7 +1258,6 @@ def webhook_handle():
                                              logging.info(f"Brak slotów przedpołudniowych. AI ({MODEL_ID}) wybierze z wszystkich {len(free_slots)}.")
 
                                     logging.info(f"      Przekazanie {len(filtered_slots)} slotów do AI ({MODEL_ID}) w celu wyboru propozycji...")
-                                    # Przekaż zaktualizowaną historię (może zawierać wiadomość "sprawdzam terminy")
                                     proposal_text, proposed_iso = get_gemini_slot_proposal(sender_id, history, filtered_slots)
 
                                     if proposal_text and proposed_iso:
@@ -1283,8 +1265,6 @@ def webhook_handle():
                                         context_to_save = {'role': 'system', 'type': 'last_proposal', 'slot_iso': proposed_iso}
                                         logging.info(f"      AI ({MODEL_ID}) zaproponowało: {proposal_text} (ISO: {proposed_iso})")
                                     else:
-                                        # Log błędu jest już w get_gemini_slot_proposal lub _call_gemini
-                                        # logging.error(f"!!! BŁĄD: AI ({MODEL_ID}) nie udało się wybrać i sformułować propozycji slotu.")
                                         text_to_send_as_result = "Przepraszam, mam problem z wybraniem konkretnego terminu w tej chwili. Spróbujmy ponownie za chwilę."
                                         error_occurred = True
                                         context_to_save = None
@@ -1314,7 +1294,7 @@ def webhook_handle():
                              if not model_response_content:
                                 model_response_content = Content(role="model", parts=[Part.from_text(text_to_send_as_result)])
 
-                        # Zapisz historię tylko jeśli nie została zapisana wcześniej (po wykryciu intencji)
+                        # **POPRAWKA: Użycie zainicjalizowanej zmiennej**
                         if user_content and not history_saved_after_intent:
                              history_to_save = history + [user_content]
                              if model_response_content:
@@ -1325,11 +1305,8 @@ def webhook_handle():
                              logging.warning(f"[{sender_id}] Brak user_content do zapisania w historii (prawdopodobnie błąd przetwarzania).")
                         elif history_saved_after_intent:
                              logging.info(f"      Historia została już zapisana po wykryciu intencji. Nowy kontekst dla następnego kroku: {context_to_save}")
-                             # Jeśli kontekst się zmienił (np. z None na propozycję), zapisz tylko kontekst
                              if context_to_save:
-                                  # Wczytaj najnowszą historię, dodaj kontekst i zapisz
-                                  # To trochę nieefektywne, ale zapewnia spójność
-                                  latest_history, _ = load_history(sender_id) # Ignoruj wczytany kontekst
+                                  latest_history, _ = load_history(sender_id)
                                   save_history(sender_id, latest_history, context_to_save=context_to_save)
 
 
@@ -1381,6 +1358,7 @@ def webhook_handle():
         return Response("Invalid JSON format", status=400)
     except Exception as e:
         logging.error(f"!!! KRYTYCZNY BŁĄD podczas przetwarzania POST webhooka: {e}", exc_info=True)
+        # Zwróć 200 OK, aby Facebook nie próbował ponownie wysyłać tego samego zdarzenia
         return Response("Internal server error processing event", status=200)
 
 
