@@ -528,7 +528,9 @@ SYSTEM_INSTRUCTION_FEEDBACK = f"""Jesteś asystentem AI analizującym odpowiedź
 *   **`[REJECT_FIND_NEXT PREFERENCE='specific_day_earlier' DAY='NAZWA_DNIA']`**: Odrzucenie, podany **dzień i ogólna preferencja wcześniejszej pory** (np. środa rano, czwartek przed 12).
 *   `[CLARIFY]`: Niejasna odpowiedź, pytanie niezwiązane.
 
-**Ważne:** Dokładnie jeden znacznik. Znaczniki z dniem i godziną/porą (`specific_datetime`, `specific_day_later`, `specific_day_earlier`) mają pierwszeństwo przed znacznikami tylko z dniem (`specific_day`) lub tylko z godziną/porą (`specific_hour`, `later`, `earlier`).
+**Ważne:
+** Dokładnie jeden znacznik. Znaczniki z dniem i godziną/porą (`specific_datetime`, `specific_day_later`, `specific_day_earlier`) mają pierwszeństwo przed znacznikami tylko z dniem (`specific_day`) lub tylko z godziną/porą (`specific_hour`, `later`, `earlier`).
+** Nie zmieniaj dnia jeśli nie zostało o tym wspomniane w preferencjach, np. na preferencję "wcześniej" gdzie nie ma wspomnianego dnia tygodnia, nie zmieniaj go
 """
 
 # =====================================================================
