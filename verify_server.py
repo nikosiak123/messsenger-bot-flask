@@ -57,7 +57,8 @@ TARGET_CALENDAR_ID = 'f19e189826b9d6e36950da347ac84d5501ecbd6bed0d76c8641be61a67
 PREFERRED_WEEKDAY_START_HOUR = 16
 PREFERRED_WEEKEND_START_HOUR = 10
 MAX_SEARCH_DAYS = 14
-MAX_SLOTS_FOR_AI = 7 # Utrzymujemy 7 dla stabilności
+# ZMIANA: Zwiększenie liczby slotów przekazywanych do AI
+MAX_SLOTS_FOR_AI = 50
 
 # --- Inicjalizacja Zmiennych Globalnych dla Kalendarza ---
 _calendar_service = None
@@ -495,7 +496,8 @@ def format_slots_for_ai(slots):
         return "Brak dostępnych terminów w najbliższym czasie."
 
     formatted_list = ["Oto kilka dostępnych terminów (każdy w formacie [SLOT_ISO:ISODATA] Dzień, DD.MM.RRRR o GG:MM):"]
-    for slot in slots:
+    # ZMIANA: Użyj MAX_SLOTS_FOR_AI do ograniczenia liczby slotów w pętli
+    for slot in slots[:MAX_SLOTS_FOR_AI]:
         iso_str = slot.isoformat()
         day_name = POLISH_WEEKDAYS[slot.weekday()]
         hour_str = str(slot.hour)
@@ -547,7 +549,7 @@ GENERATION_CONFIG_PROPOSAL = GenerationConfig(
     temperature=0.4,
     top_p=0.95,
     top_k=40,
-    max_output_tokens=1024 # Zwiększono
+    max_output_tokens=1024
 )
 GENERATION_CONFIG_FEEDBACK = GenerationConfig(
     temperature=0.1,
@@ -766,7 +768,6 @@ Przeanalizuj odpowiedź użytkownika i zdecyduj, jaka jest jego intencja. **Odpo
 # =====================================================================
 
 def _call_gemini(user_psid, prompt_content, generation_config, model_purpose="", max_retries=1):
-    """Wewnętrzna funkcja do wywoływania modelu Gemini z opcją ponowienia."""
     if not gemini_model:
         logging.error(f"!!! [{user_psid}] Model Gemini ({MODEL_ID}) nie jest załadowany! Nie można wykonać wywołania ({model_purpose}).")
         return None
@@ -778,9 +779,7 @@ def _call_gemini(user_psid, prompt_content, generation_config, model_purpose="",
     while attempt <= max_retries:
         attempt += 1
         logging.info(f"\n--- [{user_psid}] Wywołanie Gemini ({MODEL_ID}) - Cel: {model_purpose} (Próba: {attempt}/{max_retries + 1}) ---")
-
-        # ZMIANA: Logowanie promptu (jako JSON dla czytelności, używając logging.debug)
-        if logging.getLogger().isEnabledFor(logging.DEBUG): # Loguj tylko jeśli poziom logowania to DEBUG
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
             try:
                 prompt_dict = []
                 for content_obj in prompt_content:
@@ -792,13 +791,11 @@ def _call_gemini(user_psid, prompt_content, generation_config, model_purpose="",
                              else: parts_list.append(repr(part_obj))
                          prompt_dict.append({'role': content_obj.role, 'parts': parts_list})
                     else: prompt_dict.append(repr(content_obj))
-
                 logging.debug(f"--- [{user_psid}] Treść promptu dla Gemini ({MODEL_ID}, {model_purpose}, Próba {attempt}): ---")
                 logging.debug(json.dumps(prompt_dict, indent=2, ensure_ascii=False))
                 logging.debug(f"--- Koniec treści promptu {user_psid} ---")
             except Exception as log_err:
                 logging.error(f"Błąd podczas logowania promptu dla {user_psid}: {log_err}")
-        # Usunięto mniej istotny log "Koniec zawartości"
 
         try:
             response = gemini_model.generate_content(
@@ -876,6 +873,7 @@ def get_gemini_slot_proposal(user_psid, history, available_slots):
     if not available_slots:
         logging.warning(f"[{user_psid}]: Brak slotów do przekazania AI ({MODEL_ID}) do propozycji.")
         return None, None
+    # Używamy MAX_SLOTS_FOR_AI (teraz 50) do formatowania listy
     slots_text_for_ai = format_slots_for_ai(available_slots[:MAX_SLOTS_FOR_AI])
     logging.info(f"[{user_psid}] Przekazuję {min(len(available_slots), MAX_SLOTS_FOR_AI)} slotów do AI ({MODEL_ID}) w celu wyboru.")
     history_for_ai = [msg for msg in history if msg.role in ('user', 'model')]
@@ -894,6 +892,7 @@ def get_gemini_slot_proposal(user_psid, history, available_slots):
     iso_match = re.search(rf"\{SLOT_ISO_MARKER_PREFIX}(.*?)\{SLOT_ISO_MARKER_SUFFIX}", generated_text)
     if iso_match:
         extracted_iso = iso_match.group(1)
+        # Sprawdzamy w oparciu o MAX_SLOTS_FOR_AI
         slot_exists = any(slot.isoformat() == extracted_iso for slot in available_slots[:MAX_SLOTS_FOR_AI])
         if slot_exists:
             text_for_user = re.sub(rf"\{SLOT_ISO_MARKER_PREFIX}.*?\{SLOT_ISO_MARKER_SUFFIX}", "", generated_text).strip()
@@ -1094,19 +1093,13 @@ def webhook_handle():
                                 text_to_send_as_result = "Nie mogę wygenerować odpowiedzi na tę wiadomość. Spróbuj sformułować ją inaczej."
                                 error_occurred = True
                         logging.info(f"      Akcja do wykonania: {action_to_perform}")
-
-                        # **POPRAWKA: Usunięto wewnętrzny 'if' sprawdzający gemini_response**
                         if text_to_send_immediately:
                             send_message(sender_id, text_to_send_immediately)
-                            # Sprawdź, czy wiadomość pochodziła z wykrycia intencji, aby zapisać ją od razu
-                            # Użyj `action_to_perform` i `model_response_content` które zostały ustawione wyżej
                             if action_to_perform == 'find_and_propose' and model_response_content:
                                 save_history(sender_id, history + [user_content, model_response_content], context_to_save=None)
                                 history.append(user_content)
                                 history.append(model_response_content)
                                 history_saved_after_intent = True
-
-
                         if action_to_perform == 'book':
                             try:
                                 tz = _get_timezone()
@@ -1327,6 +1320,8 @@ if __name__ == '__main__':
     print(f"  Docelowy Kalendarz Google ID: {TARGET_CALENDAR_ID}")
     print(f"  Strefa czasowa kalendarza: {CALENDAR_TIMEZONE}")
     print(f"  Symulacja pisania: {'Włączona' if ENABLE_TYPING_DELAY else 'Wyłączona'}")
+    # Dodano logowanie MAX_SLOTS_FOR_AI
+    print(f"  Maks. slotów przekazywanych do AI: {MAX_SLOTS_FOR_AI}")
 
     if gemini_model is None:
         print(f"\n!!! OSTRZEŻENIE: Model Gemini AI ({MODEL_ID}) NIE został załadowany poprawnie!")
