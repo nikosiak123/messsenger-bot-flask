@@ -57,7 +57,7 @@ TARGET_CALENDAR_ID = 'f19e189826b9d6e36950da347ac84d5501ecbd6bed0d76c8641be61a67
 PREFERRED_WEEKDAY_START_HOUR = 16
 PREFERRED_WEEKEND_START_HOUR = 10
 MAX_SEARCH_DAYS = 14
-MAX_SLOTS_FOR_AI = 7 # Zostawiamy 7 na razie
+MAX_SLOTS_FOR_AI = 7 # Utrzymujemy 7 dla stabilności
 
 # --- Inicjalizacja Zmiennych Globalnych dla Kalendarza ---
 _calendar_service = None
@@ -543,12 +543,11 @@ GENERATION_CONFIG_DEFAULT = GenerationConfig(
     top_k=40,
     max_output_tokens=1024
 )
-# ZMIANA: Zwiększenie max_output_tokens dla propozycji slotu
 GENERATION_CONFIG_PROPOSAL = GenerationConfig(
     temperature=0.4,
     top_p=0.95,
     top_k=40,
-    max_output_tokens=1024 # Zwiększono z 512
+    max_output_tokens=1024 # Zwiększono
 )
 GENERATION_CONFIG_FEEDBACK = GenerationConfig(
     temperature=0.1,
@@ -779,27 +778,27 @@ def _call_gemini(user_psid, prompt_content, generation_config, model_purpose="",
     while attempt <= max_retries:
         attempt += 1
         logging.info(f"\n--- [{user_psid}] Wywołanie Gemini ({MODEL_ID}) - Cel: {model_purpose} (Próba: {attempt}/{max_retries + 1}) ---")
-        # ZMIANA: Logowanie promptu (jako JSON dla czytelności)
-        try:
-            # Konwersja obiektów Content/Part na słowniki dla JSON
-            prompt_dict = []
-            for content_obj in prompt_content:
-                if isinstance(content_obj, Content):
-                     parts_list = []
-                     for part_obj in content_obj.parts:
-                         if isinstance(part_obj, Part) and hasattr(part_obj, 'text'):
-                              parts_list.append({'text': part_obj.text})
-                         else: parts_list.append(repr(part_obj)) # Reprezentacja dla nieznanych części
-                     prompt_dict.append({'role': content_obj.role, 'parts': parts_list})
-                else: prompt_dict.append(repr(content_obj)) # Reprezentacja dla nieznanych obiektów
 
-            logging.debug(f"--- [{user_psid}] Treść promptu dla Gemini ({MODEL_ID}, {model_purpose}, Próba {attempt}): ---")
-            logging.debug(json.dumps(prompt_dict, indent=2, ensure_ascii=False))
-            logging.debug(f"--- Koniec treści promptu {user_psid} ---")
-        except Exception as log_err:
-            logging.error(f"Błąd podczas logowania promptu dla {user_psid}: {log_err}")
+        # ZMIANA: Logowanie promptu (jako JSON dla czytelności, używając logging.debug)
+        if logging.getLogger().isEnabledFor(logging.DEBUG): # Loguj tylko jeśli poziom logowania to DEBUG
+            try:
+                prompt_dict = []
+                for content_obj in prompt_content:
+                    if isinstance(content_obj, Content):
+                         parts_list = []
+                         for part_obj in content_obj.parts:
+                             if isinstance(part_obj, Part) and hasattr(part_obj, 'text'):
+                                  parts_list.append({'text': part_obj.text})
+                             else: parts_list.append(repr(part_obj))
+                         prompt_dict.append({'role': content_obj.role, 'parts': parts_list})
+                    else: prompt_dict.append(repr(content_obj))
 
-        logging.info(f"--- Koniec zawartości dla Gemini ({MODEL_ID}) {user_psid} ---\n") # Ten log jest mniej istotny teraz
+                logging.debug(f"--- [{user_psid}] Treść promptu dla Gemini ({MODEL_ID}, {model_purpose}, Próba {attempt}): ---")
+                logging.debug(json.dumps(prompt_dict, indent=2, ensure_ascii=False))
+                logging.debug(f"--- Koniec treści promptu {user_psid} ---")
+            except Exception as log_err:
+                logging.error(f"Błąd podczas logowania promptu dla {user_psid}: {log_err}")
+        # Usunięto mniej istotny log "Koniec zawartości"
 
         try:
             response = gemini_model.generate_content(
@@ -890,7 +889,6 @@ def get_gemini_slot_proposal(user_psid, history, available_slots):
          logging.warning(f"[{user_psid}] Prompt dla Slot Proposal AI ({MODEL_ID}) za długi ({len(prompt_content)} wiad.). Usuwam najstarszą turę.")
          prompt_content.pop(2)
          if len(prompt_content) > 2: prompt_content.pop(2)
-    # Używamy zwiększonego max_output_tokens
     generated_text = _call_gemini(user_psid, prompt_content, GENERATION_CONFIG_PROPOSAL, model_purpose="Slot Proposal", max_retries=1)
     if not generated_text: return None, None
     iso_match = re.search(rf"\{SLOT_ISO_MARKER_PREFIX}(.*?)\{SLOT_ISO_MARKER_SUFFIX}", generated_text)
@@ -1096,14 +1094,19 @@ def webhook_handle():
                                 text_to_send_as_result = "Nie mogę wygenerować odpowiedzi na tę wiadomość. Spróbuj sformułować ją inaczej."
                                 error_occurred = True
                         logging.info(f"      Akcja do wykonania: {action_to_perform}")
+
+                        # **POPRAWKA: Usunięto wewnętrzny 'if' sprawdzający gemini_response**
                         if text_to_send_immediately:
                             send_message(sender_id, text_to_send_immediately)
-                            if not model_response_content and action_to_perform == 'find_and_propose' and gemini_response and INTENT_SCHEDULE_MARKER in gemini_response:
-                                model_response_content = Content(role="model", parts=[Part.from_text(text_to_send_immediately)])
+                            # Sprawdź, czy wiadomość pochodziła z wykrycia intencji, aby zapisać ją od razu
+                            # Użyj `action_to_perform` i `model_response_content` które zostały ustawione wyżej
+                            if action_to_perform == 'find_and_propose' and model_response_content:
                                 save_history(sender_id, history + [user_content, model_response_content], context_to_save=None)
                                 history.append(user_content)
                                 history.append(model_response_content)
                                 history_saved_after_intent = True
+
+
                         if action_to_perform == 'book':
                             try:
                                 tz = _get_timezone()
@@ -1182,26 +1185,22 @@ def webhook_handle():
                                               filtered_slots = potential_matches
                                               logging.info(f"Wstępnie przefiltrowano sloty do przedpołudniowych. Liczba: {len(filtered_slots)}")
                                          else: logging.info(f"Brak slotów przedpołudniowych. AI ({MODEL_ID}) wybierze z wszystkich {len(free_slots)}.")
-
                                     logging.info(f"      Przekazanie {len(filtered_slots)} slotów do AI ({MODEL_ID}) w celu wyboru propozycji...")
                                     proposal_text, proposed_iso = get_gemini_slot_proposal(sender_id, history, filtered_slots)
-
-                                    # ZMIANA: Logika awaryjna (Fallback)
                                     if proposal_text and proposed_iso:
                                         text_to_send_as_result = proposal_text
                                         context_to_save = {'role': 'system', 'type': 'last_proposal', 'slot_iso': proposed_iso}
                                         logging.info(f"      AI ({MODEL_ID}) zaproponowało: {proposal_text} (ISO: {proposed_iso})")
                                     else:
                                         logging.warning(f"[{sender_id}] AI ({MODEL_ID}) nie zwróciło propozycji. Używam logiki awaryjnej.")
-                                        if filtered_slots: # Upewnij się, że mamy jakiekolwiek sloty do zaproponowania
-                                            # Wybierz pierwszy dostępny slot z (potencjalnie filtrowanej) listy
+                                        if filtered_slots:
                                             fallback_slot = filtered_slots[0]
                                             fallback_iso = fallback_slot.isoformat()
                                             fallback_text = f"Proponuję najbliższy dostępny termin: {format_slot_for_user(fallback_slot)}. Pasuje?"
                                             text_to_send_as_result = fallback_text
                                             context_to_save = {'role': 'system', 'type': 'last_proposal', 'slot_iso': fallback_iso}
                                             logging.info(f"      Logika awaryjna wybrała: {fallback_text} (ISO: {fallback_iso})")
-                                        else: # Ten case nie powinien się zdarzyć, jeśli free_slots nie było puste, ale dla bezpieczeństwa
+                                        else:
                                              logging.error(f"[{sender_id}] Brak slotów w filtered_slots dla logiki awaryjnej!")
                                              text_to_send_as_result = "Niestety, mam problem ze znalezieniem pasującego terminu. Spróbuj ponownie później."
                                              error_occurred = True
@@ -1349,7 +1348,6 @@ if __name__ == '__main__':
     print(f"Uruchamianie serwera Flask na porcie {port}")
     print(f"Tryb debug: {debug_mode}")
 
-    # Zmień poziom logowania dla biblioteki googleapiclient, aby uniknąć nadmiernych logów DEBUG
     logging.getLogger('googleapiclient.discovery_cache').setLevel(logging.ERROR)
 
     if not debug_mode:
@@ -1363,7 +1361,6 @@ if __name__ == '__main__':
             app.run(host='0.0.0.0', port=port, debug=False)
     else:
         print("Uruchamianie wbudowanego serwera Flask w trybie DEBUG...")
-        # Dodaj poziom DEBUG dla własnych logów w trybie debug
         logging.getLogger().setLevel(logging.DEBUG)
         print("Ustawiono poziom logowania na DEBUG.")
         app.run(host='0.0.0.0', port=port, debug=True)
