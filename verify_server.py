@@ -388,25 +388,36 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
         if 'errors' in calendar_data:
              for error in calendar_data['errors']:
                  logging.error(f"Błąd API Freebusy dla kalendarza {calendar_id}: {error.get('reason')} - {error.get('message')}")
-             # Jeśli błąd dotyczy braku dostępu, nie ma sensu kontynuować
              if any(e.get('reason') == 'notFound' or e.get('reason') == 'forbidden' for e in calendar_data['errors']):
                  return []
         busy_times_raw = calendar_data.get('busy', [])
 
         busy_times = []
         for busy_slot in busy_times_raw:
-            busy_start = parse_event_time(busy_slot, tz) # Przekazujemy cały slot, funkcja weźmie 'start' lub 'end'
-            busy_end = parse_event_time(busy_slot, tz)   # Przekazujemy cały slot, funkcja weźmie 'start' lub 'end'
+            # --- POPRAWKA TUTAJ ---
+            start_data = busy_slot.get('start')
+            end_data = busy_slot.get('end')
 
-            if busy_start and busy_end and busy_start < busy_end: # Upewnij się, że przedział jest prawidłowy
-                # Przycinamy zajęty czas do naszego okna wyszukiwania
-                busy_start_clipped = max(busy_start, start_datetime)
-                busy_end_clipped = min(busy_end, end_datetime)
-                # Dodajemy tylko jeśli jest jakaś część wspólna w naszym oknie
-                if busy_start_clipped < busy_end_clipped:
-                    busy_times.append({'start': busy_start_clipped, 'end': busy_end_clipped})
+            # Sprawdź, czy dane start i end istnieją i są słownikami
+            if isinstance(start_data, dict) and isinstance(end_data, dict):
+                # Przekaż odpowiednie słowniki do parse_event_time
+                busy_start = parse_event_time(start_data, tz)
+                busy_end = parse_event_time(end_data, tz)
+
+                if busy_start and busy_end and busy_start < busy_end: # Upewnij się, że parsowanie się udało i przedział jest prawidłowy
+                    # Przycinamy zajęty czas do naszego okna wyszukiwania
+                    busy_start_clipped = max(busy_start, start_datetime)
+                    busy_end_clipped = min(busy_end, end_datetime)
+                    # Dodajemy tylko jeśli jest jakaś część wspólna w naszym oknie
+                    if busy_start_clipped < busy_end_clipped:
+                        busy_times.append({'start': busy_start_clipped, 'end': busy_end_clipped})
+                else:
+                    # Ten warning powinien teraz pojawiać się tylko, jeśli samo parse_event_time zwróci None
+                    logging.warning(f"Ostrz.: Pominięto nieprawidłowy lub niesparsowany zajęty czas (po próbie parsowania): start={start_data}, end={end_data}")
             else:
-                logging.warning(f"Ostrz.: Pominięto nieprawidłowy lub niesparsowany zajęty czas: start={busy_slot.get('start')}, end={busy_slot.get('end')}")
+                 # Logujemy, jeśli struktura odpowiedzi z API jest inna niż oczekiwana
+                 logging.warning(f"Ostrz.: Pominięto zajęty slot o nieoczekiwanej strukturze danych start/end: {busy_slot}")
+            # --- KONIEC POPRAWKI ---
 
     except HttpError as error:
         logging.error(f'Błąd HTTP API Freebusy: {error.resp.status} {error.resp.reason}', exc_info=True)
@@ -415,7 +426,7 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
         logging.error(f"Nieoczekiwany błąd podczas zapytania Freebusy: {e}", exc_info=True)
         return []
 
-    # Sortowanie i scalanie nakładających się zajętych przedziałów
+    # Sortowanie i scalanie nakładających się zajętych przedziałów (bez zmian)
     busy_times.sort(key=lambda x: x['start'])
     merged_busy_times = []
     for busy in busy_times:
@@ -424,7 +435,7 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
         else:
             merged_busy_times[-1]['end'] = max(merged_busy_times[-1]['end'], busy['end'])
 
-    # Generowanie wolnych zakresów
+    # Generowanie wolnych zakresów (bez zmian)
     free_ranges = []
     current_time = start_datetime
     for busy_slot in merged_busy_times:
@@ -434,7 +445,7 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
     if current_time < end_datetime:
         free_ranges.append({'start': current_time, 'end': end_datetime})
 
-    # Filtrowanie wolnych zakresów: godziny pracy i minimalny czas trwania
+    # Filtrowanie wolnych zakresów: godziny pracy i minimalny czas trwania (bez zmian)
     final_free_slots = []
     min_duration_delta = datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
 
@@ -448,12 +459,10 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
             work_day_start = tz.localize(datetime.datetime.combine(day_date, datetime.time(WORK_START_HOUR, 0)))
             work_day_end = tz.localize(datetime.datetime.combine(day_date, datetime.time(WORK_END_HOUR, 0)))
 
-            # Znajdź część wspólną [current_segment_start, range_end) oraz [work_day_start, work_day_end)
             effective_start = max(current_segment_start, work_day_start)
             effective_end = min(range_end, work_day_end)
 
             if effective_start < effective_end and (effective_end - effective_start) >= min_duration_delta:
-                # Zaokrąglenie początku do pełnych 10 minut w górę (opcjonalne)
                 if effective_start.minute % 10 != 0 or effective_start.second > 0 or effective_start.microsecond > 0:
                     minutes_to_add = 10 - (effective_start.minute % 10)
                     rounded_start = effective_start + datetime.timedelta(minutes=minutes_to_add)
@@ -461,18 +470,12 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
                 else:
                     rounded_start = effective_start
 
-                # Sprawdź, czy po zaokrągleniu nadal jest wystarczająco dużo czasu
                 if rounded_start < effective_end and (effective_end - rounded_start) >= min_duration_delta:
                     final_free_slots.append({'start': rounded_start, 'end': effective_end})
 
-            # Przesuń początek następnego segmentu do końca dnia pracy lub końca zakresu
-            current_segment_start = max(range_start, work_day_end) # Zacznij od końca dnia pracy
-            # Jeśli koniec dnia pracy jest przed początkiem następnego dnia, przesuń na początek następnego dnia
             next_day_start = tz.localize(datetime.datetime.combine(day_date + datetime.timedelta(days=1), datetime.time(0,0)))
-            current_segment_start = max(current_segment_start, next_day_start)
-            # Upewnij się, że nie cofamy się przed range_start
-            current_segment_start = max(current_segment_start, range_start)
-
+            current_segment_start = max(work_day_end, next_day_start) # Przesuń na początek następnego dnia lub koniec dnia pracy
+            current_segment_start = max(current_segment_start, range_start) # Upewnij się, że nie cofamy się
 
     logging.info(f"Znaleziono {len(final_free_slots)} przefiltrowanych wolnych zakresów czasowych.")
     for i, slot in enumerate(final_free_slots[:5]):
