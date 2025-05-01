@@ -396,22 +396,31 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
                  return []
         busy_times_raw = calendar_data.get('busy', [])
 
-        busy_times = []
+                busy_times = []
         for busy_slot in busy_times_raw:
-            start_data = busy_slot.get('start')
-            end_data = busy_slot.get('end')
-            if isinstance(start_data, dict) and isinstance(end_data, dict):
-                busy_start = parse_event_time(start_data, tz)
-                busy_end = parse_event_time(end_data, tz)
+            start_str = busy_slot.get('start') # Pobierz string startu
+            end_str = busy_slot.get('end')     # Pobierz string końca
+
+            # Sprawdź, czy pobrano stringi
+            if isinstance(start_str, str) and isinstance(end_str, str):
+                # Utwórz słowniki oczekiwane przez parse_event_time
+                start_data_dict = {'dateTime': start_str}
+                end_data_dict = {'dateTime': end_str}
+
+                # Przekaż utworzone słowniki do parsowania
+                busy_start = parse_event_time(start_data_dict, tz)
+                busy_end = parse_event_time(end_data_dict, tz)
+
                 if busy_start and busy_end and busy_start < busy_end:
                     busy_start_clipped = max(busy_start, start_datetime)
                     busy_end_clipped = min(busy_end, end_datetime)
                     if busy_start_clipped < busy_end_clipped:
                         busy_times.append({'start': busy_start_clipped, 'end': busy_end_clipped})
                 else:
-                    logging.warning(f"Ostrz.: Pominięto nieprawidłowy lub niesparsowany zajęty czas (po próbie parsowania): start={start_data}, end={end_data}")
+                    logging.warning(f"Ostrz.: Pominięto nieprawidłowy lub niesparsowany zajęty czas (po próbie parsowania): start={start_str}, end={end_str}")
             else:
-                 logging.warning(f"Ostrz.: Pominięto zajęty slot o nieoczekiwanej strukturze danych start/end: {busy_slot}")
+                 # Logujemy, jeśli struktura odpowiedzi z API jest inna niż oczekiwana (np. brakuje klucza 'start'/'end')
+                 logging.warning(f"Ostrz.: Pominięto zajęty slot o nieoczekiwanej strukturze danych (brak stringów start/end): {busy_slot}")
 
     except HttpError as error:
         logging.error(f'Błąd HTTP API Freebusy: {error.resp.status} {error.resp.reason}', exc_info=True)
@@ -904,11 +913,10 @@ SYSTEM_INSTRUCTION_SCHEDULING = """Jesteś pomocnym asystentem AI specjalizując
 
 **Styl pisania:**
 *Unikaj zbyt entuzjastycznych wiadomości i wiadomości z wykrzyknikiem np. "Super!"
-*Używaj zwrotów typu "Państwo" lub "Pan" "Pani" jeśli można wyczytać z rozmowy ich płeć
+*Używaj zwrotów typu "Państwo"
 *Unikaj pytań które mogą zabrzmieć zbyt personalnie np. Jak wygląda Pani tydzień?, zamiast tego możesz poinformować o naszej dostępności i zapytać o dostępność klienta np. Mamy sporo wolnych terminów w Poniedziałek i Wtorek, cz pasowało by Państwu?
 *Unikaj podawania dokładnych zakresów godzin i dni miesiąca np. "W dni robocze w przyszłym tygodniu (od poniedziałku 5 maja do piątku 9 maja) mam dostępne terminy od 7:00 do 16:00 oraz od 18:00 do 22:00."
-
-
+*Zwracaj uwagę na ortografię i duże/małe litery
 
 **Dostępne zakresy czasowe:**
 {available_ranges_text}
