@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# verify_server.py (Architektura stanów, rozbudowana instrukcja AI Propozycji, bez średników)
+# verify_server.py (Dodana wiadomość potwierdzająca przed rezerwacją)
 
 from flask import Flask, request, Response
 import os
@@ -8,7 +8,7 @@ import json
 import requests
 import time
 import vertexai
-import random # Potrzebne dla exponential backoff
+import random
 from vertexai.generative_models import (
     GenerativeModel, Part, Content, GenerationConfig,
     SafetySetting, HarmCategory, HarmBlockThreshold
@@ -34,7 +34,7 @@ VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "KOLAGEN")
 PAGE_ACCESS_TOKEN = os.environ.get("FB_PAGE_ACCESS_TOKEN", "EACNAHFzEhkUBOxSDMfOZCYbQAFKfVzJWowJpX8mcX0BvBGaWFRiUwNHjojZBcRXIPFszKzzRZBEqFI7AFD0DpI5sOeiN7HKLBGxBZB7tAgCkFdipRNQKevuP3F4kvSTIZCqqkrBaq7rPRM7FIqNQjP2Ju9UdZB5FNcvndzdZBZBGxTyyw9hkWmBndNr2A0VwO2Gf8QZDZD") # Testowy token
 PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "linear-booth-450221-k1")
 LOCATION = os.environ.get("GCP_LOCATION", "us-central1")
-MODEL_ID = os.environ.get("VERTEX_MODEL_ID", "gemini-2.0-flash-001") # Model Flash 2.0
+MODEL_ID = os.environ.get("VERTEX_MODEL_ID", "gemini-2.0-flash-001")
 
 FACEBOOK_GRAPH_API_URL = f"https://graph.facebook.com/v19.0/me/messages"
 
@@ -70,8 +70,7 @@ STATE_WAITING_FOR_FEEDBACK = "waiting_for_feedback"
 
 # --- Ustawienia Modelu Gemini ---
 GENERATION_CONFIG_PROPOSAL = GenerationConfig(
-    temperature=0.0, # Maksymalnie deterministyczny
-    top_p=0.95, top_k=40, max_output_tokens=512,
+    temperature=0.0, top_p=0.95, top_k=40, max_output_tokens=512,
 )
 GENERATION_CONFIG_FEEDBACK_SIMPLE = GenerationConfig(
     temperature=0.0, top_p=0.95, top_k=40, max_output_tokens=32,
@@ -94,13 +93,10 @@ _tz = None
 POLISH_WEEKDAYS = ["Poniedziałek", "Wtorek", "Środa", "Czwartek", "Piątek", "Sobota", "Niedziela"]
 
 # --- Ustawienia Lokalizacji ---
-try:
-    locale.setlocale(locale.LC_TIME, 'pl_PL.UTF-8')
+try: locale.setlocale(locale.LC_TIME, 'pl_PL.UTF-8')
 except locale.Error:
-    try:
-        locale.setlocale(locale.LC_TIME, 'Polish_Poland.1250')
-    except locale.Error:
-        logging.warning("Nie można ustawić polskiej lokalizacji dla formatowania dat.")
+    try: locale.setlocale(locale.LC_TIME, 'Polish_Poland.1250')
+    except locale.Error: logging.warning("Nie można ustawić polskiej lokalizacji dla formatowania dat.")
 
 # =====================================================================
 # === INICJALIZACJA AI - WE WŁAŚCIWYM MIEJSCU =========================
@@ -122,9 +118,8 @@ except Exception as e:
     print("!!! Funkcjonalność AI będzie niedostępna !!!", flush=True)
 
 # =====================================================================
-# === FUNKCJE POMOCNICZE ==============================================
+# === FUNKCJE POMOCNICZE (Bez zmian) ==================================
 # =====================================================================
-
 def ensure_dir(directory):
     """Tworzy katalog, jeśli nie istnieje."""
     try:
@@ -429,7 +424,7 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
 
             next_day_date = day_date + datetime.timedelta(days=1)
             current_day_start = tz.localize(datetime.datetime.combine(next_day_date, datetime.time(0, 0)))
-            current_day_start = max(current_day_start, range_start) # Uważaj na pętlę
+            current_day_start = max(current_day_start, range_start) # Zapobiega cofaniu
 
     logging.info(f"Znaleziono {len(final_free_slots)} wolnych zakresów czasowych.")
     return final_free_slots
@@ -546,22 +541,26 @@ def send_message(recipient_id, full_message_text):
     if not full_message_text or not isinstance(full_message_text, str) or not full_message_text.strip(): logging.warning(f"[{recipient_id}] Pominięto wysłanie pustej wiadomości."); return
     message_len = len(full_message_text); logging.info(f"[{recipient_id}] Przygotowanie wiadomości (dł: {message_len}).")
     if ENABLE_TYPING_DELAY: est_dur = min(MAX_TYPING_DELAY_SECONDS, max(MIN_TYPING_DELAY_SECONDS, message_len / TYPING_CHARS_PER_SECOND)); logging.debug(f"[{recipient_id}] Czas pisania: {est_dur:.2f}s"); _send_typing_on(recipient_id); time.sleep(est_dur)
-    chunks = [];
+    chunks = []
     if message_len <= MESSAGE_CHAR_LIMIT: chunks.append(full_message_text)
     else:
-        logging.info(f"[{recipient_id}] Dzielenie wiadomości..."); remaining_text = full_message_text
+        logging.info(f"[{recipient_id}] Dzielenie wiadomości...")
+        remaining_text = full_message_text
         while remaining_text:
             if len(remaining_text) <= MESSAGE_CHAR_LIMIT: chunks.append(remaining_text.strip()); break
-            split_index = -1; delimiters = ['\n\n', '\n', '. ', '! ', '? ', ' ']
+            split_index = -1
+            delimiters = ['\n\n', '\n', '. ', '! ', '? ', ' ']
             for d in delimiters:
                 s_lim = MESSAGE_CHAR_LIMIT - len(d) + 1
-                t_idx = remaining_text.rfind(d, 0, s_lim);
-                if t_idx != -1: 
+                t_idx = remaining_text.rfind(d, 0, s_lim)
+                if t_idx != -1:
                     split_index = t_idx + len(d)
                     break
-            if split_index == -1: split_index = MESSAGE_CHAR_LIMIT
+            if split_index == -1:
+                split_index = MESSAGE_CHAR_LIMIT
             chunk = remaining_text[:split_index].strip()
-            if chunk: chunks.append(chunk)
+            if chunk:
+                chunks.append(chunk)
             remaining_text = remaining_text[split_index:].strip()
         logging.info(f"[{recipient_id}] Podzielono na {len(chunks)} fragmentów.")
     num_chunks = len(chunks); send_success_count = 0
@@ -570,7 +569,7 @@ def send_message(recipient_id, full_message_text):
         if not _send_single_message(recipient_id, chunk): logging.error(f"!!! [{recipient_id}] Błąd wysyłania fragm. {i+1}. Anulowano."); break
         send_success_count += 1
         if num_chunks > 1 and i < num_chunks - 1:
-            logging.debug(f"[{recipient_id}] Oczekiwanie {MESSAGE_DELAY_SECONDS}s...");
+            logging.debug(f"[{recipient_id}] Oczekiwanie {MESSAGE_DELAY_SECONDS}s...")
             if ENABLE_TYPING_DELAY: est_dur = min(MAX_TYPING_DELAY_SECONDS, max(MIN_TYPING_DELAY_SECONDS, len(chunks[i+1]) / TYPING_CHARS_PER_SECOND)) * 0.5; _send_typing_on(recipient_id); time.sleep(est_dur + MESSAGE_DELAY_SECONDS * 0.5); time.sleep(MESSAGE_DELAY_SECONDS * 0.5)
             else: time.sleep(MESSAGE_DELAY_SECONDS)
     logging.info(f"--- [{recipient_id}] Zakończono wysyłanie. Wysłano {send_success_count}/{num_chunks} fragm. ---")
@@ -584,8 +583,8 @@ def _call_gemini(user_psid, prompt_history, generation_config, task_name, max_re
     if not gemini_model: logging.error(f"!!! [{user_psid}] Model Gemini ({task_name}) jest None!"); return None
     if not isinstance(prompt_history, list) or not all(isinstance(item, Content) for item in prompt_history): logging.error(f"!!! [{user_psid}] Nieprawidłowy prompt ({task_name})."); return None
     logging.info(f"[{user_psid}] Wywołanie Gemini: {task_name} (Prompt: {len(prompt_history)} wiad.)")
-    if prompt_history and prompt_history[-1].role == 'user' and prompt_history[-1].parts: logging.debug(f"    Ostatnia wiadomość usera w prompcie ({task_name}): '{prompt_history[-1].parts[0].text[:200]}...'")
-    elif prompt_history and len(prompt_history) > 1 and prompt_history[-1].role == 'model' and prompt_history[-2].role == 'user' and prompt_history[-2].parts: logging.debug(f"    Ostatnia wiadomość usera w prompcie ({task_name}) (przed ostatnią modelu): '{prompt_history[-2].parts[0].text[:200]}...'")
+    if prompt_history and prompt_history[-1].role == 'user' and prompt_history[-1].parts: logging.debug(f"    Ostatnia wiadomość usera ({task_name}): '{prompt_history[-1].parts[0].text[:200]}...'")
+    elif prompt_history and len(prompt_history) > 1 and prompt_history[-1].role == 'model' and prompt_history[-2].role == 'user' and prompt_history[-2].parts: logging.debug(f"    Ostatnia wiadomość usera ({task_name}) (przed ost. modelu): '{prompt_history[-2].parts[0].text[:200]}...'")
 
     attempt = 0
     while attempt < max_retries:
@@ -714,7 +713,7 @@ def get_gemini_slot_proposal(user_psid, history_for_proposal_ai, available_range
     system_instruction = SYSTEM_INSTRUCTION_TEXT_PROPOSE.format(available_ranges_text=ranges_text)
     initial_prompt = [
         Content(role="user", parts=[Part.from_text(system_instruction)]),
-        Content(role="model", parts=[Part.from_text("Rozumiem. Wybieram termin i zwracam propozycję z [SLOT_ISO:...].")])
+        Content(role="model", parts=[Part.from_text("Rozumiem. Znajdę pasujący lub alternatywny termin i zwrócę propozycję z [SLOT_ISO:...].")])
     ]
     full_prompt = initial_prompt + history_for_proposal_ai
 
@@ -932,10 +931,12 @@ def webhook_handle():
                                         sender_id, user_input_text, history_for_gemini, last_proposal_text_for_feedback
                                     )
                                     if decision == "[ACCEPT]":
-                                        action = 'book'; logging.info(f"      Decyzja: {decision} -> Akcja: Rezerwacja, Stan: General")
+                                        action = 'book'
+                                        logging.info(f"      Decyzja: {decision} -> Akcja: Rezerwacja, Stan: General")
                                         next_state = STATE_GENERAL; ctx_save_payload = {}
                                     elif decision == "[REJECT]":
-                                        action = 'find_and_propose'; logging.info(f"      Decyzja: {decision} -> Akcja: Odrzucenie i szukanie, Stan: SchedulingActive")
+                                        action = 'find_and_propose'
+                                        logging.info(f"      Decyzja: {decision} -> Akcja: Odrzucenie i szukanie, Stan: SchedulingActive")
                                         msg_result = "Rozumiem. W takim razie poszukam innego terminu..."
                                         next_state = STATE_SCHEDULING_ACTIVE; ctx_save_payload = {}
                                     elif decision == "[CLARIFY]":
@@ -943,11 +944,14 @@ def webhook_handle():
                                         action = 'send_general_ai_response'
                                         next_state = STATE_GENERAL; ctx_save_payload = {}
                                     else:
-                                        action = 'send_error'; logging.warning(f"      Niespodziewana decyzja AI (Simple Feedback): {decision}.")
-                                        msg_result = "Problem ze zrozumieniem odpowiedzi."; next_state = STATE_GENERAL; ctx_save_payload = {}
+                                        action = 'send_error'
+                                        logging.warning(f"      Niespodziewana decyzja AI (Simple Feedback): {decision}.")
+                                        msg_result = "Problem ze zrozumieniem odpowiedzi."
+                                        next_state = STATE_GENERAL; ctx_save_payload = {}
                                 except Exception as feedback_err:
                                     logging.error(f"!!! BŁĄD AI (Simple Feedback): {feedback_err}", exc_info=True)
-                                    action = 'send_error'; msg_result = "Błąd interpretacji odpowiedzi."
+                                    action = 'send_error'
+                                    msg_result = "Błąd interpretacji odpowiedzi."
                                     next_state = STATE_GENERAL; ctx_save_payload = {}
                             else: # Stan GENERAL lub SCHEDULING_ACTIVE
                                 logging.info(f"      -> Stan: {current_state}. Pytanie AI (General)...")
@@ -964,7 +968,8 @@ def webhook_handle():
                                         msg_result = response
                                         next_state = STATE_GENERAL; ctx_save_payload = {}
                                 else:
-                                    action = 'send_error'; msg_result = "Błąd przetwarzania."
+                                    action = 'send_error'
+                                    msg_result = "Błąd przetwarzania."
                                     next_state = STATE_GENERAL; ctx_save_payload = {}
 
                         elif attachments := message_data.get("attachments"):
@@ -1009,21 +1014,39 @@ def webhook_handle():
                     loop_guard = 0
                     while action and loop_guard < 3:
                         loop_guard += 1
-                        logging.info(f"  >> Pętla akcji {loop_guard}/3 | Akcja: {action} | Stan: {next_state}")
+                        logging.info(f"  >> Pętla akcji {loop_guard}/3 | Akcja: {action} | Stan wejściowy: {next_state}") # Log stanu wejściowego
                         current_action = action
                         action = None # Reset
 
                         if current_action == 'book':
                             if last_iso_from_context:
                                 try:
-                                    tz= _get_timezone(); start = datetime.datetime.fromisoformat(last_iso_from_context).astimezone(tz); end = start + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES); prof = get_user_profile(sender_id); name = prof.get('first_name', '') if prof else f"U_{sender_id[-4:]}"
+                                    # ZMIANA: Dodanie wiadomości potwierdzającej przed rezerwacją
+                                    tz = _get_timezone()
+                                    start_dt_obj = datetime.datetime.fromisoformat(last_iso_from_context).astimezone(tz)
+                                    formatted_slot = format_slot_for_user(start_dt_obj)
+                                    confirmation_msg = f"Dobrze, w takim razie zapisuję termin na {formatted_slot}..."
+                                    logging.info(f"Wysyłanie potwierdzenia zapisu: '{confirmation_msg}'")
+                                    send_message(sender_id, confirmation_msg)
+                                    # Dodajemy małe opóźnienie dla naturalności
+                                    time.sleep(1.0)
+
+                                    # Kontynuacja rezerwacji
+                                    end_dt_obj = start_dt_obj + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+                                    prof = get_user_profile(sender_id)
+                                    name = prof.get('first_name', '') if prof else f"U_{sender_id[-4:]}"
                                     desc = f"FB Bot\nPSID: {sender_id}" + (f"\nNazwisko: {prof.get('last_name')}" if prof and prof.get('last_name') else "")
-                                    ok, booking_msg = book_appointment(TARGET_CALENDAR_ID, start, end, f"FB: {name}", desc, name)
-                                    msg_result = booking_msg
-                                    next_state = STATE_GENERAL; ctx_save_payload = {} # Zawsze resetuj po próbie rezerwacji
-                                    if not ok: logging.warning("Rezerwacja nie powiodła się.")
-                                except Exception as e: logging.error(f"!!! BŁĄD rezerwacji {last_iso_from_context}: {e}", exc_info=True); msg_result = "Błąd rezerwacji."; next_state = STATE_GENERAL; ctx_save_payload = {}
-                            else: logging.error("!!! BŁĄD LOGIKI: 'book' bez 'last_iso' !!!"); msg_result = "Błąd systemu."; next_state = STATE_GENERAL; ctx_save_payload = {}
+                                    ok, booking_msg = book_appointment(TARGET_CALENDAR_ID, start_dt_obj, end_dt_obj, f"FB: {name}", desc, name)
+                                    msg_result = booking_msg # Wiadomość o wyniku rezerwacji
+                                    next_state = STATE_GENERAL; ctx_save_payload = {} # Zawsze resetuj po próbie
+                                    if not ok: logging.warning("Rezerwacja nie powiodła się w book_appointment.")
+                                except Exception as e:
+                                    logging.error(f"!!! BŁĄD podczas akcji 'book': {e}", exc_info=True)
+                                    msg_result = "Wystąpił błąd podczas finalizowania rezerwacji."
+                                    next_state = STATE_GENERAL; ctx_save_payload = {}
+                            else:
+                                logging.error("!!! BŁĄD LOGIKI: 'book' bez 'last_iso' !!!")
+                                msg_result = "Błąd systemu."; next_state = STATE_GENERAL; ctx_save_payload = {}
                         elif current_action == 'find_and_propose':
                             try:
                                 tz = _get_timezone(); now = datetime.datetime.now(tz); search_start = now; search_end_date = (search_start + datetime.timedelta(days=MAX_SEARCH_DAYS)).date(); search_end = tz.localize(datetime.datetime.combine(search_end_date, datetime.time(WORK_END_HOUR, 0)))
@@ -1039,16 +1062,13 @@ def webhook_handle():
                                         msg_result = final_proposal_msg
                                         next_state = STATE_WAITING_FOR_FEEDBACK
                                         ctx_save_payload = {'slot_iso': proposed_iso}
-                                    elif proposal_text and not proposed_iso:
-                                         logging.warning(f"      AI (Conditional) dało tekst '{proposal_text[:50]}...' bez ISO.")
-                                         final_proposal_msg = (msg_result + "\n\n" + proposal_text) if msg_result else proposal_text
-                                         msg_result = final_proposal_msg
+                                    else: # Błąd AI, walidacji lub brak ISO
+                                         fail_msg = proposal_text if proposal_text else "Problem ze znalezieniem terminu."
+                                         # Jeśli get_gemini_slot_proposal zwróciło None, None
+                                         if proposal_text is None and proposed_iso is None:
+                                              fail_msg = f"Niestety, brak wolnych terminów w ciągu {MAX_SEARCH_DAYS} dni."
+                                         msg_result = (msg_result + "\n\n" + fail_msg) if msg_result else fail_msg
                                          next_state = STATE_GENERAL; ctx_save_payload = {}
-                                    else: # Błąd AI lub walidacji/zajęty
-                                        fail_msg = proposal_text if proposal_text else "Problem ze znalezieniem terminu."
-                                        if proposal_text is None and proposed_iso is None: fail_msg = f"Niestety, brak wolnych terminów w ciągu {MAX_SEARCH_DAYS} dni."
-                                        msg_result = (msg_result + "\n\n" + fail_msg) if msg_result else fail_msg
-                                        next_state = STATE_GENERAL; ctx_save_payload = {}
                                 else: # Brak wolnych zakresów
                                     logging.warning(f"      Brak wolnych zakresów.")
                                     no_slots_msg = f"Niestety, brak wolnych terminów w ciągu {MAX_SEARCH_DAYS} dni."
@@ -1066,33 +1086,34 @@ def webhook_handle():
                                  response = get_gemini_general_response(sender_id, input_text_for_general, history_for_gemini)
                                  if response:
                                      if INTENT_SCHEDULE_MARKER in response:
-                                         logging.info(f"      AI General odpowiedziało i wykryło intencję. Ustawianie akcji 'find_and_propose'.")
-                                         action = 'find_and_propose' # Ustaw akcję na następną iterację
+                                         logging.info(f"      AI General odp. i wykryło intencję. Ustawianie akcji 'find_and_propose'.")
+                                         action = 'find_and_propose' # Ustaw na następną iterację
                                          initial_resp_text = response.split(INTENT_SCHEDULE_MARKER, 1)[0].strip()
                                          msg_result = initial_resp_text if initial_resp_text else "Sprawdzę terminy."
                                          next_state = STATE_SCHEDULING_ACTIVE; ctx_save_payload = {}
-                                         continue # Przejdź do następnej iteracji
+                                         continue # Kontynuuj pętlę, aby wykonać 'find_and_propose'
                                      else: # Zwykła odpowiedź
                                          msg_result = response
                                          next_state = STATE_GENERAL; ctx_save_payload = {}
-                                         # action jest None, pętla zakończy się
+                                         # action = None -> pętla się zakończy
                                  else: # Błąd AI General
                                      msg_result = "Błąd przetwarzania."
                                      next_state = STATE_GENERAL; ctx_save_payload = {}
-                                     # action jest None
+                                     # action = None
                              else:
                                  logging.error("!!! Błąd logiki: 'send_general_ai_response' bez user_content !!!")
                                  msg_result = "Wewnętrzny błąd."; next_state = STATE_GENERAL; ctx_save_payload = {}
-                                 # action jest None
+                                 # action = None
                         elif current_action in ['send_gemini_response', 'send_clarification', 'send_error', 'send_info']:
                             logging.debug(f"      Akcja: {current_action}. Wiadomość gotowa.")
-                            # action jest None, pętla zakończy się
+                            # msg_result, next_state, ctx_save_payload już ustawione
+                            # action = None -> pętla się zakończy
                             pass
                         else:
                              logging.warning(f"   Brak lub nieznana akcja '{current_action}'. Zakończenie pętli.")
-                             break
+                             break # Zakończ pętlę
 
-                    # --- WYSYŁANIE ODPOWIEDZI I ZAPIS STANU ---
+                    # --- WYSYŁANIE ODPOWIEDZI I ZAPIS STANU (po zakończeniu pętli akcji) ---
                     final_context_to_save = {}
                     if next_state != STATE_GENERAL:
                         final_context_to_save['type'] = next_state
@@ -1102,12 +1123,14 @@ def webhook_handle():
                             final_context_to_save.update(payload_data)
                         final_context_to_save['type'] = next_state # Upewnij się
 
+                    # Wysyłanie wiadomości, jeśli JEST jakaś (msg_result mogło być ustawione w pętli)
                     if msg_result:
                         send_message(sender_id, msg_result)
                         model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
-                    elif current_action: # Używamy current_action, bo action może być None po pętli
+                    elif current_action: # Używamy current_action, bo action jest resetowane
                         logging.warning(f"    Akcja '{current_action}' zakończona bez wiadomości do wysłania.")
 
+                    # Zapis stanu/historii
                     context_for_comparison = context.copy(); context_for_comparison.pop('role', None)
                     final_context_for_comparison = final_context_to_save.copy(); final_context_for_comparison.pop('role', None)
                     should_save = bool(user_content) or bool(model_resp_content) or (context_for_comparison != final_context_for_comparison)
@@ -1134,6 +1157,7 @@ def webhook_handle():
     except Exception as e:
         logging.critical(f"!!! KRYTYCZNY BŁĄD POST: {e}", exc_info=True)
         return Response("ERROR", status=200)
+
 
 # =====================================================================
 # === URUCHOMIENIE SERWERA ============================================
