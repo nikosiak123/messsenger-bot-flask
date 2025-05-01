@@ -554,7 +554,9 @@ def send_message(recipient_id, full_message_text):
             if len(remaining_text) <= MESSAGE_CHAR_LIMIT: chunks.append(remaining_text.strip()); break
             split_index = -1; delimiters = ['\n\n', '\n', '. ', '! ', '? ', ' ']
             for d in delimiters: s_lim = MESSAGE_CHAR_LIMIT - len(d) + 1; t_idx = remaining_text.rfind(d, 0, s_lim);
-                if t_idx != -1: split_index = t_idx + len(d); break
+                if t_idx != -1: 
+                    split_index = t_idx + len(d)
+                    break
             if split_index == -1: split_index = MESSAGE_CHAR_LIMIT
             chunk = remaining_text[:split_index].strip()
             if chunk: chunks.append(chunk)
