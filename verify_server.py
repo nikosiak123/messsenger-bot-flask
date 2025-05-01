@@ -395,8 +395,7 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
              if any(e.get('reason') == 'notFound' or e.get('reason') == 'forbidden' for e in calendar_data['errors']):
                  return []
         busy_times_raw = calendar_data.get('busy', [])
-
-                busy_times = []
+        busy_times = []
         for busy_slot in busy_times_raw:
             start_str = busy_slot.get('start') # Pobierz string startu
             end_str = busy_slot.get('end')     # Pobierz string końca
@@ -421,7 +420,6 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
             else:
                  # Logujemy, jeśli struktura odpowiedzi z API jest inna niż oczekiwana (np. brakuje klucza 'start'/'end')
                  logging.warning(f"Ostrz.: Pominięto zajęty slot o nieoczekiwanej strukturze danych (brak stringów start/end): {busy_slot}")
-
     except HttpError as error:
         logging.error(f'Błąd HTTP API Freebusy: {error.resp.status} {error.resp.reason}', exc_info=True)
         return []
