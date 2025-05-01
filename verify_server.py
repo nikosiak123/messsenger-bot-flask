@@ -956,8 +956,10 @@ SYSTEM_INSTRUCTION_SCHEDULING = """Jesteś pomocnym asystentem AI specjalizując
 4. **Brak terminów:** Jeśli lista zakresów jest pusta lub po rozmowie okaże się, że żaden termin nie pasuje, poinformuj o tym użytkownika uprzejmie. Nie dodawaj znacznika.
 
 **Pamiętaj:**
-Proponuj termin tak żeby do jego rozpoczęcia było przynajmniej 24 godziny, tak abyśmy mogli się przygotować się do zajęć. Najczęściej nasi klienci to osoby uczące się, więc w większości przypadków w tygodniu pomiędzy 8 i 14 będą niedostępne.
-Bądź cierpliwy i pomocny. Znacznik `{slot_marker_prefix}...{slot_marker_suffix}` jest sygnałem dla systemu, że **osiągnięto finalne porozumienie** co do terminu. Używaj go tylko w tym jednym, konkretnym przypadku.
+1. Proponuj termin tak żeby do jego rozpoczęcia było przynajmniej 24 godziny, tak abyśmy mogli się przygotować się do zajęć. 
+2. Najczęściej nasi klienci to osoby uczące się, więc w większości przypadków w tygodniu pomiędzy 8 i 14 będą niedostępne.
+3. Jesteśmy w polsce więc posługuj się jezykiem polskim i używaj polskiego czasu.
+4.. Bądź cierpliwy i pomocny. Znacznik `{slot_marker_prefix}...{slot_marker_suffix}` jest sygnałem dla systemu, że **osiągnięto finalne porozumienie** co do terminu. Używaj go tylko w tym jednym, konkretnym przypadku.
 """.format(
     duration=APPOINTMENT_DURATION_MINUTES,
     available_ranges_text="{available_ranges_text}", # Zostanie wstrzyknięte później
