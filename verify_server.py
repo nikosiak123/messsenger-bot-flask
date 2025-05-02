@@ -176,30 +176,30 @@ def load_history(user_psid):
     """Wczytuje historię i ostatni kontekst/stan z pliku."""
     filepath = os.path.join(HISTORY_DIR, f"{user_psid}.json")
     history = []
-    context = {}
-    valid_states = [STATE_GENERAL, STATE_SCHEDULING_ACTIVE, STATE_GATHERING_INFO] # Dodano nowy stan
-    if 'type' not in context or context.get('type') not in valid_states:
-        # TEN WARUNEK ZOSTAŁ SPEŁNIONY!
-        logging.warning(f"[{user_psid}] Nieprawidłowy lub brak stanu w ostatnim kontekście. Reset do {STATE_GENERAL}.")
-        context = {'type': STATE_GENERAL} # Reset do stanu domyślnego
+    context = {} # Inicjalizacja pustego kontekstu
+    valid_states = [STATE_GENERAL, STATE_SCHEDULING_ACTIVE, STATE_GATHERING_INFO]
 
     if not os.path.exists(filepath):
-        return history, {'type': STATE_GENERAL}
+        logging.info(f"[{user_psid}] Plik historii nie istnieje, zwracam stan domyślny {STATE_GENERAL}.")
+        return history, {'type': STATE_GENERAL} # Zwróć domyślny stan od razu
+
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
             history_data = json.load(f)
             if isinstance(history_data, list):
                 last_system_message_index = -1
-                # Szukamy ostatniego wpisu systemowego, który jest słownikiem i ma klucz 'type'
+                # Szukamy ostatniego wpisu systemowego
                 for i, msg_data in enumerate(reversed(history_data)):
                     if isinstance(msg_data, dict) and msg_data.get('role') == 'system' and 'type' in msg_data:
                         last_system_message_index = len(history_data) - 1 - i
                         break
 
+                # Przetwarzamy historię i potencjalnie wczytujemy kontekst
                 for i, msg_data in enumerate(history_data):
                     if (isinstance(msg_data, dict) and 'role' in msg_data and
                             msg_data['role'] in ('user', 'model') and 'parts' in msg_data and
                             isinstance(msg_data['parts'], list) and msg_data['parts']):
+                        # ... (kod przetwarzania wiadomości user/model - bez zmian) ...
                         text_parts = []
                         valid_parts = True
                         for part_data in msg_data['parts']:
@@ -211,21 +211,31 @@ def load_history(user_psid):
                                 break
                         if valid_parts and text_parts:
                             history.append(Content(role=msg_data['role'], parts=text_parts))
-                    # Sprawdzamy, czy to jest *ten* ostatni wpis systemowy z poprawnym typem
                     elif isinstance(msg_data, dict) and msg_data.get('role') == 'system' and 'type' in msg_data:
-                        if i == last_system_message_index and msg_data.get('type') in valid_states:
-                            context = msg_data
-                            logging.debug(f"[{user_psid}] Odczytano AKTYWNY kontekst: {context}")
+                        # Jeśli to ostatni wpis systemowy, przypisujemy go do context
+                        if i == last_system_message_index:
+                            # Sprawdzamy poprawność typu *tutaj*, przed przypisaniem
+                            if msg_data.get('type') in valid_states:
+                                context = msg_data # Przypisz poprawny kontekst
+                                logging.debug(f"[{user_psid}] Odczytano AKTYWNY kontekst: {context}")
+                            else:
+                                logging.warning(f"[{user_psid}] Znaleziono ostatni kontekst, ale z nieprawidłowym typem: {msg_data}. Ignorowanie.")
                         else:
-                            # Jeśli to nie ostatni kontekst lub typ jest nieznany, ignorujemy go
-                            logging.debug(f"[{user_psid}] Pominięto stary lub nieprawidłowy kontekst (idx {i}): {msg_data}")
+                            logging.debug(f"[{user_psid}] Pominięto stary kontekst (idx {i}): {msg_data}")
                     else:
                         logging.warning(f"Ostrz. [{user_psid}]: Pominięto niepoprawną wiadomość/kontekst (idx {i}): {msg_data}")
 
-                # Upewnij się, że stan jest poprawny, domyślnie general
-                if 'type' not in context or context.get('type') not in valid_states:
-                    logging.warning(f"[{user_psid}] Nieprawidłowy lub brak stanu w ostatnim kontekście. Reset do {STATE_GENERAL}.")
-                    context = {'type': STATE_GENERAL}
+                # --- POPRAWNA LOKALIZACJA WALIDACJI ---
+                # Sprawdź, czy po przetworzeniu pliku 'context' nadal jest pusty
+                # lub czy wczytany kontekst (mimo że był ostatni) miał nieprawidłowy typ (choć to już sprawdziliśmy wyżej)
+                if not context or context.get('type') not in valid_states:
+                    # Jeśli context pozostał pusty (nie znaleziono wpisu systemowego na końcu)
+                    # lub jakimś cudem wczytano nieprawidłowy stan (powinno być obsłużone wyżej)
+                    if not context:
+                         logging.debug(f"[{user_psid}] Nie znaleziono kontekstu systemowego na końcu pliku. Ustawiam stan {STATE_GENERAL}.")
+                    else: # To raczej nie powinno się zdarzyć przy obecnej logice
+                         logging.warning(f"[{user_psid}] Wczytany kontekst ma nieprawidłowy typ '{context.get('type')}'. Reset do {STATE_GENERAL}.")
+                    context = {'type': STATE_GENERAL} # Ustaw stan domyślny
 
                 logging.info(f"[{user_psid}] Wczytano historię: {len(history)} wiad. Stan: {context.get('type', STATE_GENERAL)}")
                 return history, context
