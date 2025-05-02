@@ -1003,6 +1003,68 @@ def get_gemini_scheduling_response(user_psid, history_for_scheduling_ai, current
         return "Przepraszam, wystąpił błąd podczas sprawdzania terminów. Spróbujmy ponownie za chwilę."
 
 
+
+# --- NOWA FUNKCJA AI: Zbieranie informacji ---
+def get_gemini_gathering_response(user_psid, history_for_gathering_ai, current_user_message_text, known_info):
+    """Prowadzi rozmowę zbierającą informacje o uczniu."""
+    if not gemini_model:
+        logging.error(f"!!! [{user_psid}] Model Gemini niezaładowany (Gathering Info)!")
+        return "Przepraszam, mam problem z systemem."
+
+    # Przygotowanie danych do wstrzyknięcia w instrukcję
+    booked_slot_str = known_info.get("booked_slot_formatted", "nieznany")
+    first_name = known_info.get("known_first_name", "") # Używamy kluczy z kontekstu
+    last_name = known_info.get("known_last_name", "")   # Używamy kluczy z kontekstu
+    grade = known_info.get("known_grade", "")           # Używamy kluczy z kontekstu
+    level = known_info.get("known_level", "")           # Używamy kluczy z kontekstu
+
+    try:
+        system_instruction = SYSTEM_INSTRUCTION_GATHERING.format(
+            booked_slot_formatted=booked_slot_str,
+            known_first_name=first_name,
+            known_last_name=last_name,
+            known_grade=grade,
+            known_level=level
+        )
+    except KeyError as e:
+         logging.error(f"!!! BŁĄD formatowania instrukcji AI (Gathering): Brak klucza {e}")
+         # Zwróć błąd lub użyj domyślnej instrukcji
+         return "Błąd konfiguracji asystenta zbierania informacji."
+
+    initial_prompt = [
+        Content(role="user", parts=[Part.from_text(system_instruction)]),
+        Content(role="model", parts=[Part.from_text("Rozumiem. Sprawdzę znane informacje i zapytam o brakujące dane ucznia (imię, nazwisko, klasa, poziom dla liceum/technikum). Po zebraniu kompletu informacji dodam znacznik [INFO_GATHERED].")])
+    ]
+    full_prompt = initial_prompt + history_for_gathering_ai
+    if current_user_message_text: # Dodaj bieżącą wiadomość użytkownika, jeśli istnieje
+        full_prompt.append(Content(role="user", parts=[Part.from_text(current_user_message_text)]))
+
+    # Ograniczenie długości promptu
+    max_prompt_messages = (MAX_HISTORY_TURNS * 2) + 2
+    while len(full_prompt) > max_prompt_messages:
+        full_prompt.pop(2) # Usuń najstarszą wiadomość użytkownika (jeśli istnieje)
+        if len(full_prompt) > 2:
+            full_prompt.pop(2) # Usuń odpowiadającą jej wiadomość modelu (jeśli istnieje)
+
+    # Wywołanie Gemini z konfiguracją dla zbierania informacji
+    response_text = _call_gemini(user_psid, full_prompt, GENERATION_CONFIG_GATHERING, "Info Gathering")
+
+    if response_text:
+        # Usuwamy przypadkowe znaczniki innych typów, jeśli AI je dodało
+        if INTENT_SCHEDULE_MARKER in response_text:
+             logging.warning(f"[{user_psid}] AI (Gathering) błędnie dodało znacznik {INTENT_SCHEDULE_MARKER}. Usuwam.")
+             response_text = response_text.replace(INTENT_SCHEDULE_MARKER, "").strip()
+        if SLOT_ISO_MARKER_PREFIX in response_text:
+             logging.warning(f"[{user_psid}] AI (Gathering) błędnie dodało znacznik {SLOT_ISO_MARKER_PREFIX}. Usuwam.")
+             response_text = re.sub(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}.*?{re.escape(SLOT_ISO_MARKER_SUFFIX)}", "", response_text).strip()
+        # Zwracamy pełną odpowiedź, może zawierać INFO_GATHERED_MARKER
+        return response_text
+    else:
+        logging.error(f"!!! [{user_psid}] Nie uzyskano odpowiedzi Gemini (Gathering Info).")
+        return "Przepraszam, wystąpił błąd systemowy."
+# --- KONIEC NOWEJ FUNKCJI --
+
+
 # --- Funkcja AI: Ogólna rozmowa (bez zmian) ---
 def get_gemini_general_response(user_psid, current_user_message_text, history_for_general_ai):
     """Prowadzi ogólną rozmowę z AI."""
