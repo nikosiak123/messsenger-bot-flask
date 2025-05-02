@@ -979,7 +979,7 @@ SYSTEM_INSTRUCTION_GATHERING = """Twoim zadaniem jest zebranie dodatkowych infor
     *   **Poziom nauczania** (podstawowy czy rozszerzony) - **zapytaj o to TYLKO jeśli z podanej klasy wynika, że jest to liceum lub technikum**. Dla podstawówki lub wcześniejszych etapów nie pytaj o poziom.
 3.  **Prowadź rozmowę:** Zadawaj pytania pojedynczo lub połącz kilka, jeśli brakuje więcej danych (np. "Poproszę jeszcze o imię i nazwisko ucznia oraz klasę."). Bądź miły i konwersacyjny.
 4.  **Zakończ po zebraniu danych:** Kiedy uznasz, że masz już **wszystkie wymagane informacje** (Imię, Nazwisko, Klasa i ewentualnie Poziom dla szkół średnich), Twoja ostatnia odpowiedź **MUSI** zawierać **DOKŁADNIE** następujący tekst (bez żadnych dodatków przed lub po, oprócz znacznika na końcu):
-    "Dziękuję za informacje. Proszę jeszcze potwierdzić chęć udziału w zajęciach wysyłając wiadomość \"POTWIERDZAM\" na ten profil (jest to profil dedykowany do komunikacji w sprawie zajęć): https://www.facebook.com/profile.php?id=61576135251276"
+    "Dziękuję za informacje. Proszę jeszcze potwierdzić zajęcia wysyłając wiadomość \"POTWIERDZAM\" na ten profil (jest to profil dedykowany do komunikacji w sprawie dalszych zajęć): https://www.facebook.com/profile.php?id=61576135251276"
     Na samym końcu tej wiadomości dodaj **DOKŁADNIE** znacznik: `{info_gathered_marker}`.
 5.  **NIE dodawaj znacznika**, jeśli nadal brakuje którejś z wymaganych informacji. Kontynuuj zadawanie pytań.
 
