@@ -1041,7 +1041,7 @@ def get_gemini_general_response(user_psid, current_user_message_text, history_fo
 
 @app.route('/webhook', methods=['GET'])
 def webhook_verification():
-    """Obsługuje weryfikację webhooka Facebooka."""
+    # ... (bez zmian) ...
     logging.info("--- GET /webhook (Weryfikacja) ---")
     hub_mode = request.args.get('hub.mode')
     hub_token = request.args.get('hub.verify_token')
@@ -1053,6 +1053,7 @@ def webhook_verification():
     else:
         logging.warning(f"Weryfikacja GET NIEUDANA. Oczekiwany token: '{VERIFY_TOKEN}', Otrzymany: '{hub_token}'")
         return Response("Verification failed", status=403)
+
 
 @app.route('/webhook', methods=['POST'])
 def webhook_handle():
@@ -1085,7 +1086,11 @@ def webhook_handle():
                     model_resp_content = None
                     user_content = None
                     extracted_iso_slot = None
-                    slot_verification_failed = False # Reset flagi
+                    slot_verification_failed = False
+                    context_data_to_save = context.copy()
+                    context_data_to_save.pop('role', None)
+                    trigger_gathering_ai_immediately = False # Flaga do natychmiastowego wywołania AI zbierającego
+                    booked_slot_for_gathering = None # Przechowa slot dla AI zbierającego
 
                     # === Obsługa wiadomości tekstowych ===
                     if message_data := event.get("message"):
@@ -1100,10 +1105,10 @@ def webhook_handle():
                             if ENABLE_TYPING_DELAY: time.sleep(MIN_TYPING_DELAY_SECONDS * 0.5)
 
                             if current_state == STATE_SCHEDULING_ACTIVE:
-                                logging.info("      -> Stan: Aktywne Planowanie. Wywołanie AI Planującego...")
                                 action = 'handle_scheduling'
+                            elif current_state == STATE_GATHERING_INFO:
+                                action = 'handle_gathering'
                             else: # Stan GENERAL
-                                logging.info("      -> Stan: Ogólny. Wywołanie AI Ogólnego...")
                                 action = 'handle_general'
 
                         elif attachments := message_data.get("attachments"):
@@ -1126,15 +1131,15 @@ def webhook_handle():
                         user_content = Content(role="user", parts=[Part.from_text(user_input_text)])
 
                         if payload == "CANCEL_SCHEDULING":
-                             logging.info("      Postback anulowania planowania.")
                              msg_result = "Rozumiem, anulowano proces umawiania terminu. W czymś jeszcze mogę pomóc?"
                              action = 'send_info'
                              next_state = STATE_GENERAL
+                             context_data_to_save = {}
                         elif current_state == STATE_SCHEDULING_ACTIVE:
-                            logging.info("      -> Stan: Aktywne Planowanie. Przekazanie postback do AI Planującego...")
                             action = 'handle_scheduling'
+                        elif current_state == STATE_GATHERING_INFO:
+                             action = 'handle_gathering'
                         else:
-                            logging.info("      -> Stan: Ogólny. Przekazanie postback do AI Ogólnego...")
                             action = 'handle_general'
 
                     # === Inne zdarzenia ===
@@ -1143,207 +1148,307 @@ def webhook_handle():
                     else: logging.warning(f"    Otrzymano nieobsługiwany typ zdarzenia: {json.dumps(event)}"); continue
 
 
-                    # --- WYKONANIE ZAPLANOWANEJ AKCJI ---
-                    if action == 'handle_general':
-                        logging.debug("  >> Akcja: handle_general")
-                        if user_content and user_content.parts:
-                            response = get_gemini_general_response(sender_id, user_content.parts[0].text, history_for_gemini)
-                            if response:
-                                if INTENT_SCHEDULE_MARKER in response:
-                                    logging.info(f"      AI Ogólne wykryło intencję [{INTENT_SCHEDULE_MARKER}]. Przejście do planowania.")
-                                    initial_resp_text = response.split(INTENT_SCHEDULE_MARKER, 1)[0].strip()
-                                    if initial_resp_text:
-                                        send_message(sender_id, initial_resp_text)
-                                        model_resp_content = Content(role="model", parts=[Part.from_text(initial_resp_text)])
-                                        history_for_gemini.append(user_content)
-                                        history_for_gemini.append(model_resp_content)
-                                    else:
-                                        history_for_gemini.append(user_content)
+                    # --- Pętla przetwarzania akcji (max 2 iteracje: np. schedule -> book -> gather) ---
+                    loop_guard = 0
+                    while action and loop_guard < 3:
+                        loop_guard += 1
+                        logging.debug(f"  >> Pętla akcji {loop_guard}/3 | Akcja: {action} | Stan wejściowy: {current_state} -> {next_state}")
+                        current_action = action
+                        action = None # Resetuj akcję na następną iterację
 
-                                    next_state = STATE_SCHEDULING_ACTIVE
-                                    action = 'handle_scheduling' # Przejdź do planowania w tym samym cyklu
-                                    user_content = None # Już przetworzone
-                                    model_resp_content = None # Już wysłane/dodane
-                                    logging.debug("      Przekierowanie do handle_scheduling...")
+                        if current_action == 'handle_general':
+                            logging.debug("  >> Wykonanie: handle_general")
+                            if user_content and user_content.parts:
+                                response = get_gemini_general_response(sender_id, user_content.parts[0].text, history_for_gemini)
+                                if response:
+                                    if INTENT_SCHEDULE_MARKER in response:
+                                        logging.info(f"      AI Ogólne wykryło intencję [{INTENT_SCHEDULE_MARKER}]. Przejście do planowania.")
+                                        initial_resp_text = response.split(INTENT_SCHEDULE_MARKER, 1)[0].strip()
+                                        if initial_resp_text:
+                                            send_message(sender_id, initial_resp_text)
+                                            model_resp_content = Content(role="model", parts=[Part.from_text(initial_resp_text)])
+                                            history_for_gemini.append(user_content) # Dodaj user msg
+                                            history_for_gemini.append(model_resp_content) # Dodaj model response
+                                            user_content = None # Już przetworzone
+                                            model_resp_content = None # Już przetworzone
+                                        else:
+                                            history_for_gemini.append(user_content) # Dodaj tylko user msg
+                                            user_content = None
+
+                                        next_state = STATE_SCHEDULING_ACTIVE
+                                        action = 'handle_scheduling' # Ustaw akcję na następną iterację
+                                        context_data_to_save = {}
+                                        logging.debug("      Przekierowanie do handle_scheduling...")
+                                        continue # Kontynuuj pętlę, aby wykonać handle_scheduling
+                                    else:
+                                        msg_result = response
+                                        model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                        next_state = STATE_GENERAL
+                                        context_data_to_save = {}
                                 else:
-                                    msg_result = response
+                                    msg_result = "Przepraszam, mam problem z przetworzeniem Twojej wiadomości."
                                     model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
                                     next_state = STATE_GENERAL
+                                    context_data_to_save = {}
                             else:
-                                msg_result = "Przepraszam, mam problem z przetworzeniem Twojej wiadomości."
+                                 logging.warning("handle_general wywołane bez user_content.")
+                                 # action pozostaje None, pętla się zakończy
+
+                        elif current_action == 'handle_scheduling':
+                            logging.debug("  >> Wykonanie: handle_scheduling")
+                            try:
+                                tz = _get_timezone()
+                                now = datetime.datetime.now(tz)
+                                search_start = now
+                                search_end_date = (search_start + datetime.timedelta(days=MAX_SEARCH_DAYS)).date()
+                                search_end = tz.localize(datetime.datetime.combine(search_end_date, datetime.time(WORK_END_HOUR, 0)))
+
+                                logging.info(f"      Pobieranie wolnych zakresów (z filtrem 24h) od {search_start:%Y-%m-%d %H:%M} do {search_end:%Y-%m-%d %H:%M}")
+                                _simulate_typing(sender_id, MAX_TYPING_DELAY_SECONDS * 0.6)
+                                free_ranges = get_free_time_ranges(TARGET_CALENDAR_ID, search_start, search_end)
+
+                                if free_ranges:
+                                    logging.info(f"      Znaleziono {len(free_ranges)} zakresów. Wywołanie AI Planującego...")
+                                    current_input_text = user_content.parts[0].text if user_content and user_content.parts else None
+                                    ai_response_text = get_gemini_scheduling_response(
+                                        sender_id, history_for_gemini, current_input_text, free_ranges
+                                    )
+
+                                    if ai_response_text:
+                                        iso_match = re.search(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}(.*?){re.escape(SLOT_ISO_MARKER_SUFFIX)}", ai_response_text)
+                                        if iso_match:
+                                            extracted_iso = iso_match.group(1).strip()
+                                            logging.info(f"      AI Planujące zwróciło potencjalny finalny slot: {extracted_iso}")
+                                            text_for_user = re.sub(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}.*?{re.escape(SLOT_ISO_MARKER_SUFFIX)}", "", ai_response_text).strip()
+                                            text_for_user = re.sub(r'\s+', ' ', text_for_user).strip()
+
+                                            try:
+                                                proposed_start = datetime.datetime.fromisoformat(extracted_iso)
+                                                if proposed_start.tzinfo is None: proposed_start = tz.localize(proposed_start)
+                                                else: proposed_start = proposed_start.astimezone(tz)
+
+                                                logging.info(f"      Weryfikacja dostępności slotu w kalendarzu: {format_slot_for_user(proposed_start)}")
+                                                if is_slot_actually_free(proposed_start, TARGET_CALENDAR_ID):
+                                                    logging.info("      Weryfikacja OK! Slot jest wolny. Przystępowanie do rezerwacji.")
+                                                    confirm_msg = text_for_user if text_for_user else f"Dobrze, potwierdzam termin {format_slot_for_user(proposed_start)}. Zapisuję..."
+                                                    send_message(sender_id, confirm_msg) # Wyślij potwierdzenie PRZED rezerwacją
+                                                    # Zapisz tę wiadomość w historii tymczasowej
+                                                    model_resp_content_confirm = Content(role="model", parts=[Part.from_text(confirm_msg)])
+                                                    history_for_gemini.append(user_content) # Dodaj user msg
+                                                    history_for_gemini.append(model_resp_content_confirm) # Dodaj confirm msg
+                                                    user_content = None # Już dodane
+                                                    model_resp_content = None # Już dodane
+
+                                                    action = 'book' # Ustaw akcję na następną iterację
+                                                    extracted_iso_slot = proposed_start # Przekaż datę
+                                                    # Stan docelowy po udanej rezerwacji to GATHERING_INFO
+                                                    next_state = STATE_GATHERING_INFO
+                                                    # Przygotuj dane do kontekstu GATHERING_INFO
+                                                    prof = get_user_profile(sender_id)
+                                                    context_data_to_save = {
+                                                        'booked_slot_iso': proposed_start.isoformat(),
+                                                        'booked_slot_formatted': format_slot_for_user(proposed_start),
+                                                        'known_first_name': prof.get('first_name', '') if prof else '',
+                                                        'known_last_name': prof.get('last_name', '') if prof else '',
+                                                        'known_grade': '',
+                                                        'known_level': ''
+                                                    }
+                                                    # OZNACZ, że trzeba od razu wywołać AI zbierające PO udanej rezerwacji
+                                                    trigger_gathering_ai_immediately = True
+                                                    booked_slot_for_gathering = proposed_start # Zapamiętaj slot dla triggera
+
+                                                    logging.debug("      Ustawiono akcję 'book', stan 'gathering_info' i flagę trigger_gathering.")
+                                                    continue # Kontynuuj pętlę, aby wykonać 'book'
+                                                else:
+                                                    logging.warning(f"      Weryfikacja KALENDARZA NIEUDANA! Slot {extracted_iso} został zajęty.")
+                                                    fail_msg = f"Ojej, wygląda na to, że termin {format_slot_for_user(proposed_start)} został właśnie zajęty! Przepraszam za zamieszanie. Spróbujmy znaleźć inny."
+                                                    msg_result = fail_msg
+                                                    model_resp_content = Content(role="model", parts=[Part.from_text(fail_msg)])
+                                                    next_state = STATE_SCHEDULING_ACTIVE
+                                                    slot_verification_failed = True
+                                                    context_data_to_save = {}
+
+                                            except ValueError:
+                                                logging.error(f"!!! BŁĄD: AI zwróciło nieprawidłowy format ISO w znaczniku: '{extracted_iso}'")
+                                                msg_result = "Przepraszam, wystąpił błąd techniczny przy przetwarzaniu zaproponowanego terminu. Spróbujmy jeszcze raz."
+                                                model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                                next_state = STATE_SCHEDULING_ACTIVE
+                                                context_data_to_save = {}
+                                            except Exception as verif_err:
+                                                 logging.error(f"!!! BŁĄD podczas weryfikacji slotu {extracted_iso}: {verif_err}", exc_info=True)
+                                                 msg_result = "Przepraszam, wystąpił nieoczekiwany błąd podczas sprawdzania dostępności terminu."
+                                                 model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                                 next_state = STATE_SCHEDULING_ACTIVE
+                                                 context_data_to_save = {}
+                                        else:
+                                            # AI kontynuuje rozmowę planującą
+                                            logging.info("      AI Planujące kontynuuje rozmowę (brak znacznika ISO).")
+                                            msg_result = ai_response_text
+                                            model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                            next_state = STATE_SCHEDULING_ACTIVE
+                                            # Nie resetujemy context_data_to_save
+                                    else:
+                                        logging.error("!!! BŁĄD: AI Planujące nie zwróciło odpowiedzi.")
+                                        msg_result = "Przepraszam, mam problem z systemem planowania. Spróbuj ponownie za chwilę."
+                                        model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                        next_state = STATE_GENERAL
+                                        context_data_to_save = {}
+                                else:
+                                    logging.warning(f"      Brak wolnych zakresów spełniających kryteria (w tym {MIN_BOOKING_LEAD_HOURS}h wyprzedzenia).")
+                                    no_slots_msg = f"Niestety, wygląda na to, że nie mam żadnych wolnych terminów w ciągu najbliższych {MAX_SEARCH_DAYS} dni, które można zarezerwować z odpowiednim wyprzedzeniem. Spróbuj ponownie później lub skontaktuj się z nami w inny sposób."
+                                    msg_result = no_slots_msg
+                                    model_resp_content = Content(role="model", parts=[Part.from_text(no_slots_msg)])
+                                    next_state = STATE_GENERAL
+                                    context_data_to_save = {}
+                            except Exception as schedule_err:
+                                logging.error(f"!!! KRYTYCZNY BŁĄD w bloku 'handle_scheduling': {schedule_err}", exc_info=True)
+                                msg_result = "Wystąpił nieoczekiwany błąd systemu podczas planowania. Przepraszam za problem."
                                 model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
                                 next_state = STATE_GENERAL
-                        else:
-                             logging.warning("handle_general wywołane bez user_content.")
-                             action = None
+                                context_data_to_save = {}
 
-                    if action == 'handle_scheduling':
-                        logging.debug("  >> Akcja: handle_scheduling")
-                        try:
-                            tz = _get_timezone()
-                            now = datetime.datetime.now(tz) # Pobierz aktualny czas tutaj
-                            search_start = now # Zaczynamy szukanie od teraz
-                            search_end_date = (search_start + datetime.timedelta(days=MAX_SEARCH_DAYS)).date()
-                            search_end = tz.localize(datetime.datetime.combine(search_end_date, datetime.time(WORK_END_HOUR, 0)))
+                        elif current_action == 'handle_gathering':
+                            logging.debug("  >> Wykonanie: handle_gathering")
+                            try:
+                                # Pobierz znane informacje z aktualnego kontekstu (context_data_to_save)
+                                known_info = {
+                                    'booked_slot_formatted': context_data_to_save.get('booked_slot_formatted', 'nieznany'),
+                                    'known_first_name': context_data_to_save.get('known_first_name', ''),
+                                    'known_last_name': context_data_to_save.get('known_last_name', ''),
+                                    'known_grade': context_data_to_save.get('known_grade', ''),
+                                    'known_level': context_data_to_save.get('known_level', '')
+                                }
+                                logging.debug(f"    Znane info przekazywane do AI (Gathering): {known_info}")
 
-                            logging.info(f"      Pobieranie wolnych zakresów (z filtrem 24h) od {search_start:%Y-%m-%d %H:%M} do {search_end:%Y-%m-%d %H:%M}")
-                            _simulate_typing(sender_id, MAX_TYPING_DELAY_SECONDS * 0.6)
-                            # get_free_time_ranges teraz wewnętrznie filtruje wg 24h
-                            free_ranges = get_free_time_ranges(TARGET_CALENDAR_ID, search_start, search_end)
-
-                            if free_ranges:
-                                logging.info(f"      Znaleziono {len(free_ranges)} zakresów spełniających warunki. Wywołanie AI Planującego...")
+                                # Jeśli to pierwsze wywołanie po rezerwacji, user_content jest None
                                 current_input_text = user_content.parts[0].text if user_content and user_content.parts else None
-                                # Wywołanie AI - już nie przekazujemy current_time_formatted
-                                ai_response_text = get_gemini_scheduling_response(
-                                    sender_id,
-                                    history_for_gemini,
-                                    current_input_text,
-                                    free_ranges
+                                if not current_input_text:
+                                     logging.info("      Pierwsze wywołanie AI zbierającego (brak inputu usera).")
+
+                                ai_response_text = get_gemini_gathering_response(
+                                    sender_id, history_for_gemini, current_input_text, known_info
                                 )
 
                                 if ai_response_text:
-                                    iso_match = re.search(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}(.*?){re.escape(SLOT_ISO_MARKER_SUFFIX)}", ai_response_text)
-                                    if iso_match:
-                                        extracted_iso = iso_match.group(1).strip()
-                                        logging.info(f"      AI Planujące zwróciło potencjalny finalny slot: {extracted_iso}")
-                                        text_for_user = re.sub(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}.*?{re.escape(SLOT_ISO_MARKER_SUFFIX)}", "", ai_response_text).strip()
-                                        text_for_user = re.sub(r'\s+', ' ', text_for_user).strip()
-
-                                        try:
-                                            proposed_start = datetime.datetime.fromisoformat(extracted_iso)
-                                            if proposed_start.tzinfo is None: proposed_start = tz.localize(proposed_start)
-                                            else: proposed_start = proposed_start.astimezone(tz)
-
-                                            # --- USUNIĘTO WERYFIKACJĘ 24h TUTAJ ---
-
-                                            # --- Weryfikacja dostępności w kalendarzu ---
-                                            logging.info(f"      Weryfikacja dostępności slotu w kalendarzu: {format_slot_for_user(proposed_start)}")
-                                            if is_slot_actually_free(proposed_start, TARGET_CALENDAR_ID):
-                                                logging.info("      Weryfikacja OK! Slot jest wolny. Przystępowanie do rezerwacji.")
-                                                confirm_msg = text_for_user if text_for_user else f"Dobrze, potwierdzam termin {format_slot_for_user(proposed_start)}. Zapisuję..."
-                                                send_message(sender_id, confirm_msg)
-                                                model_resp_content = Content(role="model", parts=[Part.from_text(confirm_msg)])
-                                                # Zapis historii przed rezerwacją, ale ze stanem GENERAL (bo rezerwacja jest ostatnim krokiem)
-                                                temp_history = list(history_for_gemini)
-                                                if user_content: temp_history.append(user_content)
-                                                temp_history.append(model_resp_content)
-                                                save_history(sender_id, temp_history, context_to_save={'type': STATE_GENERAL}) # Zapisz stan jako generalny
-
-                                                action = 'book'
-                                                extracted_iso_slot = proposed_start
-                                                next_state = STATE_GENERAL # Po rezerwacji wracamy do stanu ogólnego
-                                                user_content = None # Już zapisane
-                                                model_resp_content = None # Już zapisane
-                                                logging.debug("      Przekierowanie do akcji 'book'...")
-                                            else:
-                                                logging.warning(f"      Weryfikacja KALENDARZA NIEUDANA! Slot {extracted_iso} został zajęty.")
-                                                fail_msg = f"Ojej, wygląda na to, że termin {format_slot_for_user(proposed_start)} został właśnie zajęty! Przepraszam za zamieszanie. Spróbujmy znaleźć inny."
-                                                msg_result = fail_msg
-                                                model_resp_content = Content(role="model", parts=[Part.from_text(fail_msg)])
-                                                next_state = STATE_SCHEDULING_ACTIVE
-                                                slot_verification_failed = True
-
-                                        except ValueError:
-                                            logging.error(f"!!! BŁĄD: AI zwróciło nieprawidłowy format ISO w znaczniku: '{extracted_iso}'")
-                                            msg_result = "Przepraszam, wystąpił błąd techniczny przy przetwarzaniu zaproponowanego terminu. Spróbujmy jeszcze raz."
-                                            model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
-                                            next_state = STATE_SCHEDULING_ACTIVE
-                                        except Exception as verif_err:
-                                             logging.error(f"!!! BŁĄD podczas weryfikacji slotu {extracted_iso}: {verif_err}", exc_info=True)
-                                             msg_result = "Przepraszam, wystąpił nieoczekiwany błąd podczas sprawdzania dostępności terminu."
-                                             model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
-                                             next_state = STATE_SCHEDULING_ACTIVE
+                                    if INFO_GATHERED_MARKER in ai_response_text:
+                                        logging.info(f"      AI Zbierające zasygnalizowało koniec [{INFO_GATHERED_MARKER}].")
+                                        final_gathering_msg = ai_response_text.split(INFO_GATHERED_MARKER, 1)[0].strip()
+                                        if not final_gathering_msg:
+                                             final_gathering_msg = "Dziękuję za wszystkie informacje! Do zobaczenia na zajęciach."
+                                        msg_result = final_gathering_msg
+                                        model_resp_content = Content(role="model", parts=[Part.from_text(final_gathering_msg)])
+                                        next_state = STATE_GENERAL
+                                        context_data_to_save = {} # Reset kontekstu
                                     else:
-                                        # AI kontynuuje rozmowę
-                                        logging.info("      AI Planujące kontynuuje rozmowę (brak znacznika ISO).")
+                                        logging.info("      AI Zbierające kontynuuje rozmowę.")
                                         msg_result = ai_response_text
                                         model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
-                                        next_state = STATE_SCHEDULING_ACTIVE
+                                        next_state = STATE_GATHERING_INFO # Pozostajemy w tym stanie
+                                        # TODO: Opcjonalnie: próba wyciągnięcia danych z odpowiedzi i aktualizacja context_data_to_save
+                                        # np. jeśli user_content zawiera "Jan Kowalski, 1 liceum" -> zaktualizuj known_first_name, known_last_name, known_grade
                                 else:
-                                    logging.error("!!! BŁĄD: AI Planujące nie zwróciło odpowiedzi.")
-                                    msg_result = "Przepraszam, mam problem z systemem planowania. Spróbuj ponownie za chwilę."
+                                    logging.error("!!! BŁĄD: AI Zbierające nie zwróciło odpowiedzi.")
+                                    msg_result = "Przepraszam, wystąpił błąd systemowy. Spróbuj odpowiedzieć jeszcze raz."
                                     model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
-                                    next_state = STATE_GENERAL
-                            else:
-                                logging.warning(f"      Brak wolnych zakresów spełniających kryteria (w tym {MIN_BOOKING_LEAD_HOURS}h wyprzedzenia).")
-                                no_slots_msg = f"Niestety, wygląda na to, że nie mam żadnych wolnych terminów w ciągu najbliższych {MAX_SEARCH_DAYS} dni, które można zarezerwować z odpowiednim wyprzedzeniem. Spróbuj ponownie później lub skontaktuj się z nami w inny sposób."
-                                msg_result = no_slots_msg
-                                model_resp_content = Content(role="model", parts=[Part.from_text(no_slots_msg)])
-                                next_state = STATE_GENERAL
-                        except Exception as schedule_err:
-                            logging.error(f"!!! KRYTYCZNY BŁĄD w bloku 'handle_scheduling': {schedule_err}", exc_info=True)
-                            msg_result = "Wystąpił nieoczekiwany błąd systemu podczas planowania. Przepraszam za problem."
-                            model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
-                            next_state = STATE_GENERAL
+                                    next_state = STATE_GATHERING_INFO # Pozostajemy w stanie
 
-                    if action == 'book':
-                        logging.debug("  >> Akcja: book")
-                        # Historia i stan GENERAL zostały już zapisane wcześniej
-                        if extracted_iso_slot and isinstance(extracted_iso_slot, datetime.datetime):
-                            try:
-                                start_dt_obj = extracted_iso_slot
-                                end_dt_obj = start_dt_obj + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
-                                prof = get_user_profile(sender_id)
-                                user_name = prof.get('first_name', '') if prof else f"User_{sender_id[-4:]}"
-                                user_last_name = prof.get('last_name', '') if prof else ''
-                                event_desc = f"Rezerwacja przez Bota Facebook Messenger\nPSID: {sender_id}"
-                                if user_last_name: event_desc += f"\nNazwisko: {user_last_name}"
-
-                                ok, booking_msg = book_appointment( # Zmieniono nazwę zmiennej na booking_msg
-                                    TARGET_CALENDAR_ID, start_dt_obj, end_dt_obj,
-                                    summary=f"Korepetycje: {user_name}",
-                                    description=event_desc, user_name=user_name
-                                )
-
-                                if ok:
-                                    # Sukces rezerwacji - wysyłamy wiadomość z book_appointment
-                                    logging.info(f"      Rezerwacja terminu {start_dt_obj} zakończona sukcesem.")
-                                    msg_result = booking_msg # Ustawiamy wiadomość potwierdzającą
-                                    model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
-                                    next_state = STATE_GENERAL # Pozostajemy w stanie generalnym
-                                else:
-                                    # Błąd rezerwacji - wysyłamy wiadomość o błędzie, wracamy do planowania
-                                    logging.warning(f"      Rezerwacja terminu {start_dt_obj} nie powiodła się (zwrócono False z book_appointment).")
-                                    msg_result = booking_msg # Ustawiamy wiadomość o błędzie
-                                    next_state = STATE_SCHEDULING_ACTIVE # Wracamy do stanu planowania
-                                    error_info_for_ai = f"[SYSTEM: Próba rezerwacji terminu {format_slot_for_user(start_dt_obj)} nie powiodła się. Powód: {booking_msg}. Musisz znaleźć inny termin.]"
-                                    model_resp_content = Content(role="model", parts=[Part.from_text(booking_msg + "\n" + error_info_for_ai)])
-
-                            except Exception as e:
-                                logging.error(f"!!! BŁĄD podczas wykonywania akcji 'book': {e}", exc_info=True)
-                                msg_result = "Wystąpił krytyczny błąd podczas finalizowania rezerwacji. Skontaktuj się z nami bezpośrednio."
+                            except Exception as gather_err:
+                                logging.error(f"!!! KRYTYCZNY BŁĄD w bloku 'handle_gathering': {gather_err}", exc_info=True)
+                                msg_result = "Wystąpił nieoczekiwany błąd systemu podczas zbierania informacji. Przepraszam za problem."
                                 model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
                                 next_state = STATE_GENERAL
+                                context_data_to_save = {}
+
+                        elif current_action == 'book':
+                            logging.debug("  >> Wykonanie: book")
+                            # Historia i stan GATHERING powinny być już ustawione
+                            if extracted_iso_slot and isinstance(extracted_iso_slot, datetime.datetime):
+                                try:
+                                    start_dt_obj = extracted_iso_slot
+                                    end_dt_obj = start_dt_obj + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+                                    prof = get_user_profile(sender_id)
+                                    user_name = prof.get('first_name', '') if prof else f"User_{sender_id[-4:]}"
+                                    user_last_name = prof.get('last_name', '') if prof else ''
+                                    event_desc = f"Rezerwacja przez Bota Facebook Messenger\nPSID: {sender_id}"
+                                    if user_last_name: event_desc += f"\nNazwisko: {user_last_name}"
+                                    # Można dodać info z context_data_to_save do opisu
+                                    event_desc += f"\nSlot: {context_data_to_save.get('booked_slot_formatted', 'b/d')}"
+                                    event_desc += f"\nImię ucznia: {context_data_to_save.get('known_first_name', 'b/d')}"
+                                    event_desc += f"\nNazwisko ucznia: {context_data_to_save.get('known_last_name', 'b/d')}"
+
+                                    ok, booking_error_msg = book_appointment(
+                                        TARGET_CALENDAR_ID, start_dt_obj, end_dt_obj,
+                                        summary=f"Korepetycje: {user_name}",
+                                        description=event_desc, user_name=user_name
+                                    )
+
+                                    if ok:
+                                        logging.info(f"      Rezerwacja terminu {start_dt_obj} zakończona sukcesem.")
+                                        # Sukces - nie wysyłamy nic, stan to GATHERING, AI zbierające zostanie wywołane
+                                        msg_result = None
+                                        model_resp_content = None
+                                        # next_state i context_data_to_save są już ustawione na GATHERING
+                                        if trigger_gathering_ai_immediately:
+                                             action = 'handle_gathering' # Ustaw akcję na następną iterację
+                                             logging.debug("      Przekierowanie do handle_gathering...")
+                                             continue # Kontynuuj pętlę, aby wykonać handle_gathering
+                                    else:
+                                        logging.warning(f"      Rezerwacja terminu {start_dt_obj} nie powiodła się (mimo weryfikacji!).")
+                                        msg_result = booking_error_msg
+                                        next_state = STATE_SCHEDULING_ACTIVE # Wróć do planowania
+                                        error_info_for_ai = f"[SYSTEM: Próba rezerwacji terminu {format_slot_for_user(start_dt_obj)} nie powiodła się. Powód: {booking_error_msg}. Musisz znaleźć inny termin.]"
+                                        model_resp_content = Content(role="model", parts=[Part.from_text(booking_error_msg + "\n" + error_info_for_ai)])
+                                        context_data_to_save = {}
+                                        trigger_gathering_ai_immediately = False # Anuluj trigger
+
+                                except Exception as e:
+                                    logging.error(f"!!! BŁĄD podczas wykonywania akcji 'book': {e}", exc_info=True)
+                                    msg_result = "Wystąpił krytyczny błąd podczas finalizowania rezerwacji. Skontaktuj się z nami bezpośrednio."
+                                    model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                    next_state = STATE_GENERAL
+                                    context_data_to_save = {}
+                                    trigger_gathering_ai_immediately = False
+                            else:
+                                logging.error("!!! BŁĄD LOGIKI: Akcja 'book' wywołana bez prawidłowego 'extracted_iso_slot'!")
+                                msg_result = "Wystąpił wewnętrzny błąd systemu rezerwacji (brak daty)."
+                                model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                next_state = STATE_GENERAL
+                                context_data_to_save = {}
+                                trigger_gathering_ai_immediately = False
+
+                        elif current_action == 'send_info':
+                             logging.debug("  >> Wykonanie: send_info")
+                             if msg_result:
+                                  model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                             else:
+                                  logging.warning("Akcja 'send_info' bez wiadomości do wysłania.")
+                             # next_state i context_data_to_save powinny być już ustawione
+                             # action pozostaje None, pętla się zakończy
+
                         else:
-                            logging.error("!!! BŁĄD LOGIKI: Akcja 'book' wywołana bez prawidłowego 'extracted_iso_slot'!")
-                            msg_result = "Wystąpił wewnętrzny błąd systemu rezerwacji (brak daty)."
-                            model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
-                            next_state = STATE_GENERAL
-
-                    if action == 'send_info':
-                         logging.debug("  >> Akcja: send_info")
-                         if msg_result:
-                              model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
-                         else:
-                              logging.warning("Akcja 'send_info' bez wiadomości do wysłania.")
+                             logging.warning(f"   Nieznana lub nieobsługiwana akcja '{current_action}'. Zakończenie pętli.")
+                             break # Zakończ pętlę while
 
 
-                    # --- WYSYŁANIE ODPOWIEDZI I ZAPIS STANU ---
-                    final_context_to_save = {'type': next_state}
+                    # --- WYSYŁANIE ODPOWIEDZI I ZAPIS STANU (po zakończeniu pętli akcji) ---
+                    final_context_to_save_dict = {'type': next_state, **context_data_to_save}
 
+                    # Wysyłanie wiadomości, jeśli została przygotowana w ostatniej akcji
                     if msg_result:
                         send_message(sender_id, msg_result)
                         if not model_resp_content:
                              logging.warning(f"Wiadomość '{msg_result[:50]}...' została wysłana, ale nie ustawiono model_resp_content!")
                              model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
-                    elif action and action not in ['book']:
-                        logging.warning(f"    Akcja '{action}' zakończona bez wiadomości do wysłania użytkownikowi.")
+                    elif current_action and current_action not in ['book']: # 'book' ma własną logikę
+                        logging.warning(f"    Akcja '{current_action}' zakończona bez wiadomości do wysłania użytkownikowi.")
 
-                    should_save = bool(user_content) or bool(model_resp_content) or (current_state != next_state) or slot_verification_failed
+                    # Zapis historii i stanu, jeśli coś się zmieniło LUB jeśli weryfikacja slotu się nie udała
+                    should_save = bool(user_content) or bool(model_resp_content) or (context != final_context_to_save_dict) or slot_verification_failed
 
                     if should_save:
-                        history_to_save = list(history)
+                        history_to_save = list(history_for_gemini) # Używamy historii modyfikowanej w pętli
+                        # Upewnijmy się, że ostatnie wiadomości (jeśli były) są dodane
+                        # Te warunki są na wszelki wypadek, bo powinny być None jeśli zostały dodane wcześniej
                         if user_content: history_to_save.append(user_content)
                         if model_resp_content: history_to_save.append(model_resp_content)
 
@@ -1351,8 +1456,9 @@ def webhook_handle():
                         if len(history_to_save) > max_hist_len:
                              history_to_save = history_to_save[-max_hist_len:]
 
-                        logging.info(f"Zapisywanie historii ({len(history_to_save)} wiad.). Nowy stan: {final_context_to_save}")
-                        save_history(sender_id, history_to_save, context_to_save=final_context_to_save)
+                        logging.info(f"Zapisywanie historii ({len(history_to_save)} wiad.). Nowy stan: {final_context_to_save_dict.get('type')}")
+                        context_for_actual_save = final_context_to_save_dict if final_context_to_save_dict.get('type') != STATE_GENERAL else None
+                        save_history(sender_id, history_to_save, context_to_save=context_for_actual_save)
                     else:
                         logging.debug("    Brak zmian w historii lub stanie - pomijanie zapisu.")
 
@@ -1387,7 +1493,7 @@ if __name__ == '__main__':
     logging.getLogger('urllib3.connectionpool').setLevel(logging.WARNING)
     logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
-    print("\n" + "="*60 + "\n--- START KONFIGURACJI BOTA (Tryb Autonomicznego Planowania + Filtr 24h w Python) ---") # Zmieniono opis
+    print("\n" + "="*60 + "\n--- START KONFIGURACJI BOTA (Tryb Autonomiczny + Filtr 24h + Zbieranie Info) ---")
     print(f"  * Poziom logowania: {logging.getLevelName(log_level)}")
     print("-" * 60)
     print("  Konfiguracja Facebook:")
@@ -1416,7 +1522,7 @@ if __name__ == '__main__':
     print(f"    Strefa czasowa: {CALENDAR_TIMEZONE} (Obiekt TZ: {_get_timezone()})")
     print(f"    Czas trwania wizyty: {APPOINTMENT_DURATION_MINUTES} min")
     print(f"    Godziny pracy: {WORK_START_HOUR}:00 - {WORK_END_HOUR}:00")
-    print(f"    Min. wyprzedzenie rezerwacji (wymuszane w kodzie): {MIN_BOOKING_LEAD_HOURS} godz.") # Zmieniono opis
+    print(f"    Min. wyprzedzenie rezerwacji (wymuszane w kodzie): {MIN_BOOKING_LEAD_HOURS} godz.")
     print(f"    Maks. zakres szukania: {MAX_SEARCH_DAYS} dni")
     print(f"    Plik klucza API: {SERVICE_ACCOUNT_FILE} ({'Znaleziono' if os.path.exists(SERVICE_ACCOUNT_FILE) else 'BRAK!!! Funkcjonalność kalendarza niedostępna.'})")
     cal_service = get_calendar_service()
