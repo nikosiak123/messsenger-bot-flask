@@ -959,6 +959,7 @@ SYSTEM_INSTRUCTION_GENERAL = """Jesteś przyjaznym i pomocnym asystentem klienta
 # ... (inne definicje instrukcji) ...
 
 # --- NOWA INSTRUKCJA GATHERING ---
+# --- ZMODYFIKOWANA INSTRUKCJA GATHERING ---
 SYSTEM_INSTRUCTION_GATHERING = """Twoim zadaniem jest zebranie dodatkowych informacji o uczniu po tym, jak termin korepetycji został już zarezerwowany.
 
 **Kontekst:**
@@ -977,12 +978,14 @@ SYSTEM_INSTRUCTION_GATHERING = """Twoim zadaniem jest zebranie dodatkowych infor
     *   **Klasa**, do której uczęszcza uczeń (np. "7 klasa podstawówki", "1 klasa liceum", "3 klasa technikum").
     *   **Poziom nauczania** (podstawowy czy rozszerzony) - **zapytaj o to TYLKO jeśli z podanej klasy wynika, że jest to liceum lub technikum**. Dla podstawówki lub wcześniejszych etapów nie pytaj o poziom.
 3.  **Prowadź rozmowę:** Zadawaj pytania pojedynczo lub połącz kilka, jeśli brakuje więcej danych (np. "Poproszę jeszcze o imię i nazwisko ucznia oraz klasę."). Bądź miły i konwersacyjny.
-4.  **Zakończ po zebraniu danych:** Kiedy uznasz, że masz już **wszystkie wymagane informacje** (Imię, Nazwisko, Klasa i ewentualnie Poziom dla szkół średnich), zakończ swoją ostatnią odpowiedź (np. podziękowanie) **DOKŁADNIE** znacznikiem: `{info_gathered_marker}`.
-5.  **NIE dodawaj znacznika**, jeśli nadal brakuje którejś z wymaganych informacji.
+4.  **Zakończ po zebraniu danych:** Kiedy uznasz, że masz już **wszystkie wymagane informacje** (Imię, Nazwisko, Klasa i ewentualnie Poziom dla szkół średnich), Twoja ostatnia odpowiedź **MUSI** zawierać **DOKŁADNIE** następujący tekst (bez żadnych dodatków przed lub po, oprócz znacznika na końcu):
+    "Dziękuję za informacje. Proszę jeszcze potwierdzić chęć udziału w zajęciach wysyłając wiadomość \"POTWIERDZAM\" na ten profil (jest to profil dedykowany do komunikacji w sprawie zajęć): https://www.facebook.com/profile.php?id=61576135251276"
+    Na samym końcu tej wiadomości dodaj **DOKŁADNIE** znacznik: `{info_gathered_marker}`.
+5.  **NIE dodawaj znacznika**, jeśli nadal brakuje którejś z wymaganych informacji. Kontynuuj zadawanie pytań.
 
-**Przykład:** Jeśli znane jest tylko imię "Jan", zapytaj o nazwisko i klasę. Jeśli użytkownik odpowie "Kowalski, 2 liceum", zapytaj następnie o poziom (podstawowy/rozszerzony). Dopiero po uzyskaniu tej informacji, podziękuj i dodaj znacznik `{info_gathered_marker}`.
+**Przykład:** Jeśli znane jest tylko imię "Jan", zapytaj o nazwisko i klasę. Jeśli użytkownik odpowie "Kowalski, 2 liceum", zapytaj następnie o poziom (podstawowy/rozszerzony). Dopiero po uzyskaniu tej informacji, wyślij **dokładnie** tekst z punktu 4 i dodaj na końcu znacznik `{info_gathered_marker}`.
 
-**Pamiętaj:** Bądź precyzyjny w zadawanych pytaniach. Znacznik `{info_gathered_marker}` oznacza, że zebrałeś komplet danych.
+**Pamiętaj:** Bądź precyzyjny w zadawanych pytaniach. Znacznik `{info_gathered_marker}` oznacza, że zebrałeś komplet danych i wysłałeś finalną instrukcję potwierdzenia.
 """.format(
     booked_slot_formatted="{booked_slot_formatted}", # Placeholder
     known_first_name="{known_first_name}",         # Placeholder
@@ -991,6 +994,7 @@ SYSTEM_INSTRUCTION_GATHERING = """Twoim zadaniem jest zebranie dodatkowych infor
     known_level="{known_level}",                   # Placeholder
     info_gathered_marker=INFO_GATHERED_MARKER
 )
+# --- KONIEC ZMODYFIKOWANEJ INSTRUKCJI ---
 # --- KONIEC NOWEJ INSTRUKCJI ---
 
 # ... (reszta kodu, w tym definicja get_gemini_gathering_response) ...
