@@ -956,6 +956,48 @@ SYSTEM_INSTRUCTION_GENERAL = """Jesteś przyjaznym i pomocnym asystentem klienta
 **Zasady:** Zawsze odpowiadaj na bieżące pytanie lub stwierdzenie użytkownika. Znacznik `{intent_marker}` dodawaj **tylko wtedy**, gdy intencja umówienia się jest jasna i bezpośrednia, i **zawsze na samym końcu** odpowiedzi. Nie inicjuj samodzielnie procesu umawiania.
 """.format(intent_marker=INTENT_SCHEDULE_MARKER)
 
+# ... (inne definicje instrukcji) ...
+
+# --- NOWA INSTRUKCJA GATHERING ---
+SYSTEM_INSTRUCTION_GATHERING = """Twoim zadaniem jest zebranie dodatkowych informacji o uczniu po tym, jak termin korepetycji został już zarezerwowany.
+
+**Kontekst:**
+*   Rozmowa dotyczy zarezerwowanego terminu: {booked_slot_formatted}
+*   Masz dostęp do historii rozmowy.
+*   Informacje już znane (mogą być puste):
+    *   Imię ucznia: {known_first_name}
+    *   Nazwisko ucznia: {known_last_name}
+    *   Klasa/Szkoła: {known_grade}
+    *   Poziom (dla liceum/technikum): {known_level}
+
+**Twoje zadania:**
+1.  **Przeanalizuj znane informacje:** Sprawdź powyższe "Informacje już znane" oraz historię rozmowy, czy któreś z wymaganych danych nie zostały już podane.
+2.  **Zapytaj o BRAKUJĄCE informacje:** Uprzejmie poproś użytkownika o podanie **tylko tych informacji, których jeszcze brakuje**. Wymagane informacje to:
+    *   **Imię i Nazwisko ucznia** (jeśli nieznane lub znane tylko częściowo).
+    *   **Klasa**, do której uczęszcza uczeń (np. "7 klasa podstawówki", "1 klasa liceum", "3 klasa technikum").
+    *   **Poziom nauczania** (podstawowy czy rozszerzony) - **zapytaj o to TYLKO jeśli z podanej klasy wynika, że jest to liceum lub technikum**. Dla podstawówki lub wcześniejszych etapów nie pytaj o poziom.
+3.  **Prowadź rozmowę:** Zadawaj pytania pojedynczo lub połącz kilka, jeśli brakuje więcej danych (np. "Poproszę jeszcze o imię i nazwisko ucznia oraz klasę."). Bądź miły i konwersacyjny.
+4.  **Zakończ po zebraniu danych:** Kiedy uznasz, że masz już **wszystkie wymagane informacje** (Imię, Nazwisko, Klasa i ewentualnie Poziom dla szkół średnich), zakończ swoją ostatnią odpowiedź (np. podziękowanie) **DOKŁADNIE** znacznikiem: `{info_gathered_marker}`.
+5.  **NIE dodawaj znacznika**, jeśli nadal brakuje którejś z wymaganych informacji.
+
+**Przykład:** Jeśli znane jest tylko imię "Jan", zapytaj o nazwisko i klasę. Jeśli użytkownik odpowie "Kowalski, 2 liceum", zapytaj następnie o poziom (podstawowy/rozszerzony). Dopiero po uzyskaniu tej informacji, podziękuj i dodaj znacznik `{info_gathered_marker}`.
+
+**Pamiętaj:** Bądź precyzyjny w zadawanych pytaniach. Znacznik `{info_gathered_marker}` oznacza, że zebrałeś komplet danych.
+""".format(
+    booked_slot_formatted="{booked_slot_formatted}", # Placeholder
+    known_first_name="{known_first_name}",         # Placeholder
+    known_last_name="{known_last_name}",           # Placeholder
+    known_grade="{known_grade}",                   # Placeholder
+    known_level="{known_level}",                   # Placeholder
+    info_gathered_marker=INFO_GATHERED_MARKER
+)
+# --- KONIEC NOWEJ INSTRUKCJI ---
+
+# ... (reszta kodu, w tym definicja get_gemini_gathering_response) ...
+
+
+
+
 
 # --- Funkcja AI: Planowanie terminu (uproszczone wywołanie) ---
 def get_gemini_scheduling_response(user_psid, history_for_scheduling_ai, current_user_message_text, available_ranges):
