@@ -178,6 +178,10 @@ def load_history(user_psid):
     history = []
     context = {}
     valid_states = [STATE_GENERAL, STATE_SCHEDULING_ACTIVE, STATE_GATHERING_INFO] # Dodano nowy stan
+    if 'type' not in context or context.get('type') not in valid_states:
+        # TEN WARUNEK ZOSTAŁ SPEŁNIONY!
+        logging.warning(f"[{user_psid}] Nieprawidłowy lub brak stanu w ostatnim kontekście. Reset do {STATE_GENERAL}.")
+        context = {'type': STATE_GENERAL} # Reset do stanu domyślnego
 
     if not os.path.exists(filepath):
         return history, {'type': STATE_GENERAL}
