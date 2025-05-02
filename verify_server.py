@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# verify_server.py (Wersja z autonomicznym AI + filtrowanie 24h w Pythonie)
+# verify_server.py (Wersja z autonomicznym AI + Filtr 24h + Zbieranie Info)
 
 from flask import Flask, request, Response
 import os
@@ -57,27 +57,26 @@ WORK_START_HOUR = 7
 WORK_END_HOUR = 22
 TARGET_CALENDAR_ID = 'f19e189826b9d6e36950da347ac84d5501ecbd6bed0d76c8641be61a67749c67@group.calendar.google.com'
 MAX_SEARCH_DAYS = 14
-MIN_BOOKING_LEAD_HOURS = 24 # Minimalne wyprzedzenie rezerwacji w godzinach
+MIN_BOOKING_LEAD_HOURS = 24
 
 # --- Znaczniki i Stany ---
 INTENT_SCHEDULE_MARKER = "[INTENT_SCHEDULE]"
 SLOT_ISO_MARKER_PREFIX = "[SLOT_ISO:"
 SLOT_ISO_MARKER_SUFFIX = "]"
+INFO_GATHERED_MARKER = "[INFO_GATHERED]" # Nowy znacznik
 STATE_GENERAL = "general"
 STATE_SCHEDULING_ACTIVE = "scheduling_active"
+STATE_GATHERING_INFO = "gathering_info" # Nowy stan
 
 # --- Ustawienia Modelu Gemini ---
 GENERATION_CONFIG_SCHEDULING = GenerationConfig(
-    temperature=0.5,
-    top_p=0.95,
-    top_k=40,
-    max_output_tokens=512,
+    temperature=0.5, top_p=0.95, top_k=40, max_output_tokens=512,
+)
+GENERATION_CONFIG_GATHERING = GenerationConfig( # Konfiguracja dla zbierania info
+    temperature=0.4, top_p=0.95, top_k=40, max_output_tokens=256,
 )
 GENERATION_CONFIG_DEFAULT = GenerationConfig(
-    temperature=0.7,
-    top_p=0.95,
-    top_k=40,
-    max_output_tokens=1024,
+    temperature=0.7, top_p=0.95, top_k=40, max_output_tokens=1024,
 )
 
 # --- Bezpieczeństwo AI ---
@@ -119,13 +118,8 @@ except Exception as e:
     print("!!! Funkcjonalność AI będzie niedostępna !!!", flush=True)
 
 # =====================================================================
-# === FUNKCJE POMOCNICZE (Bez większych zmian) ========================
+# === FUNKCJE POMOCNICZE ==============================================
 # =====================================================================
-# Funkcje ensure_dir, get_user_profile, load_history, save_history,
-# _get_timezone, get_calendar_service, parse_event_time
-# POZOSTAJĄ BEZ ZMIAN (zakładając, że poprawka z poprzedniej odpowiedzi
-# dla parse_event_time w get_free_time_ranges została zastosowana)
-# ... (pominięto dla zwięzłości - wklej tutaj poprzednie wersje tych funkcji) ...
 def ensure_dir(directory):
     """Tworzy katalog, jeśli nie istnieje."""
     try:
@@ -177,18 +171,22 @@ def get_user_profile(psid):
         logging.error(f"Niespodziewany BŁĄD podczas pobierania profilu {psid}: {e}", exc_info=True)
         return None
 
+# Zaktualizowana funkcja load_history
 def load_history(user_psid):
     """Wczytuje historię i ostatni kontekst/stan z pliku."""
     filepath = os.path.join(HISTORY_DIR, f"{user_psid}.json")
     history = []
     context = {}
+    valid_states = [STATE_GENERAL, STATE_SCHEDULING_ACTIVE, STATE_GATHERING_INFO] # Dodano nowy stan
+
     if not os.path.exists(filepath):
-        return history, {'type': STATE_GENERAL} # Zwróć domyślny stan, jeśli plik nie istnieje
+        return history, {'type': STATE_GENERAL}
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
             history_data = json.load(f)
             if isinstance(history_data, list):
                 last_system_message_index = -1
+                # Szukamy ostatniego wpisu systemowego, który jest słownikiem i ma klucz 'type'
                 for i, msg_data in enumerate(reversed(history_data)):
                     if isinstance(msg_data, dict) and msg_data.get('role') == 'system' and 'type' in msg_data:
                         last_system_message_index = len(history_data) - 1 - i
@@ -209,17 +207,20 @@ def load_history(user_psid):
                                 break
                         if valid_parts and text_parts:
                             history.append(Content(role=msg_data['role'], parts=text_parts))
+                    # Sprawdzamy, czy to jest *ten* ostatni wpis systemowy z poprawnym typem
                     elif isinstance(msg_data, dict) and msg_data.get('role') == 'system' and 'type' in msg_data:
-                        if i == last_system_message_index:
+                        if i == last_system_message_index and msg_data.get('type') in valid_states:
                             context = msg_data
                             logging.debug(f"[{user_psid}] Odczytano AKTYWNY kontekst: {context}")
                         else:
-                            logging.debug(f"[{user_psid}] Pominięto stary kontekst (idx {i}): {msg_data}")
+                            # Jeśli to nie ostatni kontekst lub typ jest nieznany, ignorujemy go
+                            logging.debug(f"[{user_psid}] Pominięto stary lub nieprawidłowy kontekst (idx {i}): {msg_data}")
                     else:
                         logging.warning(f"Ostrz. [{user_psid}]: Pominięto niepoprawną wiadomość/kontekst (idx {i}): {msg_data}")
 
-                if 'type' not in context or context['type'] not in [STATE_GENERAL, STATE_SCHEDULING_ACTIVE]:
-                    logging.warning(f"[{user_psid}] Nieprawidłowy stan '{context.get('type')}' wczytany z pliku. Reset do {STATE_GENERAL}.")
+                # Upewnij się, że stan jest poprawny, domyślnie general
+                if 'type' not in context or context.get('type') not in valid_states:
+                    logging.warning(f"[{user_psid}] Nieprawidłowy lub brak stanu w ostatnim kontekście. Reset do {STATE_GENERAL}.")
                     context = {'type': STATE_GENERAL}
 
                 logging.info(f"[{user_psid}] Wczytano historię: {len(history)} wiad. Stan: {context.get('type', STATE_GENERAL)}")
@@ -242,6 +243,7 @@ def load_history(user_psid):
         logging.error(f"BŁĄD [{user_psid}] wczytywania historii: {e}", exc_info=True)
         return [], {'type': STATE_GENERAL}
 
+# Zaktualizowana funkcja save_history
 def save_history(user_psid, history, context_to_save=None):
     """Zapisuje historię i aktualny kontekst/stan."""
     ensure_dir(HISTORY_DIR)
@@ -249,7 +251,6 @@ def save_history(user_psid, history, context_to_save=None):
     temp_filepath = f"{filepath}.tmp"
     history_data = []
     try:
-        # Filtrujemy tylko wiadomości user/model do zapisu jako historia
         history_to_process = [m for m in history if isinstance(m, Content) and m.role in ('user', 'model')]
         max_messages_to_save = MAX_HISTORY_TURNS * 2
         if len(history_to_process) > max_messages_to_save:
@@ -264,21 +265,23 @@ def save_history(user_psid, history, context_to_save=None):
              else:
                 logging.warning(f"Ostrz. [{user_psid}]: Pomijanie nieprawidłowego obiektu historii podczas zapisu: {type(msg)}")
 
-        # Zapisujemy kontekst tylko jeśli jest to stan inny niż generalny
-        if context_to_save and isinstance(context_to_save, dict) and context_to_save.get('type') and context_to_save['type'] != STATE_GENERAL:
-             context_to_save['role'] = 'system' # Dodajemy rolę dla spójności
-             history_data.append(context_to_save) # Dodajemy kontekst na końcu listy
-             logging.debug(f"[{user_psid}] Dodano kontekst {context_to_save['type']} do zapisu.")
+        current_state_to_save = context_to_save.get('type', STATE_GENERAL) if context_to_save else STATE_GENERAL
+        if context_to_save and isinstance(context_to_save, dict) and current_state_to_save != STATE_GENERAL:
+             context_to_save['role'] = 'system'
+             # Usuwamy klucz 'role' przed zapisem, bo jest tylko pomocniczy
+             context_copy = context_to_save.copy()
+             # context_copy.pop('role', None) # Nie usuwamy już roli
+             history_data.append(context_copy)
+             logging.debug(f"[{user_psid}] Dodano kontekst {current_state_to_save} do zapisu: {context_copy}")
         else:
              logging.debug(f"[{user_psid}] Zapis bez kontekstu (stan general).")
 
         with open(temp_filepath, 'w', encoding='utf-8') as f:
             json.dump(history_data, f, ensure_ascii=False, indent=2)
-        os.replace(temp_filepath, filepath) # Atomowe zastąpienie pliku
-        logging.info(f"[{user_psid}] Zapisano historię/kontekst ({len(history_data)} wpisów, stan: {context_to_save.get('type', STATE_GENERAL) if context_to_save else STATE_GENERAL})")
+        os.replace(temp_filepath, filepath)
+        logging.info(f"[{user_psid}] Zapisano historię/kontekst ({len(history_data)} wpisów, stan: {current_state_to_save})")
     except Exception as e:
         logging.error(f"BŁĄD [{user_psid}] zapisu historii/kontekstu: {e}", exc_info=True)
-        # Próba usunięcia pliku tymczasowego, jeśli istnieje
         if os.path.exists(temp_filepath):
             try:
                 os.remove(temp_filepath)
@@ -359,7 +362,6 @@ def parse_event_time(event_time_data, default_tz):
         logging.error(f"Nieoczekiwany błąd podczas parsowania czasu '{dt_str}': {e}", exc_info=True)
         return None
 
-# --- ZMODYFIKOWANA FUNKCJA ---
 def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
     """Pobiera listę wolnych zakresów czasowych z kalendarza, filtrując je wg 24h wyprzedzenia."""
     service = get_calendar_service()
@@ -397,19 +399,13 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
         busy_times_raw = calendar_data.get('busy', [])
         busy_times = []
         for busy_slot in busy_times_raw:
-            start_str = busy_slot.get('start') # Pobierz string startu
-            end_str = busy_slot.get('end')     # Pobierz string końca
-
-            # Sprawdź, czy pobrano stringi
+            start_str = busy_slot.get('start')
+            end_str = busy_slot.get('end')
             if isinstance(start_str, str) and isinstance(end_str, str):
-                # Utwórz słowniki oczekiwane przez parse_event_time
                 start_data_dict = {'dateTime': start_str}
                 end_data_dict = {'dateTime': end_str}
-
-                # Przekaż utworzone słowniki do parsowania
                 busy_start = parse_event_time(start_data_dict, tz)
                 busy_end = parse_event_time(end_data_dict, tz)
-
                 if busy_start and busy_end and busy_start < busy_end:
                     busy_start_clipped = max(busy_start, start_datetime)
                     busy_end_clipped = min(busy_end, end_datetime)
@@ -418,7 +414,6 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
                 else:
                     logging.warning(f"Ostrz.: Pominięto nieprawidłowy lub niesparsowany zajęty czas (po próbie parsowania): start={start_str}, end={end_str}")
             else:
-                 # Logujemy, jeśli struktura odpowiedzi z API jest inna niż oczekiwana (np. brakuje klucza 'start'/'end')
                  logging.warning(f"Ostrz.: Pominięto zajęty slot o nieoczekiwanej strukturze danych (brak stringów start/end): {busy_slot}")
     except HttpError as error:
         logging.error(f'Błąd HTTP API Freebusy: {error.resp.status} {error.resp.reason}', exc_info=True)
@@ -427,7 +422,6 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
         logging.error(f"Nieoczekiwany błąd podczas zapytania Freebusy: {e}", exc_info=True)
         return []
 
-    # Sortowanie i scalanie (bez zmian)
     busy_times.sort(key=lambda x: x['start'])
     merged_busy_times = []
     for busy in busy_times:
@@ -436,7 +430,6 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
         else:
             merged_busy_times[-1]['end'] = max(merged_busy_times[-1]['end'], busy['end'])
 
-    # Generowanie wolnych zakresów (bez zmian)
     free_ranges = []
     current_time = start_datetime
     for busy_slot in merged_busy_times:
@@ -446,7 +439,6 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
     if current_time < end_datetime:
         free_ranges.append({'start': current_time, 'end': end_datetime})
 
-    # Filtrowanie wolnych zakresów: godziny pracy i minimalny czas trwania (bez zmian)
     intermediate_free_slots = []
     min_duration_delta = datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
     for free_range in free_ranges:
@@ -472,7 +464,6 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
             current_segment_start = max(work_day_end, next_day_start)
             current_segment_start = max(current_segment_start, range_start)
 
-    # --- NOWE: Filtrowanie wg 24h wyprzedzenia ---
     final_filtered_slots = []
     min_start_time = now + datetime.timedelta(hours=MIN_BOOKING_LEAD_HOURS)
     logging.debug(f"Minimalny czas startu po filtrze {MIN_BOOKING_LEAD_HOURS}h: {min_start_time:%Y-%m-%d %H:%M %Z}")
@@ -480,22 +471,14 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
     for slot in intermediate_free_slots:
         original_start = slot['start']
         original_end = slot['end']
-
-        # Przypadek 1: Cały slot zaczyna się wystarczająco późno
         if original_start >= min_start_time:
-            # Sprawdzenie długości (już powinno być OK, ale dla pewności)
             if (original_end - original_start) >= min_duration_delta:
                 final_filtered_slots.append(slot)
-        # Przypadek 2: Slot zaczyna się za wcześnie, ale kończy wystarczająco późno
         elif original_end > min_start_time:
-            # Przytnij początek slotu do minimalnego czasu startu
             adjusted_start = min_start_time
-            # Sprawdź, czy pozostała część jest wystarczająco długa
             if (original_end - adjusted_start) >= min_duration_delta:
-                # Dodaj zmodyfikowany slot
                 final_filtered_slots.append({'start': adjusted_start, 'end': original_end})
                 logging.debug(f"Zmodyfikowano slot {original_start:%H:%M}-{original_end:%H:%M} na {adjusted_start:%H:%M}-{original_end:%H:%M} z powodu reguły {MIN_BOOKING_LEAD_HOURS}h.")
-        # Przypadek 3: Cały slot jest za wcześnie - zostanie pominięty
 
     logging.info(f"Znaleziono {len(final_filtered_slots)} wolnych zakresów po filtrze godzin pracy i {MIN_BOOKING_LEAD_HOURS}h wyprzedzenia.")
     for i, slot in enumerate(final_filtered_slots[:5]):
@@ -504,31 +487,23 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
          logging.debug("  ...")
 
     return final_filtered_slots
-# --- KONIEC ZMODYFIKOWANEJ FUNKCJI ---
 
-# Funkcje is_slot_actually_free, book_appointment, format_ranges_for_ai,
-# format_slot_for_user, _send_typing_on, _send_single_message, send_message,
-# _simulate_typing, _call_gemini
-# POZOSTAJĄ BEZ ZMIAN
-# ... (pominięto dla zwięzłości - wklej tutaj poprzednie wersje tych funkcji) ...
 def is_slot_actually_free(start_time, calendar_id):
     """Weryfikuje w czasie rzeczywistym, czy slot jest wolny."""
     service = get_calendar_service()
     tz = _get_timezone()
     if not service:
         logging.error("Błąd: Usługa kalendarza niedostępna do weryfikacji slotu.")
-        return False # Bezpieczniej założyć, że zajęty
+        return False
 
     if not isinstance(start_time, datetime.datetime):
         logging.error(f"Błąd weryfikacji: start_time nie jest obiektem datetime ({type(start_time)})")
         return False
 
-    # Upewnij się, że czas jest świadomy i w odpowiedniej strefie
     if start_time.tzinfo is None: start_time = tz.localize(start_time)
     else: start_time = start_time.astimezone(tz)
     end_time = start_time + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
 
-    # Sprawdzamy bardzo wąski zakres czasu [start_time, end_time)
     body = {
         "timeMin": start_time.isoformat(),
         "timeMax": end_time.isoformat(),
@@ -542,28 +517,26 @@ def is_slot_actually_free(start_time, calendar_id):
         if 'errors' in calendar_data:
              for error in calendar_data['errors']:
                  logging.error(f"Błąd API Freebusy (weryfikacja) dla kalendarza {calendar_id}: {error.get('reason')} - {error.get('message')}")
-             return False # Błąd API -> zakładamy, że zajęty
+             return False
 
         busy_times = calendar_data.get('busy', [])
 
         if not busy_times:
-            # Brak zajętych slotów w tym przedziale -> jest wolny
             logging.info(f"Weryfikacja: Slot {start_time:%Y-%m-%d %H:%M} JEST wolny.")
             return True
         else:
-            # Znaleziono jakieś zajęte sloty w tym przedziale -> jest zajęty
             logging.warning(f"Weryfikacja: Slot {start_time:%Y-%m-%d %H:%M} jest ZAJĘTY. Zwrócone zajęte sloty: {busy_times}")
             return False
 
     except HttpError as error:
          logging.error(f"Błąd HTTP API Freebusy podczas weryfikacji: {error.resp.status} {error.resp.reason}", exc_info=True)
-         return False # Błąd API -> zakładamy, że zajęty
+         return False
     except Exception as e:
         logging.error(f"Nieoczekiwany błąd podczas weryfikacji Freebusy: {e}", exc_info=True)
-        return False # Inny błąd -> zakładamy, że zajęty
+        return False
 
 def book_appointment(calendar_id, start_time, end_time, summary="Rezerwacja FB", description="", user_name=""):
-    """Rezerwuje termin w Kalendarzu Google."""
+    """Rezerwuje termin w Kalendarzu Google. Zwraca (True, None) przy sukcesie lub (False, error_message) przy błędzie."""
     service = get_calendar_service()
     tz = _get_timezone()
     if not service:
@@ -573,7 +546,6 @@ def book_appointment(calendar_id, start_time, end_time, summary="Rezerwacja FB",
          logging.error(f"Błąd rezerwacji: Nieprawidłowe typy dat ({type(start_time)}, {type(end_time)})")
          return False, "Wewnętrzny błąd daty rezerwacji."
 
-    # Upewnij się, że czasy są świadome i w odpowiedniej strefie
     if start_time.tzinfo is None: start_time = tz.localize(start_time)
     else: start_time = start_time.astimezone(tz)
     if end_time.tzinfo is None: end_time = tz.localize(end_time)
@@ -600,16 +572,12 @@ def book_appointment(calendar_id, start_time, end_time, summary="Rezerwacja FB",
         event_id = created_event.get('id')
         event_link = created_event.get('htmlLink')
         logging.info(f"Termin zarezerwowany pomyślnie. ID wydarzenia: {event_id}, Link: {event_link}")
+        return True, None # Sukces - zwracamy None jako wiadomość
 
-        day_index = start_time.weekday()
-        locale_day_name = POLISH_WEEKDAYS[day_index]
-        hour_str = str(start_time.hour)
-        confirm_message = f"Świetnie! Termin na {locale_day_name}, {start_time.strftime(f'%d.%m.%Y o {hour_str}:%M')} został zarezerwowany. Do zobaczenia!"
-        return True, confirm_message
     except HttpError as error:
         error_details = f"Kod: {error.resp.status}, Powód: {error.resp.reason}"
         logging.error(f"Błąd API Google Calendar podczas rezerwacji: {error}, Szczegóły: {error_details}", exc_info=True)
-        if error.resp.status == 409: # Konflikt
+        if error.resp.status == 409:
             return False, "Niestety, ten termin został właśnie zajęty przez kogoś innego tuż przed finalizacją. Spróbujmy znaleźć inny."
         elif error.resp.status == 403:
              return False, "Problem z uprawnieniami do zapisu w kalendarzu. Skontaktuj się z administratorem."
@@ -632,7 +600,7 @@ def format_ranges_for_ai(ranges):
         "--- Dostępne Zakresy (Data YYYY-MM-DD, Dzień, Od Godziny HH:MM, Do Godziny HH:MM) ---"
     ]
     slots_added = 0
-    max_slots_to_show = 25 # Zwiększmy limit, żeby AI miało więcej opcji
+    max_slots_to_show = 25
     sorted_ranges = sorted(ranges, key=lambda r: r['start'])
 
     for r in sorted_ranges:
@@ -651,7 +619,6 @@ def format_ranges_for_ai(ranges):
                 break
 
     if slots_added == 0:
-        # To nie powinno się zdarzyć, jeśli ranges nie było puste, ale dla pewności
         return "Brak dostępnych zakresów czasowych w godzinach pracy w podanym okresie."
 
     formatted_output = "\n".join(formatted_lines)
@@ -672,9 +639,8 @@ def format_slot_for_user(slot_start):
         day_name = POLISH_WEEKDAYS[day_index]
         hour_str = str(slot_start.hour)
         try:
-            # Używamy locale do formatowania, jeśli ustawione
             formatted_date = slot_start.strftime('%d.%m.%Y')
-            formatted_time = slot_start.strftime(f'{hour_str}:%M') # %-H może nie działać wszędzie
+            formatted_time = slot_start.strftime(f'{hour_str}:%M')
             return f"{day_name}, {formatted_date} o {formatted_time}"
         except Exception as format_err:
              logging.warning(f"Błąd formatowania daty/czasu przez strftime: {format_err}. Używam formatu ISO.")
@@ -682,7 +648,7 @@ def format_slot_for_user(slot_start):
 
     except Exception as e:
         logging.error(f"Błąd formatowania slotu {slot_start}: {e}", exc_info=True)
-        return slot_start.isoformat() # Fallback
+        return slot_start.isoformat()
 
 def _send_typing_on(recipient_id):
     """Wysyła wskaźnik 'pisania' do użytkownika."""
@@ -692,10 +658,8 @@ def _send_typing_on(recipient_id):
     params = {"access_token": PAGE_ACCESS_TOKEN}
     payload = {"recipient": {"id": recipient_id}, "sender_action": "typing_on"}
     try:
-        # Używamy krótkiego timeoutu, bo to nie jest krytyczne
         requests.post(FACEBOOK_GRAPH_API_URL, params=params, json=payload, timeout=3)
     except requests.exceptions.RequestException as e:
-        # Logujemy jako warning, bo nie przerywa to głównego przepływu
         logging.warning(f"[{recipient_id}] Błąd wysyłania 'typing_on': {e}")
 
 def _send_single_message(recipient_id, message_text):
@@ -719,7 +683,6 @@ def _send_single_message(recipient_id, message_text):
             logging.error(f"!!! BŁĄD FB API podczas wysyłania wiadomości: {fb_error} !!!")
             if fb_error.get('code') == 190:
                  logging.error("!!! Wygląda na to, że FB_PAGE_ACCESS_TOKEN jest nieprawidłowy lub wygasł !!!")
-            # Można dodać obsługę innych kodów błędów, np. limitów
             return False
         logging.debug(f"[{recipient_id}] Fragment wiadomości wysłany pomyślnie (Message ID: {response_json.get('message_id')}).")
         return True
@@ -765,7 +728,7 @@ def send_message(recipient_id, full_message_text):
                 chunks.append(remaining_text.strip())
                 break
             split_index = -1
-            delimiters = ['\n\n', '\n', '. ', '! ', '? ', ' '] # Kolejność preferencji
+            delimiters = ['\n\n', '\n', '. ', '! ', '? ', ' ']
             for delimiter in delimiters:
                 search_limit = MESSAGE_CHAR_LIMIT - len(delimiter) + 1
                 temp_index = remaining_text.rfind(delimiter, 0, search_limit)
@@ -773,7 +736,7 @@ def send_message(recipient_id, full_message_text):
                     split_index = temp_index + len(delimiter)
                     break
             if split_index == -1:
-                split_index = MESSAGE_CHAR_LIMIT # Twarde cięcie
+                split_index = MESSAGE_CHAR_LIMIT
 
             chunk = remaining_text[:split_index].strip()
             if chunk: chunks.append(chunk)
@@ -887,7 +850,6 @@ def _call_gemini(user_psid, prompt_history, generation_config, task_name, max_re
                  return None
              else:
                  logging.error(f"!!! BŁĄD [{user_psid}] Gemini ({task_name}) - Nieoczekiwany błąd Python (Próba {attempt}/{max_retries}): {e}", exc_info=True)
-                 # break # Przerwij po nieznanym błędzie
 
         if attempt < max_retries:
             logging.warning(f"    Problem z odpowiedzią Gemini ({task_name}). Oczekiwanie przed ponowieniem ({attempt+1}/{max_retries})...")
@@ -1240,7 +1202,6 @@ def webhook_handle():
                                             else: proposed_start = proposed_start.astimezone(tz)
 
                                             # --- USUNIĘTO WERYFIKACJĘ 24h TUTAJ ---
-                                            # Zakładamy, że free_ranges już to zapewniły
 
                                             # --- Weryfikacja dostępności w kalendarzu ---
                                             logging.info(f"      Weryfikacja dostępności slotu w kalendarzu: {format_slot_for_user(proposed_start)}")
@@ -1249,16 +1210,17 @@ def webhook_handle():
                                                 confirm_msg = text_for_user if text_for_user else f"Dobrze, potwierdzam termin {format_slot_for_user(proposed_start)}. Zapisuję..."
                                                 send_message(sender_id, confirm_msg)
                                                 model_resp_content = Content(role="model", parts=[Part.from_text(confirm_msg)])
+                                                # Zapis historii przed rezerwacją, ale ze stanem GENERAL (bo rezerwacja jest ostatnim krokiem)
                                                 temp_history = list(history_for_gemini)
                                                 if user_content: temp_history.append(user_content)
                                                 temp_history.append(model_resp_content)
-                                                save_history(sender_id, temp_history, context_to_save={'type': STATE_GENERAL})
+                                                save_history(sender_id, temp_history, context_to_save={'type': STATE_GENERAL}) # Zapisz stan jako generalny
 
                                                 action = 'book'
                                                 extracted_iso_slot = proposed_start
-                                                next_state = STATE_GENERAL
-                                                user_content = None
-                                                model_resp_content = None
+                                                next_state = STATE_GENERAL # Po rezerwacji wracamy do stanu ogólnego
+                                                user_content = None # Już zapisane
+                                                model_resp_content = None # Już zapisane
                                                 logging.debug("      Przekierowanie do akcji 'book'...")
                                             else:
                                                 logging.warning(f"      Weryfikacja KALENDARZA NIEUDANA! Slot {extracted_iso} został zajęty.")
@@ -1303,6 +1265,7 @@ def webhook_handle():
 
                     if action == 'book':
                         logging.debug("  >> Akcja: book")
+                        # Historia i stan GENERAL zostały już zapisane wcześniej
                         if extracted_iso_slot and isinstance(extracted_iso_slot, datetime.datetime):
                             try:
                                 start_dt_obj = extracted_iso_slot
@@ -1313,17 +1276,23 @@ def webhook_handle():
                                 event_desc = f"Rezerwacja przez Bota Facebook Messenger\nPSID: {sender_id}"
                                 if user_last_name: event_desc += f"\nNazwisko: {user_last_name}"
 
-                                ok, booking_msg = book_appointment(
+                                ok, booking_msg = book_appointment( # Zmieniono nazwę zmiennej na booking_msg
                                     TARGET_CALENDAR_ID, start_dt_obj, end_dt_obj,
                                     summary=f"Korepetycje: {user_name}",
                                     description=event_desc, user_name=user_name
                                 )
-                                msg_result = booking_msg
-                                model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
-                                next_state = STATE_GENERAL
-                                if not ok:
+
+                                if ok:
+                                    # Sukces rezerwacji - wysyłamy wiadomość z book_appointment
+                                    logging.info(f"      Rezerwacja terminu {start_dt_obj} zakończona sukcesem.")
+                                    msg_result = booking_msg # Ustawiamy wiadomość potwierdzającą
+                                    model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                    next_state = STATE_GENERAL # Pozostajemy w stanie generalnym
+                                else:
+                                    # Błąd rezerwacji - wysyłamy wiadomość o błędzie, wracamy do planowania
                                     logging.warning(f"      Rezerwacja terminu {start_dt_obj} nie powiodła się (zwrócono False z book_appointment).")
-                                    next_state = STATE_SCHEDULING_ACTIVE
+                                    msg_result = booking_msg # Ustawiamy wiadomość o błędzie
+                                    next_state = STATE_SCHEDULING_ACTIVE # Wracamy do stanu planowania
                                     error_info_for_ai = f"[SYSTEM: Próba rezerwacji terminu {format_slot_for_user(start_dt_obj)} nie powiodła się. Powód: {booking_msg}. Musisz znaleźć inny termin.]"
                                     model_resp_content = Content(role="model", parts=[Part.from_text(booking_msg + "\n" + error_info_for_ai)])
 
