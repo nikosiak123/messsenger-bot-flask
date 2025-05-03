@@ -1,6 +1,9 @@
+Jasne, oto pełny kod ostatniej wersji, która wykorzystuje rozdzielone osobowości AI, logikę przełączania kontekstu, osobne klucze API, uwzględnia zajętość z Arkusza Google już na etapie generowania wolnych terminów, realizuje dwufazowy zapis do arkusza i ma poprawioną składnię:
+
+```python
 # -*- coding: utf-8 -*-
 
-# verify_server.py (Wersja: Rozdzielone Osobowości + Przełączanie Kontekstu + Sprawdzanie Arkusza + Dwufazowy Zapis + Poprawki)
+# verify_server.py (Wersja: Rozdzielone Osobowości + Przełączanie Kontekstu + Sprawdzanie Arkusza w get_free_time_ranges + Dwufazowy Zapis + Poprawki)
 
 from flask import Flask, request, Response
 import os
@@ -43,7 +46,7 @@ MODEL_ID = os.environ.get("VERTEX_MODEL_ID", "gemini-2.0-flash-001")
 FACEBOOK_GRAPH_API_URL = f"https://graph.facebook.com/v19.0/me/messages"
 
 HISTORY_DIR = "conversation_store"
-MAX_HISTORY_TURNS = 15 # Przywrócono standardową długość historii
+MAX_HISTORY_TURNS = 15
 MESSAGE_CHAR_LIMIT = 1990
 MESSAGE_DELAY_SECONDS = 1.2
 
@@ -490,6 +493,75 @@ def parse_event_time(event_time_data, default_tz):
         logging.error(f"Nieoczekiwany błąd podczas parsowania czasu '{dt_str}': {e}", exc_info=True)
         return None
 
+def get_sheet_booked_slots(spreadsheet_id, sheet_name, start_datetime, end_datetime):
+    """Pobiera listę 'zajętych' slotów z arkusza Google w danym zakresie czasowym."""
+    service = get_sheets_service()
+    sheet_busy_slots = []
+    if not service:
+        logging.error("Błąd: Usługa arkuszy niedostępna do pobrania zajętych slotów.")
+        return sheet_busy_slots # Zwróć pustą listę w razie błędu
+
+    tz = _get_sheet_timezone()
+    # Upewnij się, że zakresy są świadome strefy czasowej arkusza
+    if start_datetime.tzinfo is None: start_datetime_aware = tz.localize(start_datetime)
+    else: start_datetime_aware = start_datetime.astimezone(tz)
+    if end_datetime.tzinfo is None: end_datetime_aware = tz.localize(end_datetime)
+    else: end_datetime_aware = end_datetime.astimezone(tz)
+
+    try:
+        # Określ zakres do odczytu (Data i Czas)
+        date_col_letter = chr(ord('A') + SHEET_DATE_COLUMN_INDEX - 1)
+        time_col_letter = chr(ord('A') + SHEET_TIME_COLUMN_INDEX - 1)
+        read_range = f"{sheet_name}!{date_col_letter}2:{time_col_letter}" # Od wiersza 2 do końca
+
+        logging.debug(f"Odczytywanie arkusza '{sheet_name}' w zakresie '{read_range}' w celu znalezienia zajętych slotów.")
+        result = service.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id, range=read_range
+        ).execute()
+        values = result.get('values', [])
+
+        if not values:
+            logging.debug("Arkusz jest pusty lub nie zawiera danych w sprawdzanym zakresie (dla zajętych slotów).")
+            return sheet_busy_slots
+
+        duration_delta = datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+
+        for row in values:
+            if len(row) >= 2: # Potrzebujemy daty i czasu
+                date_str = row[0].strip()
+                time_str = row[1].strip()
+                try:
+                    # Spróbuj sparsować datę i czas
+                    naive_date = datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
+                    naive_time = datetime.datetime.strptime(time_str, '%H:%M').time()
+                    naive_dt = datetime.datetime.combine(naive_date, naive_time)
+                    # Ustaw strefę czasową arkusza
+                    slot_start = tz.localize(naive_dt)
+
+                    # Sprawdź, czy slot wpada w nasz zakres zainteresowania
+                    if start_datetime_aware <= slot_start < end_datetime_aware:
+                        slot_end = slot_start + duration_delta
+                        sheet_busy_slots.append({'start': slot_start, 'end': slot_end})
+                        logging.debug(f"  Znaleziono zajęty slot w arkuszu: {slot_start.strftime('%Y-%m-%d %H:%M')} - {slot_end.strftime('%H:%M')}")
+
+                except ValueError:
+                    logging.warning(f"  Pominięto wiersz w arkuszu z powodu błędu parsowania daty/czasu: Data='{date_str}', Czas='{time_str}'")
+                except Exception as parse_err:
+                     logging.warning(f"  Pominięto wiersz w arkuszu z powodu nieoczekiwanego błędu parsowania: {parse_err} (Data='{date_str}', Czas='{time_str}')")
+            else:
+                logging.debug(f"  Pominięto zbyt krótki wiersz w arkuszu: {row}")
+
+    except HttpError as error:
+        logging.error(f"Błąd HTTP API podczas odczytu arkusza dla zajętych slotów: {error.resp.status} {error.resp.reason}", exc_info=True)
+        # Nie zwracamy błędu, po prostu lista będzie niekompletna
+    except Exception as e:
+        logging.error(f"Nieoczekiwany błąd podczas odczytu arkusza dla zajętych slotów: {e}", exc_info=True)
+        # Nie zwracamy błędu
+
+    logging.info(f"Znaleziono {len(sheet_busy_slots)} potencjalnie zajętych slotów w arkuszu.")
+    return sheet_busy_slots
+
+
 def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
     """Pobiera listę wolnych zakresów czasowych z kalendarza ORAZ arkusza, filtrując je."""
     service_cal = get_calendar_service() # Usługa kalendarza
@@ -859,67 +931,6 @@ def find_row_and_update_sheet(psid, start_time, student_data, sheet_row_index=No
         logging.error(f"Nieoczekiwany błąd Python podczas aktualizacji Fazy 2: {e}", exc_info=True)
         return False, "Wewnętrzny błąd systemu podczas aktualizacji Fazy 2."
 
-
-def is_slot_in_sheet(start_time):
-    """Sprawdza, czy dany termin (data i godzina) już istnieje w arkuszu."""
-    service = get_sheets_service()
-    if not service:
-        logging.error("Błąd: Usługa arkuszy niedostępna do weryfikacji slotu w arkuszu.")
-        return True # Bezpieczniej założyć, że jest zajęty
-
-    if not isinstance(start_time, datetime.datetime):
-        logging.error(f"Błąd weryfikacji w arkuszu: start_time nie jest obiektem datetime ({type(start_time)})")
-        return True
-
-    tz = _get_sheet_timezone()
-    if start_time.tzinfo is None:
-        start_time = tz.localize(start_time)
-    else:
-        start_time = start_time.astimezone(tz)
-
-    target_date_str = start_time.strftime('%Y-%m-%d')
-    target_time_str = start_time.strftime('%H:%M')
-
-    try:
-        date_col_letter = chr(ord('A') + SHEET_DATE_COLUMN_INDEX - 1)
-        time_col_letter = chr(ord('A') + SHEET_TIME_COLUMN_INDEX - 1)
-        # Czytaj tylko potrzebne kolumny
-        read_range = f"{SHEET_NAME}!{date_col_letter}2:{time_col_letter}"
-    except Exception as e:
-        logging.error(f"Błąd konwersji indeksów kolumn na litery: {e}")
-        return True
-
-    logging.debug(f"Sprawdzanie arkusza '{SHEET_NAME}' w zakresie '{read_range}' dla terminu: {target_date_str} {target_time_str}")
-
-    try:
-        result = service.spreadsheets().values().get(
-            spreadsheetId=SPREADSHEET_ID,
-            range=read_range
-        ).execute()
-        values = result.get('values', [])
-
-        if not values:
-            logging.debug("Arkusz jest pusty lub nie zawiera danych w sprawdzanym zakresie.")
-            return False
-
-        for row in values:
-            if len(row) >= 2: # Oczekujemy co najmniej daty i czasu
-                sheet_date_str = row[0].strip()
-                sheet_time_str = row[1].strip()
-                if sheet_date_str == target_date_str and sheet_time_str == target_time_str:
-                    logging.warning(f"Weryfikacja arkusza: Slot {target_date_str} {target_time_str} ZNALEZIONY w arkuszu.")
-                    return True
-
-        logging.info(f"Weryfikacja arkusza: Slot {target_date_str} {target_time_str} NIE ZNALEZIONY w arkuszu.")
-        return False
-
-    except HttpError as error:
-        logging.error(f"Błąd HTTP API podczas odczytu arkusza do weryfikacji: {error.resp.status} {error.resp.reason}", exc_info=True)
-        return True # Bezpieczniej założyć, że zajęty
-    except Exception as e:
-        logging.error(f"Nieoczekiwany błąd podczas odczytu arkusza do weryfikacji: {e}", exc_info=True)
-        return True
-
 # =====================================================================
 # === FUNKCJE KOMUNIKACJI FB ==========================================
 # =====================================================================
@@ -974,7 +985,6 @@ def _send_single_message(recipient_id, message_text):
     except Exception as e:
         logging.error(f"!!! Nieoczekiwany BŁĄD podczas wysyłania wiadomości do {recipient_id}: {e} !!!", exc_info=True)
         return False
-
 
 def send_message(recipient_id, full_message_text):
     """Wysyła wiadomość do użytkownika, dzieląc ją na fragmenty, jeśli jest za długa."""
@@ -1610,7 +1620,7 @@ def webhook_handle():
                                 search_end = tz.localize(datetime.datetime.combine(search_end_date, datetime.time(WORK_END_HOUR, 0)))
                                 logging.info(f"      Pobieranie wolnych zakresów (z filtrem {MIN_BOOKING_LEAD_HOURS}h) od {search_start:%Y-%m-%d %H:%M} do {search_end:%Y-%m-%d %H:%M}")
                                 _simulate_typing(sender_id, MAX_TYPING_DELAY_SECONDS * 0.6)
-                                free_ranges = get_free_time_ranges(TARGET_CALENDAR_ID, search_start, search_end)
+                                free_ranges = get_free_time_ranges(TARGET_CALENDAR_ID, search_start, search_end) # Ta funkcja już sprawdza arkusz
 
                                 if free_ranges:
                                     logging.info(f"      Znaleziono {len(free_ranges)} zakresów. Wywołanie AI Planującego...")
@@ -1622,7 +1632,7 @@ def webhook_handle():
                                         if ai_response_text.strip() == SWITCH_TO_GENERAL: # Przywrócono sprawdzanie
                                             logging.info(f"      AI Planujące zasygnalizowało pytanie ogólne [{SWITCH_TO_GENERAL}]. Przełączanie.")
                                             context_data_to_save['return_to_state'] = STATE_SCHEDULING_ACTIVE
-                                            scheduling_context_minimal = {} # Można tu dodać np. ostatnio proponowany zakres
+                                            scheduling_context_minimal = {}
                                             context_data_to_save['return_to_context'] = scheduling_context_minimal
                                             context_data_to_save['type'] = STATE_GENERAL
                                             next_state = STATE_GENERAL
@@ -1641,28 +1651,20 @@ def webhook_handle():
                                             text_for_user = re.sub(r'\s+', ' ', text_for_user).strip()
                                             try:
                                                 proposed_start = datetime.datetime.fromisoformat(extracted_iso)
+                                                tz_cal = _get_calendar_timezone() # Użyj strefy kalendarza do weryfikacji
                                                 if proposed_start.tzinfo is None:
-                                                    proposed_start = tz.localize(proposed_start)
+                                                    proposed_start = tz_cal.localize(proposed_start)
                                                 else:
-                                                    proposed_start = proposed_start.astimezone(tz)
+                                                    proposed_start = proposed_start.astimezone(tz_cal)
                                                 proposed_slot_formatted = format_slot_for_user(proposed_start)
                                                 logging.info(f"      Weryfikacja dostępności slotu w kalendarzu: {proposed_slot_formatted}")
                                                 _simulate_typing(sender_id, MIN_TYPING_DELAY_SECONDS)
-                                                # --- Podwójna weryfikacja: Kalendarz ORAZ Arkusz ---
+                                                # --- Weryfikacja TYLKO w Kalendarzu ---
                                                 calendar_free = is_slot_actually_free(proposed_start, TARGET_CALENDAR_ID)
-                                                sheet_free = False # Domyślnie załóż, że zajęty w arkuszu
-                                                if calendar_free:
-                                                    logging.info("      Weryfikacja Kalendarza OK. Sprawdzanie arkusza...")
-                                                    _simulate_typing(sender_id, MIN_TYPING_DELAY_SECONDS * 0.5) # Krótka pauza na sprawdzenie arkusza
-                                                    sheet_free = not is_slot_in_sheet(proposed_start)
-                                                    if sheet_free:
-                                                        logging.info("      Weryfikacja Arkusza OK.")
-                                                    else:
-                                                        logging.warning(f"      Weryfikacja ARKUSZA NIEUDANA! Slot {proposed_slot_formatted} jest już w arkuszu.")
-                                                # -----------------------------------------------------
+                                                # --------------------------------------
 
-                                                if calendar_free and sheet_free:
-                                                    logging.info("      Weryfikacja Kalendarza i Arkusza OK! Zapis Fazy 1 i przejście do zbierania danych.")
+                                                if calendar_free:
+                                                    logging.info("      Weryfikacja Kalendarza OK! Zapis Fazy 1 i przejście do zbierania danych.")
                                                     # --- ZAPIS FAZY 1 ---
                                                     write_ok, write_msg_or_row = write_to_sheet_phase1(sender_id, proposed_start)
                                                     if write_ok:
@@ -1700,11 +1702,10 @@ def webhook_handle():
                                                         next_state = STATE_GENERAL # Wróć do ogólnego w razie błędu krytycznego zapisu
                                                         context_data_to_save = {}
                                                 else:
-                                                    # Błąd weryfikacji (Kalendarz LUB Arkusz)
-                                                    reason = "został właśnie zajęty w kalendarzu" if not calendar_free else "został już zarezerwowany w naszym systemie"
-                                                    logging.warning(f"      Weryfikacja NIEUDANA! Slot {extracted_iso} ({proposed_slot_formatted}) {reason}.")
-                                                    fail_msg = f"Ojej, wygląda na to, że termin {proposed_slot_formatted} {reason}! Przepraszam za zamieszanie. Spróbujmy znaleźć inny."
-                                                    fail_msg_for_ai = f"\n[SYSTEM: Termin {proposed_slot_formatted} okazał się zajęty ({'kalendarz' if not calendar_free else 'arkusz'}). Zaproponuj inny termin z dostępnej listy.]"
+                                                    # Błąd weryfikacji Kalendarza
+                                                    logging.warning(f"      Weryfikacja KALENDARZA NIEUDANA! Slot {extracted_iso} ({proposed_slot_formatted}) został zajęty.")
+                                                    fail_msg = f"Ojej, wygląda na to, że termin {proposed_slot_formatted} został właśnie zajęty w kalendarzu! Przepraszam za zamieszanie. Spróbujmy znaleźć inny."
+                                                    fail_msg_for_ai = f"\n[SYSTEM: Termin {proposed_slot_formatted} okazał się zajęty (kalendarz). Zaproponuj inny termin z dostępnej listy.]"
                                                     msg_result = fail_msg
                                                     if user_content:
                                                         history_for_gemini.append(user_content)
@@ -1971,7 +1972,7 @@ if __name__ == '__main__':
     logging.getLogger('urllib3.connectionpool').setLevel(logging.WARNING)
     logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
-    print("\n" + "="*60 + "\n--- START KONFIGURACJI BOTA (Rozdzielone Osobowości + Przełączanie Kontekstu + Sprawdzanie Arkusza + Dwufazowy Zapis) ---")
+    print("\n" + "="*60 + "\n--- START KONFIGURACJI BOTA (Rozdzielone Osobowości + Przełączanie Kontekstu + Sprawdzanie Arkusza w get_free_time_ranges + Dwufazowy Zapis) ---")
     print(f"  * Poziom logowania: {logging.getLevelName(log_level)}")
     print("-" * 60)
     print("  Konfiguracja Facebook:")
