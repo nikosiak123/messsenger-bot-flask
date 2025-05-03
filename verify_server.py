@@ -386,40 +386,53 @@ def extract_school_type(grade_string):
         return "Nieokreślona", "Nieokreślona" # Zwróć krotkę
 
     grade_lower = grade_string.lower().strip()
-    class_desc = grade_string # Domyślnie cała informacja to opis klasy
+    class_desc = grade_string.strip() # Domyślnie cała informacja to opis klasy (bez wiodących/końcowych spacji)
     school_type = "Nieokreślona" # Domyślny typ szkoły
 
     # Szukaj słów kluczowych dla typu szkoły
     type_mapping = {
-        "Liceum": [r'liceum', r' lo ', r'\blo\b'],
-        "Technikum": [r'technikum', r' tech ', r'\btech\b'],
-        "Szkoła Podstawowa": [r'podstaw', r' sp ', r'\bsp\b'],
+        "Liceum": [r'liceum', r'\blo\b'], # Usunięto ' lo ' - \b obsłuży spacje
+        "Technikum": [r'technikum', r'\btech\b'], # Usunięto ' tech '
+        "Szkoła Podstawowa": [r'podstaw', r'\bsp\b'], # Usunięto ' sp '
         "Szkoła Branżowa/Zawodowa": [r'zawodowa', r'branżowa', r'zasadnicza']
     }
 
     found_type = False
     for type_name, patterns in type_mapping.items():
         for pattern in patterns:
+            # Użyj oryginalnego wzorca do wyszukania
             if re.search(pattern, grade_lower):
                 school_type = type_name
-                # Usuń znaleziony wzorzec (i ewentualne otaczające spacje) z opisu klasy
-                # Używamy \b dla słów, ale spacje dla ' lo ', ' tech ', ' sp '
-                cleaned_desc = re.sub(r'\s*' + pattern.replace(r'\b', '') + r'\b?\s*', ' ', grade_string, flags=re.IGNORECASE).strip()
-                # Sprawdź, czy coś zostało po czyszczeniu
-                if cleaned_desc:
-                    class_desc = cleaned_desc
+                # Użyj tego samego wzorca do usunięcia, otaczając go \s* dla spacji
+                # Dodajemy \b na początku i końcu wzorca (jeśli go tam nie ma), aby uniknąć dopasowania części słów
+                # Ale robimy to ostrożnie, aby nie dodać \b do wzorców, które już go mają lub go nie potrzebują (np. 'podstaw')
+                pattern_for_sub = pattern
+                if not pattern.startswith(r'\b'):
+                    pattern_for_sub = r'\b' + pattern_for_sub
+                if not pattern.endswith(r'\b'):
+                     pattern_for_sub = pattern_for_sub + r'\b'
+
+                # Usuń znaleziony wzorzec wraz z otaczającymi spacjami
+                cleaned_desc_candidate = re.sub(r'\s*' + pattern_for_sub + r'\s*', ' ', class_desc, flags=re.IGNORECASE).strip()
+
+                # Sprawdź, czy coś zostało po czyszczeniu i czy jest krótsze
+                if cleaned_desc_candidate and len(cleaned_desc_candidate) < len(class_desc):
+                    class_desc = cleaned_desc_candidate
+                elif not cleaned_desc_candidate: # Jeśli po usunięciu nic nie zostało
+                    class_desc = "" # Ustaw na pusty string
+
                 found_type = True
-                break # Znaleziono typ, przejdź do następnego
+                break # Znaleziono typ, przejdź do następnego typu szkoły
         if found_type:
             break
 
     # Jeśli typ szkoły nadal nieokreślony, ale jest numer klasy
-    if school_type == "Nieokreślona" and re.search(r'\d', grade_lower): # Szukaj cyfry
+    if school_type == "Nieokreślona" and re.search(r'\d', grade_lower):
          school_type = "Inna (z numerem klasy)"
 
     # Dodatkowe czyszczenie opisu klasy (np. usunięcie słowa "klasa")
     class_desc = re.sub(r'\bklasa\b', '', class_desc, flags=re.IGNORECASE).strip()
-    # Jeśli opis klasy jest pusty po czyszczeniu, wróć do oryginalnego stringu
+    # Jeśli opis klasy jest pusty po czyszczeniu, wróć do oryginalnego stringu (bez wiodących/końcowych spacji)
     if not class_desc:
         class_desc = grade_string.strip()
 
