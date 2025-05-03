@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# verify_server.py (Wersja: AI-Driven State + Two-Phase Sheet Write - EKSPERYMENTALNA)
+# verify_server.py (Wersja: AI-Driven State + Two-Phase Sheet Write - EKSPERYMENTALNA - PEP8 Style)
 
 from flask import Flask, request, Response
 import os
@@ -35,7 +35,8 @@ app = Flask(__name__)
 
 # --- Konfiguracja Ogólna ---
 VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "KOLAGEN")
-PAGE_ACCESS_TOKEN = os.environ.get("FB_PAGE_ACCESS_TOKEN", "EACNAHFzEhkUBO5sicIUMoIwuZCZC1ZAduL8gb5sZAjWX2oErT4esklQALmstq2bkZAnWq3CVNF0IO3gZB44ip3XCXG40revvmpFKOLlC9jBStCNAwbIXZBWfawg0z0YH6GLGZCE1gFfgEF5A6DEIKbu5FYZB6XKXHECTeW6PNZAUQrPiKxrPCjbz7QFiBtGROvZCPR4rAZDZD") # Testowy token
+# Zaktualizowany domyślny token dostępu strony
+PAGE_ACCESS_TOKEN = os.environ.get("FB_PAGE_ACCESS_TOKEN", "EACNAHFzEhkUBO5sicIUMoIwuZCZC1ZAduL8gb5sZAjWX2oErT4esklQALmstq2bkZAnWq3CVNF0IO3gZB44ip3XCXG40revvmpFKOLlC9jBStCNAwbIXZBWfawg0z0YH6GLGZCE1gFfgEF5A6DEIKbu5FYZB6XKXHECTeW6PNZAUQrPiKxrPCjbz7QFiBtGROvZCPR4rAZDZD")
 PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "linear-booth-450221-k1")
 LOCATION = os.environ.get("GCP_LOCATION", "us-central1")
 MODEL_ID = os.environ.get("VERTEX_MODEL_ID", "gemini-2.0-flash-001") # Użyjmy szybszego modelu dla testów
@@ -69,7 +70,7 @@ SHEET_SCOPES = ['https://www.googleapis.com/auth/spreadsheets'] # Pełny dostęp
 SPREADSHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "1vpsIAEkqtY3ZJ5Mr67Dda45aZ55V1O-Ux9ODjwk13qw")
 SHEET_NAME = os.environ.get("GOOGLE_SHEET_NAME", 'Arkusz1')
 SHEET_TIMEZONE = 'Europe/Warsaw'
-# Definicja kolumn (zaczynając od 1)
+# Definicja kolumn (zaczynając od 1), które zawierają datę i godzinę do sprawdzenia
 SHEET_PSID_COLUMN_INDEX = 1      # A
 SHEET_PARENT_FN_COLUMN_INDEX = 2 # B
 SHEET_PARENT_LN_COLUMN_INDEX = 3 # C
@@ -112,18 +113,21 @@ _sheet_tz = None
 POLISH_WEEKDAYS = ["Poniedziałek", "Wtorek", "Środa", "Czwartek", "Piątek", "Sobota", "Niedziela"]
 
 # --- Ustawienia Lokalizacji ---
-try: locale.setlocale(locale.LC_TIME, 'pl_PL.UTF-8')
+try:
+    locale.setlocale(locale.LC_TIME, 'pl_PL.UTF-8')
 except locale.Error:
-    try: locale.setlocale(locale.LC_TIME, 'Polish_Poland.1250')
-    except locale.Error: logging.warning("Nie można ustawić polskiej lokalizacji dla formatowania dat.")
+    try:
+        locale.setlocale(locale.LC_TIME, 'Polish_Poland.1250')
+    except locale.Error:
+        logging.warning("Nie można ustawić polskiej lokalizacji dla formatowania dat.")
 
 # =====================================================================
 # === INICJALIZACJA AI ================================================
 # =====================================================================
-# ... (bez zmian) ...
 gemini_model = None
 try:
-    if not logging.getLogger().hasHandlers(): logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    if not logging.getLogger().hasHandlers():
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     print(f"--- Inicjalizowanie Vertex AI: Projekt={PROJECT_ID}, Lokalizacja={LOCATION}")
     vertexai.init(project=PROJECT_ID, location=LOCATION)
     print("--- Inicjalizacja Vertex AI OK.")
@@ -132,51 +136,77 @@ try:
     print(f"--- Model {MODEL_ID} załadowany OK.")
 except Exception as e:
     print(f"!!! KRYTYCZNY BŁĄD inicjalizacji Vertex AI lub ładowania modelu: {e}", flush=True)
-    import traceback; traceback.print_exc(); print("!!! Funkcjonalność AI będzie niedostępna !!!", flush=True)
+    import traceback
+    traceback.print_exc()
+    print("!!! Funkcjonalność AI będzie niedostępna !!!", flush=True)
 
 # =====================================================================
 # === FUNKCJE POMOCNICZE (Ogólne) =====================================
 # =====================================================================
-# ... (ensure_dir, get_user_profile, load_history, save_history) ...
-# ... (_get_calendar_timezone, _get_sheet_timezone, format_slot_for_user) ...
-# ... (extract_school_type) ...
-# --- Te funkcje pozostają bez zmian od poprzedniej wersji ---
 def ensure_dir(directory):
-    try: os.makedirs(directory); logging.info(f"Utworzono katalog: {directory}")
+    """Tworzy katalog, jeśli nie istnieje."""
+    try:
+        os.makedirs(directory)
+        logging.info(f"Utworzono katalog: {directory}")
     except OSError as e:
-        if e.errno != errno.EEXIST: logging.error(f"Błąd tworzenia katalogu {directory}: {e}", exc_info=True); raise
+        if e.errno != errno.EEXIST:
+            logging.error(f"Błąd tworzenia katalogu {directory}: {e}", exc_info=True)
+            raise
 
 def get_user_profile(psid):
-    if not PAGE_ACCESS_TOKEN or len(PAGE_ACCESS_TOKEN) < 50: logging.warning(f"[{psid}] Brak/nieprawidłowy PAGE_ACCESS_TOKEN do pobrania profilu."); return None
+    """Pobiera podstawowe dane profilu użytkownika z Facebook Graph API."""
+    if not PAGE_ACCESS_TOKEN or len(PAGE_ACCESS_TOKEN) < 50:
+        logging.warning(f"[{psid}] Brak/nieprawidłowy PAGE_ACCESS_TOKEN do pobrania profilu.")
+        return None
     USER_PROFILE_API_URL_TEMPLATE = "https://graph.facebook.com/v19.0/{psid}?fields=first_name,last_name,profile_pic&access_token={token}"
     url = USER_PROFILE_API_URL_TEMPLATE.format(psid=psid, token=PAGE_ACCESS_TOKEN)
     logging.debug(f"--- [{psid}] Pobieranie profilu użytkownika z FB API...")
     profile_data = {}
     try:
-        r = requests.get(url, timeout=10); r.raise_for_status(); data = r.json()
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        data = r.json()
         if 'error' in data:
             logging.error(f"BŁĄD FB API (pobieranie profilu) dla PSID {psid}: {data['error']}")
-            if data['error'].get('code') == 190: logging.error("!!! Wygląda na to, że FB_PAGE_ACCESS_TOKEN jest nieprawidłowy lub wygasł !!!")
+            if data['error'].get('code') == 190:
+                logging.error("!!! Wygląda na to, że FB_PAGE_ACCESS_TOKEN jest nieprawidłowy lub wygasł !!!")
             return None
-        profile_data['first_name'] = data.get('first_name'); profile_data['last_name'] = data.get('last_name')
-        profile_data['profile_pic'] = data.get('profile_pic'); profile_data['id'] = data.get('id')
-        if profile_data.get('first_name') or profile_data.get('last_name'): logging.info(f"[{psid}] Pomyślnie pobrano profil: Imię='{profile_data.get('first_name', 'Brak')}', Nazwisko='{profile_data.get('last_name', 'Brak')}'")
-        else: logging.warning(f"[{psid}] Pobrano profil, ale brak imienia/nazwiska w odpowiedzi API.")
+        profile_data['first_name'] = data.get('first_name')
+        profile_data['last_name'] = data.get('last_name')
+        profile_data['profile_pic'] = data.get('profile_pic')
+        profile_data['id'] = data.get('id')
+        if profile_data.get('first_name') or profile_data.get('last_name'):
+            logging.info(f"[{psid}] Pomyślnie pobrano profil: Imię='{profile_data.get('first_name', 'Brak')}', Nazwisko='{profile_data.get('last_name', 'Brak')}'")
+        else:
+            logging.warning(f"[{psid}] Pobrano profil, ale brak imienia/nazwiska w odpowiedzi API.")
         return profile_data
-    except requests.exceptions.Timeout: logging.error(f"BŁĄD TIMEOUT podczas pobierania profilu FB dla {psid}"); return None
+    except requests.exceptions.Timeout:
+        logging.error(f"BŁĄD TIMEOUT podczas pobierania profilu FB dla {psid}")
+        return None
     except requests.exceptions.HTTPError as http_err:
          logging.error(f"BŁĄD HTTP {http_err.response.status_code} podczas pobierania profilu FB dla {psid}: {http_err}")
          if http_err.response is not None:
-            try: logging.error(f"Odpowiedź FB (błąd HTTP): {http_err.response.json()}")
-            except json.JSONDecodeError: logging.error(f"Odpowiedź FB (błąd HTTP, nie JSON): {http_err.response.text}")
+            try:
+                logging.error(f"Odpowiedź FB (błąd HTTP): {http_err.response.json()}")
+            except json.JSONDecodeError:
+                logging.error(f"Odpowiedź FB (błąd HTTP, nie JSON): {http_err.response.text}")
          return None
-    except requests.exceptions.RequestException as req_err: logging.error(f"BŁĄD RequestException podczas pobierania profilu FB dla {psid}: {req_err}"); return None
-    except Exception as e: logging.error(f"Niespodziewany BŁĄD podczas pobierania profilu FB dla {psid}: {e}", exc_info=True); return None
+    except requests.exceptions.RequestException as req_err:
+        logging.error(f"BŁĄD RequestException podczas pobierania profilu FB dla {psid}: {req_err}")
+        return None
+    except Exception as e:
+        logging.error(f"Niespodziewany BŁĄD podczas pobierania profilu FB dla {psid}: {e}", exc_info=True)
+        return None
 
 def load_history(user_psid):
-    filepath = os.path.join(HISTORY_DIR, f"{user_psid}.json"); history = []; context = {}
+    """Wczytuje historię i ostatni kontekst/stan z pliku."""
+    filepath = os.path.join(HISTORY_DIR, f"{user_psid}.json")
+    history = []
+    context = {}
     # W tym modelu nie ma już stanów, ale kontekst może przechowywać tymczasowe dane
-    if not os.path.exists(filepath): logging.info(f"[{user_psid}] Plik historii nie istnieje."); return history, context
+    if not os.path.exists(filepath):
+        logging.info(f"[{user_psid}] Plik historii nie istnieje.")
+        return history, context
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
             history_data = json.load(f)
@@ -188,205 +218,370 @@ def load_history(user_psid):
                         last_system_message_index = len(history_data) - 1 - i
                         break
                 for i, msg_data in enumerate(history_data):
-                    if (isinstance(msg_data, dict) and 'role' in msg_data and msg_data['role'] in ('user', 'model') and 'parts' in msg_data and isinstance(msg_data['parts'], list) and msg_data['parts']):
-                        text_parts = []; valid_parts = True
+                    if (isinstance(msg_data, dict) and 'role' in msg_data and
+                            msg_data['role'] in ('user', 'model') and 'parts' in msg_data and
+                            isinstance(msg_data['parts'], list) and msg_data['parts']):
+                        text_parts = []
+                        valid_parts = True
                         for part_data in msg_data['parts']:
-                            if isinstance(part_data, dict) and 'text' in part_data and isinstance(part_data['text'], str): text_parts.append(Part.from_text(part_data['text']))
-                            else: logging.warning(f"Ostrz. [{user_psid}]: Niepoprawna część wiadomości (idx {i})"); valid_parts = False; break
-                        if valid_parts and text_parts: history.append(Content(role=msg_data['role'], parts=text_parts))
+                            if isinstance(part_data, dict) and 'text' in part_data and isinstance(part_data['text'], str):
+                                text_parts.append(Part.from_text(part_data['text']))
+                            else:
+                                logging.warning(f"Ostrz. [{user_psid}]: Niepoprawna część wiadomości (idx {i})")
+                                valid_parts = False
+                                break
+                        if valid_parts and text_parts:
+                            history.append(Content(role=msg_data['role'], parts=text_parts))
                     elif isinstance(msg_data, dict) and msg_data.get('role') == 'system':
                         if i == last_system_message_index:
                             context = msg_data # Wczytaj ostatni kontekst systemowy
                             logging.debug(f"[{user_psid}] Odczytano ostatni kontekst systemowy: {context}")
-                        else: logging.debug(f"[{user_psid}] Pominięto stary kontekst systemowy (idx {i}): {msg_data}")
-                    else: logging.warning(f"Ostrz. [{user_psid}]: Pominięto niepoprawną wiadomość/kontekst (idx {i}): {msg_data}")
+                        else:
+                            logging.debug(f"[{user_psid}] Pominięto stary kontekst systemowy (idx {i}): {msg_data}")
+                    else:
+                        logging.warning(f"Ostrz. [{user_psid}]: Pominięto niepoprawną wiadomość/kontekst (idx {i}): {msg_data}")
                 logging.info(f"[{user_psid}] Wczytano historię: {len(history)} wiad.")
                 context.pop('role', None) # Usuń rolę z kontekstu
                 return history, context
-            else: logging.error(f"BŁĄD [{user_psid}]: Plik historii nie jest listą."); return [], {}
-    except FileNotFoundError: logging.info(f"[{user_psid}] Plik historii nie istnieje."); return [], {}
+            else:
+                logging.error(f"BŁĄD [{user_psid}]: Plik historii nie jest listą.")
+                return [], {}
+    except FileNotFoundError:
+        logging.info(f"[{user_psid}] Plik historii nie istnieje.")
+        return [], {}
     except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
         logging.error(f"BŁĄD [{user_psid}] parsowania historii: {e}.")
-        try: os.rename(filepath, f"{filepath}.error_{int(time.time())}"); logging.warning(f"    Zmieniono nazwę uszkodzonego pliku historii.")
-        except OSError as rename_err: logging.error(f"    Nie udało się zmienić nazwy: {rename_err}")
+        try:
+            os.rename(filepath, f"{filepath}.error_{int(time.time())}")
+            logging.warning(f"    Zmieniono nazwę uszkodzonego pliku historii.")
+        except OSError as rename_err:
+             logging.error(f"    Nie udało się zmienić nazwy: {rename_err}")
         return [], {}
-    except Exception as e: logging.error(f"BŁĄD [{user_psid}] wczytywania historii: {e}", exc_info=True); return [], {}
+    except Exception as e:
+        logging.error(f"BŁĄD [{user_psid}] wczytywania historii: {e}", exc_info=True)
+        return [], {}
 
 def save_history(user_psid, history, context_to_save=None):
-    ensure_dir(HISTORY_DIR); filepath = os.path.join(HISTORY_DIR, f"{user_psid}.json"); temp_filepath = f"{filepath}.tmp"; history_data = []
+    """Zapisuje historię i aktualny kontekst/stan."""
+    ensure_dir(HISTORY_DIR)
+    filepath = os.path.join(HISTORY_DIR, f"{user_psid}.json")
+    temp_filepath = f"{filepath}.tmp"
+    history_data = []
     try:
         history_to_process = [m for m in history if isinstance(m, Content) and m.role in ('user', 'model')]
         max_messages_to_save = MAX_HISTORY_TURNS * 2
-        if len(history_to_process) > max_messages_to_save: logging.debug(f"[{user_psid}] Ograniczanie historii do zapisu z {len(history_to_process)} do {max_messages_to_save} wiadomości."); history_to_process = history_to_process[-max_messages_to_save:]
+        if len(history_to_process) > max_messages_to_save:
+            logging.debug(f"[{user_psid}] Ograniczanie historii do zapisu z {len(history_to_process)} do {max_messages_to_save} wiadomości.")
+            history_to_process = history_to_process[-max_messages_to_save:]
         for msg in history_to_process:
              if isinstance(msg, Content) and hasattr(msg, 'role') and msg.role in ('user', 'model') and hasattr(msg, 'parts') and isinstance(msg.parts, list):
                 parts_data = [{'text': part.text} for part in msg.parts if isinstance(part, Part) and hasattr(part, 'text')]
-                if parts_data: history_data.append({'role': msg.role, 'parts': parts_data})
-             else: logging.warning(f"Ostrz. [{user_psid}]: Pomijanie nieprawidłowego obiektu historii podczas zapisu: {type(msg)}")
+                if parts_data:
+                    history_data.append({'role': msg.role, 'parts': parts_data})
+             else:
+                logging.warning(f"Ostrz. [{user_psid}]: Pomijanie nieprawidłowego obiektu historii podczas zapisu: {type(msg)}")
         # Zapisujemy kontekst tylko jeśli nie jest pusty
         if context_to_save and isinstance(context_to_save, dict):
-             context_copy = context_to_save.copy(); context_copy['role'] = 'system'; history_data.append(context_copy)
+             context_copy = context_to_save.copy()
+             context_copy['role'] = 'system' # Dodaj rolę systemową do zapisu
+             history_data.append(context_copy)
              logging.debug(f"[{user_psid}] Dodano kontekst do zapisu: {context_copy}")
-        else: logging.debug(f"[{user_psid}] Zapis bez kontekstu.")
-        with open(temp_filepath, 'w', encoding='utf-8') as f: json.dump(history_data, f, ensure_ascii=False, indent=2)
+        else:
+             logging.debug(f"[{user_psid}] Zapis bez kontekstu.")
+        with open(temp_filepath, 'w', encoding='utf-8') as f:
+            json.dump(history_data, f, ensure_ascii=False, indent=2)
         os.replace(temp_filepath, filepath)
         logging.info(f"[{user_psid}] Zapisano historię/kontekst ({len(history_data)} wpisów)")
     except Exception as e:
         logging.error(f"BŁĄD [{user_psid}] zapisu historii/kontekstu: {e}", exc_info=True)
         if os.path.exists(temp_filepath):
-            try: os.remove(temp_filepath); logging.info(f"    Usunięto plik tymczasowy {temp_filepath} po błędzie zapisu.")
-            except OSError as remove_e: logging.error(f"    Nie można usunąć pliku tymczasowego {temp_filepath} po błędzie zapisu: {remove_e}")
+            try:
+                os.remove(temp_filepath)
+                logging.info(f"    Usunięto plik tymczasowy {temp_filepath} po błędzie zapisu.")
+            except OSError as remove_e:
+                logging.error(f"    Nie można usunąć pliku tymczasowego {temp_filepath} po błędzie zapisu: {remove_e}")
 
 def _get_calendar_timezone():
+    """Pobiera (i cachuje) obiekt strefy czasowej dla Kalendarza."""
     global _cal_tz
     if _cal_tz is None:
-        try: _cal_tz = pytz.timezone(CALENDAR_TIMEZONE)
-        except pytz.exceptions.UnknownTimeZoneError: logging.error(f"BŁĄD: Strefa kalendarza '{CALENDAR_TIMEZONE}' nieznana. Używam UTC."); _cal_tz = pytz.utc
+        try:
+            _cal_tz = pytz.timezone(CALENDAR_TIMEZONE)
+        except pytz.exceptions.UnknownTimeZoneError:
+            logging.error(f"BŁĄD: Strefa kalendarza '{CALENDAR_TIMEZONE}' nieznana. Używam UTC.")
+            _cal_tz = pytz.utc
     return _cal_tz
 
 def _get_sheet_timezone():
+    """Pobiera (i cachuje) obiekt strefy czasowej dla Arkusza."""
     global _sheet_tz
     if _sheet_tz is None:
-        try: _sheet_tz = pytz.timezone(SHEET_TIMEZONE)
-        except pytz.exceptions.UnknownTimeZoneError: logging.error(f"BŁĄD: Strefa arkusza '{SHEET_TIMEZONE}' nieznana. Używam UTC."); _sheet_tz = pytz.utc
+        try:
+            _sheet_tz = pytz.timezone(SHEET_TIMEZONE)
+        except pytz.exceptions.UnknownTimeZoneError:
+            logging.error(f"BŁĄD: Strefa arkusza '{SHEET_TIMEZONE}' nieznana. Używam UTC.")
+            _sheet_tz = pytz.utc
     return _sheet_tz
 
 def format_slot_for_user(slot_start):
-    if not isinstance(slot_start, datetime.datetime): logging.warning(f"Błąd formatowania slotu: oczekiwano datetime, otrzymano {type(slot_start)}"); return "[Błąd daty]"
+    """Formatuje pojedynczy slot (datetime) na czytelny tekst dla użytkownika."""
+    if not isinstance(slot_start, datetime.datetime):
+        logging.warning(f"Błąd formatowania slotu: oczekiwano datetime, otrzymano {type(slot_start)}")
+        return "[Błąd daty]"
     try:
-        tz = _get_calendar_timezone();
-        if slot_start.tzinfo is None: slot_start = tz.localize(slot_start)
-        else: slot_start = slot_start.astimezone(tz)
-        try: day_name = slot_start.strftime('%A').capitalize()
-        except Exception: day_name = POLISH_WEEKDAYS[slot_start.weekday()]
+        tz = _get_calendar_timezone() # Użyj strefy kalendarza do wyświetlania użytkownikowi
+        if slot_start.tzinfo is None:
+            slot_start = tz.localize(slot_start)
+        else:
+            slot_start = slot_start.astimezone(tz)
+        try:
+            day_name = slot_start.strftime('%A').capitalize()
+        except Exception:
+            day_name = POLISH_WEEKDAYS[slot_start.weekday()]
         hour_str = str(slot_start.hour)
-        try: formatted_date = slot_start.strftime('%d.%m.%Y'); formatted_time = slot_start.strftime(f'{hour_str}:%M'); return f"{day_name}, {formatted_date} o {formatted_time}"
-        except Exception as format_err: logging.warning(f"Błąd formatowania daty/czasu przez strftime: {format_err}. Używam formatu ISO."); return slot_start.strftime('%Y-%m-%d %H:%M %Z')
-    except Exception as e: logging.error(f"Błąd formatowania slotu {slot_start}: {e}", exc_info=True); return slot_start.isoformat()
+        try:
+            formatted_date = slot_start.strftime('%d.%m.%Y')
+            formatted_time = slot_start.strftime(f'{hour_str}:%M')
+            return f"{day_name}, {formatted_date} o {formatted_time}"
+        except Exception as format_err:
+             logging.warning(f"Błąd formatowania daty/czasu przez strftime: {format_err}. Używam formatu ISO.")
+             return slot_start.strftime('%Y-%m-%d %H:%M %Z')
+    except Exception as e:
+        logging.error(f"Błąd formatowania slotu {slot_start}: {e}", exc_info=True)
+        return slot_start.isoformat()
 
 def extract_school_type(grade_string):
-    if not grade_string or not isinstance(grade_string, str): return "Nieokreślona", "Nieokreślona"
-    grade_lower = grade_string.lower().strip(); class_desc = grade_string; school_type = "Nieokreślona"
-    type_mapping = { "Liceum": [r'liceum', r' lo ', r'\blo\b'], "Technikum": [r'technikum', r' tech ', r'\btech\b'], "Szkoła Podstawowa": [r'podstaw', r' sp ', r'\bsp\b'], "Szkoła Branżowa/Zawodowa": [r'zawodowa', r'branżowa', r'zasadnicza'] }
+    """Próbuje wyodrębnić typ szkoły i opis klasy z ciągu."""
+    if not grade_string or not isinstance(grade_string, str):
+        return "Nieokreślona", "Nieokreślona" # Zwróć krotkę
+
+    grade_lower = grade_string.lower().strip()
+    class_desc = grade_string # Domyślnie cała informacja to opis klasy
+    school_type = "Nieokreślona" # Domyślny typ szkoły
+
+    # Szukaj słów kluczowych dla typu szkoły
+    type_mapping = {
+        "Liceum": [r'liceum', r' lo ', r'\blo\b'],
+        "Technikum": [r'technikum', r' tech ', r'\btech\b'],
+        "Szkoła Podstawowa": [r'podstaw', r' sp ', r'\bsp\b'],
+        "Szkoła Branżowa/Zawodowa": [r'zawodowa', r'branżowa', r'zasadnicza']
+    }
+
     found_type = False
     for type_name, patterns in type_mapping.items():
         for pattern in patterns:
             if re.search(pattern, grade_lower):
-                school_type = type_name; cleaned_desc = re.sub(r'\s*' + pattern.replace(r'\b', '') + r'\b?\s*', ' ', grade_string, flags=re.IGNORECASE).strip()
-                if cleaned_desc: class_desc = cleaned_desc
-                found_type = True; break
-        if found_type: break
-    if school_type == "Nieokreślona" and re.search(r'\d', grade_lower): school_type = "Inna (z numerem klasy)"
+                school_type = type_name
+                # Usuń znaleziony wzorzec (i ewentualne otaczające spacje) z opisu klasy
+                # Używamy \b dla słów, ale spacje dla ' lo ', ' tech ', ' sp '
+                cleaned_desc = re.sub(r'\s*' + pattern.replace(r'\b', '') + r'\b?\s*', ' ', grade_string, flags=re.IGNORECASE).strip()
+                # Sprawdź, czy coś zostało po czyszczeniu
+                if cleaned_desc:
+                    class_desc = cleaned_desc
+                found_type = True
+                break # Znaleziono typ, przejdź do następnego
+        if found_type:
+            break
+
+    # Jeśli typ szkoły nadal nieokreślony, ale jest numer klasy
+    if school_type == "Nieokreślona" and re.search(r'\d', grade_lower): # Szukaj cyfry
+         school_type = "Inna (z numerem klasy)"
+
+    # Dodatkowe czyszczenie opisu klasy (np. usunięcie słowa "klasa")
     class_desc = re.sub(r'\bklasa\b', '', class_desc, flags=re.IGNORECASE).strip()
-    if not class_desc: class_desc = grade_string.strip()
+    # Jeśli opis klasy jest pusty po czyszczeniu, wróć do oryginalnego stringu
+    if not class_desc:
+        class_desc = grade_string.strip()
+
+    # Zwróć krotkę: (opis klasy, typ szkoły)
     return class_desc, school_type
 
 # =====================================================================
 # === FUNKCJE GOOGLE CALENDAR (ODCZYT/WERYFIKACJA) ====================
 # =====================================================================
-# ... (get_calendar_service, parse_event_time, get_free_time_ranges, is_slot_actually_free, format_ranges_for_ai) ...
-# --- Te funkcje pozostają bez zmian ---
+
 def get_calendar_service():
+    """Inicjalizuje (i cachuje) usługę Google Calendar API używając dedykowanego klucza."""
     global _calendar_service
-    if _calendar_service: return _calendar_service
-    if not os.path.exists(CALENDAR_SERVICE_ACCOUNT_FILE): logging.error(f"KRYTYCZNY BŁĄD: Brak pliku klucza usługi Google Calendar: '{CALENDAR_SERVICE_ACCOUNT_FILE}'"); return None
+    if _calendar_service:
+        return _calendar_service
+    # Użyj dedykowanego pliku klucza dla Kalendarza
+    if not os.path.exists(CALENDAR_SERVICE_ACCOUNT_FILE):
+        logging.error(f"KRYTYCZNY BŁĄD: Brak pliku klucza usługi Google Calendar: '{CALENDAR_SERVICE_ACCOUNT_FILE}'")
+        return None
     try:
+        # Użyj dedykowanego pliku klucza i zakresów dla Kalendarza
         creds = service_account.Credentials.from_service_account_file(CALENDAR_SERVICE_ACCOUNT_FILE, scopes=CALENDAR_SCOPES)
         service = build('calendar', 'v3', credentials=creds, cache_discovery=False)
-        logging.info(f"Utworzono połączenie z Google Calendar API (odczyt) używając '{CALENDAR_SERVICE_ACCOUNT_FILE}'."); _calendar_service = service; return service
-    except Exception as e: logging.error(f"Błąd tworzenia usługi Google Calendar używając '{CALENDAR_SERVICE_ACCOUNT_FILE}': {e}", exc_info=True); return None
+        logging.info(f"Utworzono połączenie z Google Calendar API (odczyt) używając '{CALENDAR_SERVICE_ACCOUNT_FILE}'.")
+        _calendar_service = service
+        return service
+    except Exception as e:
+        logging.error(f"Błąd tworzenia usługi Google Calendar używając '{CALENDAR_SERVICE_ACCOUNT_FILE}': {e}", exc_info=True)
+        return None
 
 def parse_event_time(event_time_data, default_tz):
-    dt_str = None; is_date_only = False
-    if not isinstance(event_time_data, dict): logging.warning(f"Ostrz.: parse_event_time otrzymało nieprawidłowy typ danych: {type(event_time_data)}"); return None
-    if 'dateTime' in event_time_data: dt_str = event_time_data['dateTime']
-    elif 'date' in event_time_data: dt_str = event_time_data['date']; is_date_only = True
-    else: logging.debug(f"Brak klucza 'dateTime' lub 'date' w event_time_data: {event_time_data}"); return None
-    if not isinstance(dt_str, str): logging.warning(f"Ostrz.: Oczekiwano stringa czasu, otrzymano {type(dt_str)} w {event_time_data}"); return None
+    """Parsuje dane czasu wydarzenia z API Kalendarza, zwracając świadomy obiekt datetime."""
+    dt_str = None
+    is_date_only = False
+    if not isinstance(event_time_data, dict):
+        logging.warning(f"Ostrz.: parse_event_time otrzymało nieprawidłowy typ danych: {type(event_time_data)}")
+        return None
+    if 'dateTime' in event_time_data:
+        dt_str = event_time_data['dateTime']
+    elif 'date' in event_time_data:
+        dt_str = event_time_data['date']
+        is_date_only = True
+    else:
+        logging.debug(f"Brak klucza 'dateTime' lub 'date' w event_time_data: {event_time_data}")
+        return None
+    if not isinstance(dt_str, str):
+        logging.warning(f"Ostrz.: Oczekiwano stringa czasu, otrzymano {type(dt_str)} w {event_time_data}")
+        return None
     try:
-        if is_date_only: dt_naive = datetime.datetime.strptime(dt_str, '%Y-%m-%d'); dt_aware = default_tz.localize(dt_naive); return dt_aware
-        else:
-            if dt_str.endswith('Z'): dt_str = dt_str[:-1] + '+00:00'
-            dt = datetime.datetime.fromisoformat(dt_str)
-            if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None: logging.warning(f"Ostrz.: Parsowany dateTime '{event_time_data['dateTime']}' jako naiwny. Zakładam strefę {default_tz.zone}."); dt_aware = default_tz.localize(dt)
-            else: dt_aware = dt.astimezone(default_tz)
+        if is_date_only:
+            dt_naive = datetime.datetime.strptime(dt_str, '%Y-%m-%d')
+            dt_aware = default_tz.localize(dt_naive)
             return dt_aware
-    except ValueError as e: logging.warning(f"Ostrz.: Nie udało się sparsować czasu '{dt_str}': {e}"); return None
-    except Exception as e: logging.error(f"Nieoczekiwany błąd podczas parsowania czasu '{dt_str}': {e}", exc_info=True); return None
+        else:
+            if dt_str.endswith('Z'):
+                dt_str = dt_str[:-1] + '+00:00'
+            dt = datetime.datetime.fromisoformat(dt_str)
+            if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+                logging.warning(f"Ostrz.: Parsowany dateTime '{event_time_data['dateTime']}' jako naiwny. Zakładam strefę {default_tz.zone}.")
+                dt_aware = default_tz.localize(dt)
+            else:
+                dt_aware = dt.astimezone(default_tz)
+            return dt_aware
+    except ValueError as e:
+        logging.warning(f"Ostrz.: Nie udało się sparsować czasu '{dt_str}': {e}")
+        return None
+    except Exception as e:
+        logging.error(f"Nieoczekiwany błąd podczas parsowania czasu '{dt_str}': {e}", exc_info=True)
+        return None
 
 def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
-    service = get_calendar_service(); tz = _get_calendar_timezone()
-    if not service: logging.error("Błąd: Usługa kalendarza niedostępna do pobrania wolnych terminów."); return []
-    if start_datetime.tzinfo is None: start_datetime = tz.localize(start_datetime)
-    else: start_datetime = start_datetime.astimezone(tz)
-    if end_datetime.tzinfo is None: end_datetime = tz.localize(end_datetime)
-    else: end_datetime = end_datetime.astimezone(tz)
-    now = datetime.datetime.now(tz); start_datetime = max(start_datetime, now)
-    if start_datetime >= end_datetime: logging.info(f"Zakres wyszukiwania [{start_datetime:%Y-%m-%d %H:%M} - {end_datetime:%Y-%m-%d %H:%M}] jest nieprawidłowy lub całkowicie w przeszłości."); return []
+    """Pobiera listę wolnych zakresów czasowych z kalendarza, filtrując je wg 24h wyprzedzenia."""
+    service = get_calendar_service()
+    tz = _get_calendar_timezone()
+    if not service:
+        logging.error("Błąd: Usługa kalendarza niedostępna do pobrania wolnych terminów.")
+        return []
+    if start_datetime.tzinfo is None:
+        start_datetime = tz.localize(start_datetime)
+    else:
+        start_datetime = start_datetime.astimezone(tz)
+    if end_datetime.tzinfo is None:
+        end_datetime = tz.localize(end_datetime)
+    else:
+        end_datetime = end_datetime.astimezone(tz)
+    now = datetime.datetime.now(tz)
+    start_datetime = max(start_datetime, now)
+    if start_datetime >= end_datetime:
+        logging.info(f"Zakres wyszukiwania [{start_datetime:%Y-%m-%d %H:%M} - {end_datetime:%Y-%m-%d %H:%M}] jest nieprawidłowy lub całkowicie w przeszłości.")
+        return []
     logging.info(f"Szukanie wolnych zakresów w '{calendar_id}' od {start_datetime:%Y-%m-%d %H:%M %Z} do {end_datetime:%Y-%m-%d %H:%M %Z}")
     try:
         body = {"timeMin": start_datetime.isoformat(), "timeMax": end_datetime.isoformat(), "timeZone": CALENDAR_TIMEZONE, "items": [{"id": calendar_id}]}
         freebusy_result = service.freebusy().query(body=body).execute()
         calendar_data = freebusy_result.get('calendars', {}).get(calendar_id, {})
         if 'errors' in calendar_data:
-             for error in calendar_data['errors']: logging.error(f"Błąd API Freebusy dla kalendarza {calendar_id}: {error.get('reason')} - {error.get('message')}")
-             if any(e.get('reason') == 'notFound' or e.get('reason') == 'forbidden' for e in calendar_data['errors']): return []
-        busy_times_raw = calendar_data.get('busy', []); busy_times = []
+             for error in calendar_data['errors']:
+                 logging.error(f"Błąd API Freebusy dla kalendarza {calendar_id}: {error.get('reason')} - {error.get('message')}")
+             if any(e.get('reason') == 'notFound' or e.get('reason') == 'forbidden' for e in calendar_data['errors']):
+                 return []
+        busy_times_raw = calendar_data.get('busy', [])
+        busy_times = []
         for busy_slot in busy_times_raw:
-            start_str = busy_slot.get('start'); end_str = busy_slot.get('end')
+            start_str = busy_slot.get('start')
+            end_str = busy_slot.get('end')
             if isinstance(start_str, str) and isinstance(end_str, str):
-                busy_start = parse_event_time({'dateTime': start_str}, tz); busy_end = parse_event_time({'dateTime': end_str}, tz)
+                busy_start = parse_event_time({'dateTime': start_str}, tz)
+                busy_end = parse_event_time({'dateTime': end_str}, tz)
                 if busy_start and busy_end and busy_start < busy_end:
-                    busy_start_clipped = max(busy_start, start_datetime); busy_end_clipped = min(busy_end, end_datetime)
-                    if busy_start_clipped < busy_end_clipped: busy_times.append({'start': busy_start_clipped, 'end': busy_end_clipped})
-                else: logging.warning(f"Ostrz.: Pominięto nieprawidłowy lub niesparsowany zajęty czas: start={start_str}, end={end_str}")
-            else: logging.warning(f"Ostrz.: Pominięto zajęty slot o nieoczekiwanej strukturze danych: {busy_slot}")
-    except HttpError as error: logging.error(f'Błąd HTTP API Freebusy: {error.resp.status} {error.resp.reason}', exc_info=True); return []
-    except Exception as e: logging.error(f"Nieoczekiwany błąd podczas zapytania Freebusy: {e}", exc_info=True); return []
-    busy_times.sort(key=lambda x: x['start']); merged_busy_times = []
+                    busy_start_clipped = max(busy_start, start_datetime)
+                    busy_end_clipped = min(busy_end, end_datetime)
+                    if busy_start_clipped < busy_end_clipped:
+                        busy_times.append({'start': busy_start_clipped, 'end': busy_end_clipped})
+                else:
+                    logging.warning(f"Ostrz.: Pominięto nieprawidłowy lub niesparsowany zajęty czas: start={start_str}, end={end_str}")
+            else:
+                 logging.warning(f"Ostrz.: Pominięto zajęty slot o nieoczekiwanej strukturze danych: {busy_slot}")
+    except HttpError as error:
+        logging.error(f'Błąd HTTP API Freebusy: {error.resp.status} {error.resp.reason}', exc_info=True)
+        return []
+    except Exception as e:
+        logging.error(f"Nieoczekiwany błąd podczas zapytania Freebusy: {e}", exc_info=True)
+        return []
+    busy_times.sort(key=lambda x: x['start'])
+    merged_busy_times = []
     for busy in busy_times:
-        if not merged_busy_times or busy['start'] > merged_busy_times[-1]['end']: merged_busy_times.append(busy)
-        else: merged_busy_times[-1]['end'] = max(merged_busy_times[-1]['end'], busy['end'])
-    free_ranges = []; current_time = start_datetime
+        if not merged_busy_times or busy['start'] > merged_busy_times[-1]['end']:
+            merged_busy_times.append(busy)
+        else:
+            merged_busy_times[-1]['end'] = max(merged_busy_times[-1]['end'], busy['end'])
+    free_ranges = []
+    current_time = start_datetime
     for busy_slot in merged_busy_times:
-        if current_time < busy_slot['start']: free_ranges.append({'start': current_time, 'end': busy_slot['start']})
+        if current_time < busy_slot['start']:
+            free_ranges.append({'start': current_time, 'end': busy_slot['start']})
         current_time = max(current_time, busy_slot['end'])
-    if current_time < end_datetime: free_ranges.append({'start': current_time, 'end': end_datetime})
-    intermediate_free_slots = []; min_duration_delta = datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+    if current_time < end_datetime:
+        free_ranges.append({'start': current_time, 'end': end_datetime})
+    intermediate_free_slots = []
+    min_duration_delta = datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
     for free_range in free_ranges:
-        range_start = free_range['start']; range_end = free_range['end']; current_segment_start = range_start
+        range_start = free_range['start']
+        range_end = free_range['end']
+        current_segment_start = range_start
         while current_segment_start < range_end:
             day_date = current_segment_start.date()
             work_day_start = tz.localize(datetime.datetime.combine(day_date, datetime.time(WORK_START_HOUR, 0)))
             work_day_end = tz.localize(datetime.datetime.combine(day_date, datetime.time(WORK_END_HOUR, 0)))
-            effective_start = max(current_segment_start, work_day_start); effective_end = min(range_end, work_day_end)
+            effective_start = max(current_segment_start, work_day_start)
+            effective_end = min(range_end, work_day_end)
             if effective_start < effective_end and (effective_end - effective_start) >= min_duration_delta:
                 rounded_start = effective_start
-                if rounded_start < effective_end and (effective_end - rounded_start) >= min_duration_delta: intermediate_free_slots.append({'start': rounded_start, 'end': effective_end})
+                if rounded_start < effective_end and (effective_end - rounded_start) >= min_duration_delta:
+                    intermediate_free_slots.append({'start': rounded_start, 'end': effective_end})
             next_day_start = tz.localize(datetime.datetime.combine(day_date + datetime.timedelta(days=1), datetime.time(0,0)))
-            current_segment_start = max(work_day_end, next_day_start); current_segment_start = max(current_segment_start, range_start)
-    final_filtered_slots = []; min_start_time = now + datetime.timedelta(hours=MIN_BOOKING_LEAD_HOURS)
+            current_segment_start = max(work_day_end, next_day_start)
+            current_segment_start = max(current_segment_start, range_start)
+    final_filtered_slots = []
+    min_start_time = now + datetime.timedelta(hours=MIN_BOOKING_LEAD_HOURS)
     logging.debug(f"Minimalny czas startu po filtrze {MIN_BOOKING_LEAD_HOURS}h: {min_start_time:%Y-%m-%d %H:%M %Z}")
     for slot in intermediate_free_slots:
-        original_start = slot['start']; original_end = slot['end']
+        original_start = slot['start']
+        original_end = slot['end']
         if original_start >= min_start_time:
-            if (original_end - original_start) >= min_duration_delta: final_filtered_slots.append(slot)
+            if (original_end - original_start) >= min_duration_delta:
+                final_filtered_slots.append(slot)
         elif original_end > min_start_time:
             adjusted_start = min_start_time
             if (original_end - adjusted_start) >= min_duration_delta:
                 final_filtered_slots.append({'start': adjusted_start, 'end': original_end})
                 logging.debug(f"Zmodyfikowano slot {original_start:%H:%M}-{original_end:%H:%M} na {adjusted_start:%H:%M}-{original_end:%H:%M} z powodu reguły {MIN_BOOKING_LEAD_HOURS}h.")
     logging.info(f"Znaleziono {len(final_filtered_slots)} wolnych zakresów po filtrze godzin pracy i {MIN_BOOKING_LEAD_HOURS}h wyprzedzenia.")
-    for i, slot in enumerate(final_filtered_slots[:5]): logging.debug(f"  Finalny Slot {i+1}: {slot['start']:%Y-%m-%d %H:%M %Z} - {slot['end']:%Y-%m-%d %H:%M %Z}")
-    if len(final_filtered_slots) > 5: logging.debug("  ...")
+    for i, slot in enumerate(final_filtered_slots[:5]):
+        logging.debug(f"  Finalny Slot {i+1}: {slot['start']:%Y-%m-%d %H:%M %Z} - {slot['end']:%Y-%m-%d %H:%M %Z}")
+    if len(final_filtered_slots) > 5:
+        logging.debug("  ...")
     return final_filtered_slots
 
 def is_slot_actually_free(start_time, calendar_id):
-    service = get_calendar_service(); tz = _get_calendar_timezone()
-    if not service: logging.error("Błąd: Usługa kalendarza niedostępna do weryfikacji slotu."); return False
-    if not isinstance(start_time, datetime.datetime): logging.error(f"Błąd weryfikacji: start_time nie jest obiektem datetime ({type(start_time)})"); return False
-    if start_time.tzinfo is None: start_time = tz.localize(start_time)
-    else: start_time = start_time.astimezone(tz)
+    """Weryfikuje w czasie rzeczywistym, czy slot jest wolny w Kalendarzu Google."""
+    service = get_calendar_service()
+    tz = _get_calendar_timezone()
+    if not service:
+        logging.error("Błąd: Usługa kalendarza niedostępna do weryfikacji slotu.")
+        return False
+    if not isinstance(start_time, datetime.datetime):
+        logging.error(f"Błąd weryfikacji: start_time nie jest obiektem datetime ({type(start_time)})")
+        return False
+    if start_time.tzinfo is None:
+        start_time = tz.localize(start_time)
+    else:
+        start_time = start_time.astimezone(tz)
     end_time = start_time + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
     body = {"timeMin": start_time.isoformat(), "timeMax": end_time.isoformat(), "timeZone": CALENDAR_TIMEZONE, "items": [{"id": calendar_id}]}
     try:
@@ -394,27 +589,53 @@ def is_slot_actually_free(start_time, calendar_id):
         freebusy_result = service.freebusy().query(body=body).execute()
         calendar_data = freebusy_result.get('calendars', {}).get(calendar_id, {})
         if 'errors' in calendar_data:
-             for error in calendar_data['errors']: logging.error(f"Błąd API Freebusy (weryfikacja) dla kalendarza {calendar_id}: {error.get('reason')} - {error.get('message')}")
+             for error in calendar_data['errors']:
+                 logging.error(f"Błąd API Freebusy (weryfikacja) dla kalendarza {calendar_id}: {error.get('reason')} - {error.get('message')}")
              return False
         busy_times = calendar_data.get('busy', [])
-        if not busy_times: logging.info(f"Weryfikacja: Slot {start_time:%Y-%m-%d %H:%M} JEST wolny."); return True
-        else: logging.warning(f"Weryfikacja: Slot {start_time:%Y-%m-%d %H:%M} jest ZAJĘTY. Zwrócone zajęte sloty: {busy_times}"); return False
-    except HttpError as error: logging.error(f"Błąd HTTP API Freebusy podczas weryfikacji: {error.resp.status} {error.resp.reason}", exc_info=True); return False
-    except Exception as e: logging.error(f"Nieoczekiwany błąd podczas weryfikacji Freebusy: {e}", exc_info=True); return False
+        if not busy_times:
+            logging.info(f"Weryfikacja: Slot {start_time:%Y-%m-%d %H:%M} JEST wolny.")
+            return True
+        else:
+            logging.warning(f"Weryfikacja: Slot {start_time:%Y-%m-%d %H:%M} jest ZAJĘTY. Zwrócone zajęte sloty: {busy_times}")
+            return False
+    except HttpError as error:
+        logging.error(f"Błąd HTTP API Freebusy podczas weryfikacji: {error.resp.status} {error.resp.reason}", exc_info=True)
+        return False
+    except Exception as e:
+        logging.error(f"Nieoczekiwany błąd podczas weryfikacji Freebusy: {e}", exc_info=True)
+        return False
 
 def format_ranges_for_ai(ranges):
-    if not ranges: return "Brak dostępnych zakresów czasowych w podanym okresie."
-    tz = _get_calendar_timezone(); formatted_lines = [f"Dostępne ZAKRESY czasowe (wizyta trwa {APPOINTMENT_DURATION_MINUTES} minut). Porozmawiaj z użytkownikiem, aby znaleźć pasujący termin. Pamiętaj, że dokładny czas rozpoczęcia musi mieścić się w jednym z podanych zakresów.", "--- Dostępne Zakresy (Data YYYY-MM-DD, Dzień, Od Godziny HH:MM, Do Godziny HH:MM) ---"]
-    slots_added = 0; max_slots_to_show = 25; sorted_ranges = sorted(ranges, key=lambda r: r['start'])
+    """Formatuje listę zakresów czasowych na bardziej techniczny tekst dla AI."""
+    if not ranges:
+        return "Brak dostępnych zakresów czasowych w podanym okresie."
+    tz = _get_calendar_timezone()
+    formatted_lines = [
+        f"Dostępne ZAKRESY czasowe (wizyta trwa {APPOINTMENT_DURATION_MINUTES} minut). Porozmawiaj z użytkownikiem, aby znaleźć pasujący termin. Pamiętaj, że dokładny czas rozpoczęcia musi mieścić się w jednym z podanych zakresów.",
+        "--- Dostępne Zakresy (Data YYYY-MM-DD, Dzień, Od Godziny HH:MM, Do Godziny HH:MM) ---"
+    ]
+    slots_added = 0
+    max_slots_to_show = 25
+    sorted_ranges = sorted(ranges, key=lambda r: r['start'])
     for r in sorted_ranges:
-        start_dt = r['start'].astimezone(tz); end_dt = r['end'].astimezone(tz)
-        try: day_name = start_dt.strftime('%A').capitalize()
-        except Exception: day_name = POLISH_WEEKDAYS[start_dt.weekday()]
-        date_str = start_dt.strftime('%Y-%m-%d'); start_time_str = start_dt.strftime('%H:%M'); end_time_str = end_dt.strftime('%H:%M')
+        start_dt = r['start'].astimezone(tz)
+        end_dt = r['end'].astimezone(tz)
+        try:
+            day_name = start_dt.strftime('%A').capitalize()
+        except Exception:
+            day_name = POLISH_WEEKDAYS[start_dt.weekday()]
+        date_str = start_dt.strftime('%Y-%m-%d')
+        start_time_str = start_dt.strftime('%H:%M')
+        end_time_str = end_dt.strftime('%H:%M')
         if start_dt < end_dt:
-            formatted_lines.append(f"- {date_str}, {day_name}, od {start_time_str}, do {end_time_str}"); slots_added += 1
-            if slots_added >= max_slots_to_show: formatted_lines.append("- ... (i potencjalnie więcej)"); break
-    if slots_added == 0: return "Brak dostępnych zakresów czasowych w godzinach pracy w podanym okresie."
+            formatted_lines.append(f"- {date_str}, {day_name}, od {start_time_str}, do {end_time_str}")
+            slots_added += 1
+            if slots_added >= max_slots_to_show:
+                formatted_lines.append("- ... (i potencjalnie więcej)")
+                break
+    if slots_added == 0:
+        return "Brak dostępnych zakresów czasowych w godzinach pracy w podanym okresie."
     formatted_output = "\n".join(formatted_lines)
     logging.debug(f"--- Zakresy sformatowane dla AI ({slots_added} pokazanych) ---\n{formatted_output}\n---------------------------------")
     return formatted_output
@@ -446,11 +667,14 @@ def get_sheets_service():
 def write_to_sheet_phase1(psid, start_time):
     """Zapisuje dane Fazy 1 (PSID, Data, Czas) do arkusza."""
     service = get_sheets_service()
-    if not service: return False, "Błąd połączenia z Google Sheets (Faza 1)."
+    if not service:
+        return False, "Błąd połączenia z Google Sheets (Faza 1)."
 
     tz = _get_sheet_timezone()
-    if start_time.tzinfo is None: start_time = tz.localize(start_time)
-    else: start_time = start_time.astimezone(tz)
+    if start_time.tzinfo is None:
+        start_time = tz.localize(start_time)
+    else:
+        start_time = start_time.astimezone(tz)
     date_str = start_time.strftime('%Y-%m-%d')
     time_str = start_time.strftime('%H:%M')
 
@@ -497,65 +721,73 @@ def write_to_sheet_phase1(psid, start_time):
         logging.error(f"Nieoczekiwany błąd Python podczas zapisu Fazy 1: {e}", exc_info=True)
         return False, "Wewnętrzny błąd systemu podczas zapisu Fazy 1."
 
-def find_row_and_update_sheet(psid, start_time, student_data):
-    """Znajduje wiersz na podstawie PSID i czasu, a następnie aktualizuje go danymi ucznia."""
+def find_row_and_update_sheet(psid, start_time, student_data, sheet_row_index=None):
+    """Znajduje wiersz (używając indeksu jeśli dostępny, inaczej szuka) i aktualizuje go danymi Fazy 2."""
     service = get_sheets_service()
-    if not service: return False, "Błąd połączenia z Google Sheets (Faza 2)."
+    if not service:
+        return False, "Błąd połączenia z Google Sheets (Faza 2)."
 
     tz = _get_sheet_timezone()
-    if start_time.tzinfo is None: start_time = tz.localize(start_time)
-    else: start_time = start_time.astimezone(tz)
+    if start_time.tzinfo is None:
+        start_time = tz.localize(start_time)
+    else:
+        start_time = start_time.astimezone(tz)
     target_date_str = start_time.strftime('%Y-%m-%d')
     target_time_str = start_time.strftime('%H:%M')
 
-    logging.info(f"Próba znalezienia wiersza dla PSID {psid} i terminu {target_date_str} {target_time_str} w celu aktualizacji Fazy 2.")
+    target_row_number = sheet_row_index # Użyj zapisanego indeksu, jeśli jest
 
+    # Jeśli nie mamy zapisanego indeksu wiersza, spróbuj go znaleźć
+    if target_row_number is None:
+        logging.warning(f"Brak zapisanego indeksu wiersza dla PSID {psid} i terminu {target_date_str} {target_time_str}. Próba znalezienia...")
+        try:
+            read_range = SHEET_READ_RANGE_FOR_UPDATE
+            result = service.spreadsheets().values().get(
+                spreadsheetId=SPREADSHEET_ID, range=read_range
+            ).execute()
+            values = result.get('values', [])
+            found_row_index = -1
+            for i, row in enumerate(values):
+                row_psid = row[SHEET_PSID_COLUMN_INDEX - 1].strip() if len(row) >= SHEET_PSID_COLUMN_INDEX else None
+                row_date = row[SHEET_DATE_COLUMN_INDEX - 1].strip() if len(row) >= SHEET_DATE_COLUMN_INDEX else None
+                row_time = row[SHEET_TIME_COLUMN_INDEX - 1].strip() if len(row) >= SHEET_TIME_COLUMN_INDEX else None
+                if row_psid == psid and row_date == target_date_str and row_time == target_time_str:
+                    target_row_number = i + 2 # +2 bo indeksy API są 0-based, a dane zaczynają się od wiersza 2
+                    logging.info(f"Znaleziono pasujący wiersz Fazy 1 w arkuszu: {target_row_number}")
+                    break
+            if target_row_number is None: # Jeśli nadal nie znaleziono
+                 logging.error(f"Nie znaleziono wiersza Fazy 1 dla PSID {psid} i terminu {target_date_str} {target_time_str}. Nie można zaktualizować.")
+                 return False, "Nie znaleziono pierwotnego zapisu terminu."
+        except HttpError as error:
+            logging.error(f"Błąd API Google Sheets podczas szukania wiersza Fazy 1: {error}", exc_info=True)
+            return False, "Błąd odczytu arkusza przy szukaniu wiersza."
+        except Exception as e:
+            logging.error(f"Nieoczekiwany błąd Python podczas szukania wiersza Fazy 1: {e}", exc_info=True)
+            return False, "Wewnętrzny błąd systemu podczas szukania wiersza."
+
+    # Mamy numer wiersza (target_row_number), przygotuj aktualizację
     try:
-        # Odczytaj kolumny PSID, Daty i Czasu
-        read_range = SHEET_READ_RANGE_FOR_UPDATE
-        result = service.spreadsheets().values().get(
-            spreadsheetId=SPREADSHEET_ID, range=read_range
-        ).execute()
-        values = result.get('values', [])
-
-        target_row_index = -1
-        # Pamiętaj, że indeksy API zaczynają się od 0, a numery wierszy w arkuszu od 1
-        # Dane zaczynają się od wiersza 2, więc pierwszy wiersz danych ma indeks 0 w `values`
-        # i odpowiada wierszowi 2 w arkuszu.
-        for i, row in enumerate(values):
-            row_psid = row[SHEET_PSID_COLUMN_INDEX - 1].strip() if len(row) >= SHEET_PSID_COLUMN_INDEX else None
-            row_date = row[SHEET_DATE_COLUMN_INDEX - 1].strip() if len(row) >= SHEET_DATE_COLUMN_INDEX else None
-            row_time = row[SHEET_TIME_COLUMN_INDEX - 1].strip() if len(row) >= SHEET_TIME_COLUMN_INDEX else None
-
-            if row_psid == psid and row_date == target_date_str and row_time == target_time_str:
-                target_row_index = i + 2 # +2 bo indeksy API są 0-based, a dane zaczynają się od wiersza 2
-                logging.info(f"Znaleziono pasujący wiersz Fazy 1 w arkuszu: {target_row_index}")
-                break
-
-        if target_row_index == -1:
-            logging.error(f"Nie znaleziono wiersza Fazy 1 dla PSID {psid} i terminu {target_date_str} {target_time_str}. Nie można zaktualizować.")
-            return False, "Nie znaleziono pierwotnego zapisu terminu."
-
-        # Przygotuj pełny wiersz do aktualizacji
-        parent_fn = student_data.get('parent_first_name', 'Brak (API?)')
-        parent_ln = student_data.get('parent_last_name', 'Brak (API?)')
-        student_fn = student_data.get('student_first_name', 'Brak (Parse)')
-        student_ln = student_data.get('student_last_name', 'Brak (Parse)')
-        grade_info = student_data.get('grade_info', 'Brak (Parse)')
-        level_info = student_data.get('level_info', 'Brak')
+        parent_fn = student_data.get('parent_first_name', '') # Pobierz z danych przekazanych
+        parent_ln = student_data.get('parent_last_name', '')
+        student_fn = student_data.get('student_first_name', '')
+        student_ln = student_data.get('student_last_name', '')
+        grade_info = student_data.get('grade_info', '')
+        level_info = student_data.get('level_info', '')
         class_desc, school_type = extract_school_type(grade_info)
 
-        # Kolejność musi być zgodna z arkuszem!
-        updated_row_data = [
-            psid, parent_fn, parent_ln, student_fn, student_ln,
-            target_date_str, target_time_str, class_desc, school_type, level_info
+        # Przygotuj dane do aktualizacji - tylko kolumny od Rodzica do Poziomu
+        # Kolejność musi odpowiadać kolumnom od B do J
+        update_data = [
+            parent_fn, parent_ln, student_fn, student_ln,
+            target_date_str, target_time_str, # Data i czas są już w arkuszu, ale dla pewności je nadpisujemy
+            class_desc, school_type, level_info
         ]
 
-        # Określ zakres do aktualizacji (cały wiersz)
-        update_range = f"{SHEET_NAME}!A{target_row_index}:J{target_row_index}" # Zakładając 10 kolumn (A-J)
-        body = {'values': [updated_row_data]}
+        # Określ zakres do aktualizacji (od kolumny B do J w znalezionym wierszu)
+        update_range = f"{SHEET_NAME}!B{target_row_number}:J{target_row_number}"
+        body = {'values': [update_data]}
 
-        logging.info(f"Próba aktualizacji Fazy 2 wiersza {target_row_index} w zakresie {update_range} danymi: {updated_row_data}")
+        logging.info(f"Próba aktualizacji Fazy 2 wiersza {target_row_number} w zakresie {update_range} danymi: {update_data}")
         update_result = service.spreadsheets().values().update(
             spreadsheetId=SPREADSHEET_ID, range=update_range,
             valueInputOption='USER_ENTERED', body=body
@@ -565,18 +797,78 @@ def find_row_and_update_sheet(psid, start_time, student_data):
 
     except HttpError as error:
         error_details = f"Kod: {error.resp.status}, Powód: {error.resp.reason}"
-        logging.error(f"Błąd API Google Sheets podczas odczytu/aktualizacji Fazy 2: {error}, Szczegóły: {error_details}", exc_info=True)
-        return False, f"Błąd odczytu/aktualizacji Fazy 2 ({error_details})."
+        logging.error(f"Błąd API Google Sheets podczas aktualizacji Fazy 2: {error}, Szczegóły: {error_details}", exc_info=True)
+        return False, f"Błąd aktualizacji Fazy 2 ({error_details})."
     except Exception as e:
-        logging.error(f"Nieoczekiwany błąd Python podczas odczytu/aktualizacji Fazy 2: {e}", exc_info=True)
+        logging.error(f"Nieoczekiwany błąd Python podczas aktualizacji Fazy 2: {e}", exc_info=True)
         return False, "Wewnętrzny błąd systemu podczas aktualizacji Fazy 2."
 
+
+def is_slot_in_sheet(start_time):
+    """Sprawdza, czy dany termin (data i godzina) już istnieje w arkuszu."""
+    service = get_sheets_service()
+    if not service:
+        logging.error("Błąd: Usługa arkuszy niedostępna do weryfikacji slotu w arkuszu.")
+        return True # Bezpieczniej założyć, że jest zajęty
+
+    if not isinstance(start_time, datetime.datetime):
+        logging.error(f"Błąd weryfikacji w arkuszu: start_time nie jest obiektem datetime ({type(start_time)})")
+        return True
+
+    tz = _get_sheet_timezone()
+    if start_time.tzinfo is None:
+        start_time = tz.localize(start_time)
+    else:
+        start_time = start_time.astimezone(tz)
+
+    target_date_str = start_time.strftime('%Y-%m-%d')
+    target_time_str = start_time.strftime('%H:%M')
+
+    try:
+        date_col_letter = chr(ord('A') + SHEET_DATE_COLUMN_INDEX - 1)
+        time_col_letter = chr(ord('A') + SHEET_TIME_COLUMN_INDEX - 1)
+        # Czytaj tylko potrzebne kolumny
+        read_range = f"{SHEET_NAME}!{date_col_letter}2:{time_col_letter}"
+    except Exception as e:
+        logging.error(f"Błąd konwersji indeksów kolumn na litery: {e}")
+        return True
+
+    logging.debug(f"Sprawdzanie arkusza '{SHEET_NAME}' w zakresie '{read_range}' dla terminu: {target_date_str} {target_time_str}")
+
+    try:
+        result = service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID,
+            range=read_range
+        ).execute()
+        values = result.get('values', [])
+
+        if not values:
+            logging.debug("Arkusz jest pusty lub nie zawiera danych w sprawdzanym zakresie.")
+            return False
+
+        for row in values:
+            if len(row) >= 2: # Oczekujemy co najmniej daty i czasu
+                sheet_date_str = row[0].strip()
+                sheet_time_str = row[1].strip()
+                if sheet_date_str == target_date_str and sheet_time_str == target_time_str:
+                    logging.warning(f"Weryfikacja arkusza: Slot {target_date_str} {target_time_str} ZNALEZIONY w arkuszu.")
+                    return True
+
+        logging.info(f"Weryfikacja arkusza: Slot {target_date_str} {target_time_str} NIE ZNALEZIONY w arkuszu.")
+        return False
+
+    except HttpError as error:
+        logging.error(f"Błąd HTTP API podczas odczytu arkusza do weryfikacji: {error.resp.status} {error.resp.reason}", exc_info=True)
+        return True # Bezpieczniej założyć, że zajęty
+    except Exception as e:
+        logging.error(f"Nieoczekiwany błąd podczas odczytu arkusza do weryfikacji: {e}", exc_info=True)
+        return True
 
 # =====================================================================
 # === FUNKCJE KOMUNIKACJI FB ==========================================
 # =====================================================================
 # ... (_send_typing_on, _send_single_message, send_message, _simulate_typing) ...
-# --- Te funkcje pozostają bez zmian ---
+# --- Bez zmian ---
 def _send_typing_on(recipient_id):
     if not PAGE_ACCESS_TOKEN or len(PAGE_ACCESS_TOKEN) < 50 or not ENABLE_TYPING_DELAY: return
     logging.debug(f"[{recipient_id}] Wysyłanie 'typing_on'")
@@ -742,10 +1034,10 @@ SYSTEM_INSTRUCTION_UNIFIED = """Jesteś wielozadaniowym asystentem AI dla 'Zakr�
     duration=APPOINTMENT_DURATION_MINUTES, min_lead_hours=MIN_BOOKING_LEAD_HOURS,
     calendar_timezone=CALENDAR_TIMEZONE,
     action_check_availability=ACTION_CHECK_AVAILABILITY,
-    action_verify_slot=ACTION_VERIFY_SLOT[:-1], # Usuń ostatni znak ':' dla formatowania
-    action_write_phase1=ACTION_WRITE_PHASE1[:-1], # Usuń ostatni znak ':' dla formatowania
+    action_verify_slot=ACTION_VERIFY_SLOT, # Zwróć pełny znacznik z ':'
+    action_write_phase1=ACTION_WRITE_PHASE1, # Zwróć pełny znacznik z ':'
     action_gather_info=ACTION_GATHER_INFO,
-    action_finalize=ACTION_FINALIZE[:-1] # Usuń ostatni znak ':' dla formatowania
+    action_finalize=ACTION_FINALIZE # Zwróć pełny znacznik z ':'
 )
 
 # --- Jedna funkcja AI ---
@@ -757,36 +1049,50 @@ def get_unified_ai_response(user_psid, history, current_user_message_text, conte
 
     # Przygotuj prompt systemowy
     system_instruction = SYSTEM_INSTRUCTION_UNIFIED
-    if available_ranges is not None: # Jeśli mamy zakresy do wstrzyknięcia
-        ranges_text = format_ranges_for_ai(available_ranges)
-        try:
-            system_instruction = system_instruction.format(available_ranges_text=ranges_text)
-        except KeyError: # Fallback, jeśli formatowanie zawiedzie
-             logging.error("Błąd formatowania zakresów w Unified Prompt!")
-             system_instruction = system_instruction.format(available_ranges_text="[Błąd ładowania zakresów]")
-    else: # Jeśli nie ma zakresów (np. tryb ogólny)
-        system_instruction = system_instruction.format(available_ranges_text="[Nie dotyczy - tryb ogólny lub oczekiwanie na sprawdzenie dostępności]")
+    # Zawsze formatuj, nawet jeśli zakresy są puste (None)
+    ranges_text = format_ranges_for_ai(available_ranges) if available_ranges is not None else "[Nie dotyczy - tryb ogólny lub oczekiwanie na sprawdzenie dostępności]"
+    try:
+        system_instruction = system_instruction.format(available_ranges_text=ranges_text)
+    except KeyError as e:
+        logging.error(f"Błąd formatowania Unified Prompt: Brak klucza {e}")
+        return "Błąd konfiguracji AI."
+    except Exception as format_e:
+        logging.error(f"Błąd nieoczekiwany formatowania Unified Prompt: {format_e}")
+        return "Błąd wewnętrzny konfiguracji AI."
+
 
     # Zbuduj pełny prompt
     initial_prompt = [
         Content(role="user", parts=[Part.from_text(system_instruction)]),
         Content(role="model", parts=[Part.from_text("Rozumiem. Będę postępować zgodnie z przepływem pracy, analizując historię i generując odpowiednie znaczniki akcji dla systemu lub odpowiedzi dla użytkownika.")])
     ]
-    full_prompt = initial_prompt + history
+    # Dodaj kontekst jako wiadomość systemową (jeśli niepusty)
+    if context:
+        context_text = f"[AKTUALNY KONTEKST SYSTEMOWY: {json.dumps(context, ensure_ascii=False)}]"
+        # Dodaj przed historią, ale po instrukcji
+        full_prompt = initial_prompt[:1] + [Content(role="user", parts=[Part.from_text(context_text)])] + initial_prompt[1:] + history
+    else:
+        full_prompt = initial_prompt + history
+
     if current_user_message_text:
         full_prompt.append(Content(role="user", parts=[Part.from_text(current_user_message_text)]))
 
     # Ogranicz historię
-    max_prompt_messages = (MAX_HISTORY_TURNS * 2) + 2
+    max_prompt_messages = (MAX_HISTORY_TURNS * 2) + 2 + (1 if context else 0) # +1 dla kontekstu
     while len(full_prompt) > max_prompt_messages:
-        full_prompt.pop(2) # Usuń najstarszą parę user/model
-        if len(full_prompt) > 2:
-            full_prompt.pop(2)
+        # Usuwaj najstarszą parę user/model (pomijając instrukcję i kontekst)
+        start_index_to_remove = 2 + (1 if context else 0)
+        if len(full_prompt) > start_index_to_remove + 1:
+            full_prompt.pop(start_index_to_remove + 1) # model
+            full_prompt.pop(start_index_to_remove)     # user
+        else:
+            break # Nie usuwaj instrukcji/kontekstu
 
     # Wywołaj Gemini
     response_text = _call_gemini(user_psid, full_prompt, GENERATION_CONFIG_UNIFIED, "Unified Conversation")
 
     return response_text # Zwróć pełną odpowiedź AI (ze znacznikami akcji)
+
 
 # =====================================================================
 # === WEBHOOK HANDLERS ================================================
@@ -794,13 +1100,18 @@ def get_unified_ai_response(user_psid, history, current_user_message_text, conte
 
 @app.route('/webhook', methods=['GET'])
 def webhook_verification():
-    # ... (bez zmian) ...
+    """Obsługuje weryfikację webhooka przez Facebooka."""
     logging.info("--- GET /webhook (Weryfikacja) ---")
-    hub_mode = request.args.get('hub.mode'); hub_token = request.args.get('hub.verify_token'); hub_challenge = request.args.get('hub.challenge')
+    hub_mode = request.args.get('hub.mode')
+    hub_token = request.args.get('hub.verify_token')
+    hub_challenge = request.args.get('hub.challenge')
     logging.debug(f"Otrzymano GET: Mode={hub_mode}, Token={hub_token}, Challenge={hub_challenge}")
-    if hub_mode == 'subscribe' and hub_token == VERIFY_TOKEN: logging.info("Weryfikacja GET zakończona pomyślnie!"); return Response(hub_challenge, status=200)
-    else: logging.warning(f"Weryfikacja GET NIEUDANA. Oczekiwany token: '{VERIFY_TOKEN}', Otrzymany: '{hub_token}'"); return Response("Verification failed", status=403)
-
+    if hub_mode == 'subscribe' and hub_token == VERIFY_TOKEN:
+        logging.info("Weryfikacja GET zakończona pomyślnie!")
+        return Response(hub_challenge, status=200)
+    else:
+        logging.warning(f"Weryfikacja GET NIEUDANA. Oczekiwany token: '{VERIFY_TOKEN}', Otrzymany: '{hub_token}'")
+        return Response("Verification failed", status=403)
 
 @app.route('/webhook', methods=['POST'])
 def webhook_handle():
@@ -827,8 +1138,9 @@ def webhook_handle():
                     user_content = None
                     current_user_message_text = None
                     ai_response_text = None
-                    system_message_for_ai = None # Do przekazywania wyników akcji
-                    available_ranges_for_ai = None # Do przekazania zakresów
+                    system_message_for_ai = None
+                    available_ranges_for_ai = None
+                    context_data_to_save = context.copy() # Pracujemy na kopii kontekstu
 
                     # === Obsługa wiadomości / postbacków ===
                     if message_data := event.get("message"):
@@ -842,7 +1154,7 @@ def webhook_handle():
                              att_type = attachments[0].get('type','nieznany')
                              logging.info(f"      Otrzymano załącznik typu: {att_type}.")
                              user_content = Content(role="user", parts=[Part.from_text(f"[Użytkownik wysłał załącznik typu: {att_type}]")])
-                             current_user_message_text = f"[Użytkownik wysłał załącznik typu: {att_type}]" # Przekaż info do AI
+                             current_user_message_text = f"[Użytkownik wysłał załącznik typu: {att_type}]"
                         else: continue # Ignoruj puste wiadomości
                     elif postback := event.get("postback"):
                         payload = postback.get("payload"); title = postback.get("title", "")
@@ -850,244 +1162,180 @@ def webhook_handle():
                         user_input_text = f"Użytkownik kliknął przycisk: '{title}' (Payload: {payload})"
                         user_content = Content(role="user", parts=[Part.from_text(user_input_text)])
                         current_user_message_text = user_input_text
-                    elif event.get("read") or event.get("delivery"): continue # Ignoruj
+                    elif event.get("read") or event.get("delivery"): continue
                     else: logging.warning(f"    Otrzymano nieobsługiwany typ zdarzenia: {json.dumps(event)}"); continue
 
-                    # --- Główna pętla sterowana przez AI ---
-                    # Zamiast pętli akcji, mamy teraz jedno wywołanie AI i reakcję na jego znaczniki
-                    context_data_to_save = context.copy() # Pracujemy na kopii kontekstu
+                    # --- Główna logika sterowana przez AI ---
+                    max_ai_calls = 3 # Ogranicznik pętli AI -> Akcja -> AI
+                    ai_call_count = 0
+                    last_ai_response = None # Do zapisania w historii, jeśli nie ma nowej odpowiedzi
 
-                    # 1. Wywołaj AI z aktualną historią i wiadomością użytkownika
-                    #    (Na razie nie wiemy, czy potrzebne są zakresy)
-                    logging.debug("Wywołanie Unified AI (krok 1)...")
-                    ai_response_text = get_unified_ai_response(sender_id, history_for_gemini, current_user_message_text, context_data_to_save)
+                    while ai_call_count < max_ai_calls:
+                        ai_call_count += 1
+                        logging.debug(f"  >> Cykl AI {ai_call_count}/{max_ai_calls}")
 
-                    if not ai_response_text:
-                        # Obsługa błędu AI
-                        logging.error("Błąd krytyczny: Unified AI nie zwróciło odpowiedzi.")
-                        send_message(sender_id, "Przepraszam, wystąpił wewnętrzny błąd. Spróbuj ponownie później.")
-                        # Zapisz historię z błędem
-                        if user_content: history_for_gemini.append(user_content)
-                        save_history(sender_id, history_for_gemini, context_data_to_save)
-                        continue # Przejdź do następnego eventu
-
-                    # 2. Analiza odpowiedzi AI i wykonanie akcji
-                    text_to_send_user = ai_response_text # Domyślnie cała odpowiedź AI
-                    action_performed = False
-
-                    # --- Sprawdzanie znaczników akcji ---
-
-                    # Akcja: Sprawdź dostępność
-                    if ACTION_CHECK_AVAILABILITY in ai_response_text:
-                        logging.info(f"      AI zażądało sprawdzenia dostępności [{ACTION_CHECK_AVAILABILITY}]")
-                        action_performed = True
-                        text_to_send_user = ai_response_text.replace(ACTION_CHECK_AVAILABILITY, "").strip()
-                        # Pobierz zakresy
-                        tz = _get_calendar_timezone(); now = datetime.datetime.now(tz); search_start = now; search_end_date = (search_start + datetime.timedelta(days=MAX_SEARCH_DAYS)).date(); search_end = tz.localize(datetime.datetime.combine(search_end_date, datetime.time(WORK_END_HOUR, 0)))
-                        _simulate_typing(sender_id, MAX_TYPING_DELAY_SECONDS * 0.6)
-                        free_ranges = get_free_time_ranges(TARGET_CALENDAR_ID, search_start, search_end)
-                        available_ranges_for_ai = free_ranges # Zapisz do przekazania w następnym kroku
-                        # Przygotuj wiadomość systemową dla AI
-                        if free_ranges:
-                            system_message_for_ai = f"[SYSTEM_INFO: Dostępne zakresy zostały pobrane. Są one teraz dostępne w Twoim kontekście. Zaproponuj termin.]"
-                        else:
-                            system_message_for_ai = f"[SYSTEM_INFO: Brak dostępnych zakresów w kalendarzu w ciągu najbliższych {MAX_SEARCH_DAYS} dni z wymaganym wyprzedzeniem {MIN_BOOKING_LEAD_HOURS}h. Poinformuj użytkownika.]"
-                        logging.debug(f"      Przygotowano system_message_for_ai: {system_message_for_ai}")
-
-                    # Akcja: Weryfikuj Slot (Kalendarz + Arkusz)
-                    verify_match = re.search(rf"{re.escape(ACTION_VERIFY_SLOT)}(.*?)]", ai_response_text)
-                    if verify_match:
-                        iso_to_verify = verify_match.group(1).strip()
-                        logging.info(f"      AI zażądało weryfikacji slotu [{ACTION_VERIFY_SLOT}{iso_to_verify}]")
-                        action_performed = True
-                        text_to_send_user = re.sub(rf"{re.escape(ACTION_VERIFY_SLOT)}.*?]", "", ai_response_text).strip() # Usuń znacznik z odpowiedzi
-                        try:
-                            proposed_start = datetime.datetime.fromisoformat(iso_to_verify)
-                            tz_cal = _get_calendar_timezone()
-                            if proposed_start.tzinfo is None: proposed_start = tz_cal.localize(proposed_start)
-                            else: proposed_start = proposed_start.astimezone(tz_cal)
-
-                            # Zapisz proponowany slot w kontekście na wszelki wypadek
-                            context_data_to_save['proposed_slot_iso'] = proposed_start.isoformat()
-                            context_data_to_save['proposed_slot_formatted'] = format_slot_for_user(proposed_start)
-
-                            _simulate_typing(sender_id, MIN_TYPING_DELAY_SECONDS * 1.5) # Symulacja weryfikacji
-                            calendar_free = is_slot_actually_free(proposed_start, TARGET_CALENDAR_ID)
-                            sheet_free = False
-                            if calendar_free:
-                                sheet_free = not is_slot_in_sheet(proposed_start)
-
-                            if calendar_free and sheet_free:
-                                system_message_for_ai = f"[SYSTEM_INFO: Slot {iso_to_verify} jest DOSTĘPNY. Wygeneruj akcję zapisu Fazy 1.]"
-                            else:
-                                reason = "Kalendarz" if not calendar_free else "Arkusz"
-                                system_message_for_ai = f"[SYSTEM_INFO: Slot {iso_to_verify} jest ZAJĘTY ({reason}). Poinformuj użytkownika i zaproponuj inny termin z dostępnych zakresów.]"
-                                # Usuń nieudany slot z kontekstu
-                                context_data_to_save.pop('proposed_slot_iso', None)
-                                context_data_to_save.pop('proposed_slot_formatted', None)
-                        except ValueError:
-                            logging.error(f"Błąd parsowania ISO '{iso_to_verify}' ze znacznika weryfikacji.")
-                            system_message_for_ai = "[SYSTEM_INFO: Błąd wewnętrzny podczas parsowania terminu do weryfikacji. Poinformuj użytkownika o problemie technicznym.]"
-                        except Exception as e:
-                            logging.error(f"Nieoczekiwany błąd podczas weryfikacji slotu {iso_to_verify}: {e}", exc_info=True)
-                            system_message_for_ai = "[SYSTEM_INFO: Błąd wewnętrzny podczas weryfikacji terminu. Poinformuj użytkownika o problemie technicznym.]"
-                        logging.debug(f"      Przygotowano system_message_for_ai: {system_message_for_ai}")
-
-                    # Akcja: Zapisz Fazę 1
-                    write1_match = re.search(rf"{re.escape(ACTION_WRITE_PHASE1)}(.*?)]", ai_response_text)
-                    if write1_match:
-                        iso_to_write = write1_match.group(1).strip()
-                        logging.info(f"      AI zażądało zapisu Fazy 1 dla slotu [{ACTION_WRITE_PHASE1}{iso_to_write}]")
-                        action_performed = True
-                        text_to_send_user = re.sub(rf"{re.escape(ACTION_WRITE_PHASE1)}.*?]", "", ai_response_text).strip()
-                        try:
-                            start_time_obj = datetime.datetime.fromisoformat(iso_to_write)
-                            # Sprawdź, czy ISO zgadza się z tym w kontekście (sanity check)
-                            if context_data_to_save.get('proposed_slot_iso') != iso_to_write:
-                                logging.warning(f"Niezgodność ISO w akcji WRITE_PHASE1 ({iso_to_write}) z kontekstem ({context_data_to_save.get('proposed_slot_iso')}). Używam ISO z akcji.")
-                                # Zaktualizuj kontekst na wszelki wypadek
-                                context_data_to_save['proposed_slot_iso'] = iso_to_write
-                                tz_cal = _get_calendar_timezone()
-                                if start_time_obj.tzinfo is None: start_time_obj = tz_cal.localize(start_time_obj)
-                                else: start_time_obj = start_time_obj.astimezone(tz_cal)
-                                context_data_to_save['proposed_slot_formatted'] = format_slot_for_user(start_time_obj)
-
-
-                            write_ok, write_msg_or_row = write_to_sheet_phase1(sender_id, start_time_obj)
-                            if write_ok:
-                                system_message_for_ai = f"[SYSTEM_INFO: Zapis Fazy 1 dla {iso_to_write} zakończony pomyślnie. Przejdź do zbierania danych ucznia generując akcję {ACTION_GATHER_INFO}.]"
-                                # Zapisz numer wiersza w kontekście, jeśli się udało
-                                if isinstance(write_msg_or_row, int):
-                                    context_data_to_save['sheet_row_index'] = write_msg_or_row
-                            else:
-                                system_message_for_ai = f"[SYSTEM_INFO: Błąd zapisu Fazy 1 dla {iso_to_write}: {write_msg_or_row}. Poinformuj użytkownika o problemie technicznym.]"
-                                # Usuń dane o slocie z kontekstu, bo zapis się nie udał
-                                context_data_to_save.pop('proposed_slot_iso', None)
-                                context_data_to_save.pop('proposed_slot_formatted', None)
-                        except ValueError:
-                            logging.error(f"Błąd parsowania ISO '{iso_to_write}' ze znacznika zapisu Fazy 1.")
-                            system_message_for_ai = "[SYSTEM_INFO: Błąd wewnętrzny podczas parsowania terminu do zapisu Fazy 1. Poinformuj użytkownika.]"
-                        except Exception as e:
-                            logging.error(f"Nieoczekiwany błąd podczas zapisu Fazy 1 dla {iso_to_write}: {e}", exc_info=True)
-                            system_message_for_ai = "[SYSTEM_INFO: Błąd wewnętrzny podczas zapisu Fazy 1. Poinformuj użytkownika.]"
-                        logging.debug(f"      Przygotowano system_message_for_ai: {system_message_for_ai}")
-
-                    # Akcja: Rozpocznij Zbieranie Danych
-                    if ACTION_GATHER_INFO in ai_response_text:
-                        logging.info(f"      AI zażądało rozpoczęcia zbierania danych [{ACTION_GATHER_INFO}]")
-                        action_performed = True
-                        text_to_send_user = ai_response_text.replace(ACTION_GATHER_INFO, "").strip()
-                        # Pobierz profil rodzica (jeśli jeszcze nie ma w kontekście)
-                        if 'known_parent_first_name' not in context_data_to_save:
-                            parent_profile = get_user_profile(sender_id)
-                            context_data_to_save['known_parent_first_name'] = parent_profile.get('first_name', '') if parent_profile else ''
-                            context_data_to_save['known_parent_last_name'] = parent_profile.get('last_name', '') if parent_profile else ''
-                        system_message_for_ai = "[SYSTEM_INFO: Rozpocznij zbieranie danych ucznia (Imię, Nazwisko, KlasaInfo, Poziom). Dane rodzica zostały pobrane.]"
-                        logging.debug(f"      Przygotowano system_message_for_ai: {system_message_for_ai}")
-
-                    # Akcja: Finalizuj i Zaktualizuj Arkusz
-                    finalize_match = re.search(rf"{re.escape(ACTION_FINALIZE)}(.*?)\]", ai_response_text)
-                    if finalize_match:
-                        student_data_str = finalize_match.group(1).strip()
-                        logging.info(f"      AI zażądało finalizacji i aktualizacji arkusza [{ACTION_FINALIZE}{student_data_str}]")
-                        action_performed = True
-                        text_to_send_user = re.sub(rf"{re.escape(ACTION_FINALIZE)}.*?]", "", ai_response_text).strip()
-                        # Sparsuj dane ucznia ze znacznika
-                        parsed_student_data = {}
-                        try:
-                            # Proste parsowanie po przecinku (zakładając kolejność: Imię, Nazwisko, KlasaInfo, Poziom)
-                            parts = [p.strip() for p in student_data_str.split(',')]
-                            if len(parts) == 4:
-                                parsed_student_data['student_first_name'] = parts[0]
-                                parsed_student_data['student_last_name'] = parts[1]
-                                parsed_student_data['grade_info'] = parts[2]
-                                parsed_student_data['level_info'] = parts[3] if parts[3].lower() != 'brak' else 'Brak'
-                                logging.info(f"      Dane ucznia sparsowane ze znacznika AI: {parsed_student_data}")
-
-                                # Pobierz potrzebne dane z kontekstu
-                                psid_to_update = sender_id
-                                iso_to_update = context_data_to_save.get('proposed_slot_iso')
-                                parent_fn = context_data_to_save.get('known_parent_first_name', 'Brak (API?)')
-                                parent_ln = context_data_to_save.get('known_parent_last_name', 'Brak (API?)')
-
-                                if iso_to_update:
-                                    start_time_obj = datetime.datetime.fromisoformat(iso_to_update)
-                                    # Połącz dane rodzica i ucznia
-                                    full_data_for_update = {
-                                        'parent_first_name': parent_fn,
-                                        'parent_last_name': parent_ln,
-                                        **parsed_student_data # Dodaj sparsowane dane ucznia
-                                    }
-                                    update_ok, update_msg = find_row_and_update_sheet(psid_to_update, start_time_obj, full_data_for_update)
-                                    if update_ok:
-                                        system_message_for_ai = "[SYSTEM_INFO: Aktualizacja Fazy 2 zakończona pomyślnie. Wyślij finalne potwierdzenie użytkownikowi.]"
-                                        # Wyczyść kontekst po udanej finalizacji
-                                        context_data_to_save = {}
-                                    else:
-                                        system_message_for_ai = f"[SYSTEM_INFO: Błąd aktualizacji Fazy 2: {update_msg}. Poinformuj użytkownika o problemie technicznym.]"
-                                else:
-                                    logging.error("Brak 'proposed_slot_iso' w kontekście podczas próby aktualizacji Fazy 2.")
-                                    system_message_for_ai = "[SYSTEM_INFO: Błąd wewnętrzny (brak terminu w kontekście). Poinformuj użytkownika o problemie.]"
-                            else:
-                                raise ValueError(f"Nieprawidłowa liczba części w danych ucznia: {len(parts)}")
-                        except Exception as parse_err:
-                            logging.error(f"Błąd parsowania danych ucznia ze znacznika '{student_data_str}': {parse_err}")
-                            system_message_for_ai = "[SYSTEM_INFO: Błąd wewnętrzny podczas parsowania danych ucznia. Poinformuj użytkownika.]"
-                        logging.debug(f"      Przygotowano system_message_for_ai: {system_message_for_ai}")
-
-                    # 3. Jeśli wykonano akcję, wywołaj AI ponownie z wiadomością systemową
-                    if system_message_for_ai:
-                        logging.debug("Wywołanie Unified AI (krok 2 - po akcji)...")
-                        # Dodaj wiadomość użytkownika (jeśli była) i odpowiedź AI (bez znacznika akcji) do historii
-                        if user_content:
-                            history_for_gemini.append(user_content)
-                        if text_to_send_user: # Jeśli AI coś odpowiedziało oprócz znacznika akcji
-                             model_resp_content = Content(role="model", parts=[Part.from_text(text_to_send_user)])
-                             history_for_gemini.append(model_resp_content)
-
-                        # Dodaj wiadomość systemową do historii dla następnego wywołania AI
-                        history_for_gemini.append(Content(role="user", parts=[Part.from_text(system_message_for_ai)])) # Udajemy, że to user dla AI
-
-                        # Wywołaj AI ponownie, przekazując ewentualne zakresy (jeśli poprzednia akcja to CHECK_AVAILABILITY)
-                        ai_response_text = get_unified_ai_response(sender_id, history_for_gemini, None, context_data_to_save, available_ranges=available_ranges_for_ai)
+                        # 1. Wywołaj AI
+                        # Przekaż zakresy tylko jeśli są w kontekście (zostały pobrane wcześniej)
+                        ranges_to_pass = context_data_to_save.get('available_ranges')
+                        ai_response_text = get_unified_ai_response(sender_id, history_for_gemini, current_user_message_text, context_data_to_save, available_ranges=ranges_to_pass)
+                        current_user_message_text = None # Wiadomość użytkownika przetworzona w tym wywołaniu
 
                         if not ai_response_text:
-                            logging.error("Błąd krytyczny: Unified AI nie zwróciło odpowiedzi po akcji systemowej.")
+                            logging.error(f"Błąd krytyczny: Unified AI nie zwróciło odpowiedzi (Cykl {ai_call_count}).")
                             send_message(sender_id, "Przepraszam, wystąpił wewnętrzny błąd. Spróbuj ponownie później.")
-                            save_history(sender_id, history_for_gemini, context_data_to_save)
+                            last_ai_response = Content(role="model", parts=[Part.from_text("[Błąd wewnętrzny AI]")]) # Zapisz błąd do historii
+                            break # Przerwij pętlę AI
+
+                        # Zapisz pełną odpowiedź AI do potencjalnego zapisu w historii
+                        last_ai_response = Content(role="model", parts=[Part.from_text(ai_response_text)])
+
+                        # 2. Analiza odpowiedzi AI i wykonanie akcji
+                        text_to_send_user = ai_response_text # Domyślnie cała odpowiedź
+                        system_message_for_ai = None # Resetuj wiadomość systemową
+                        available_ranges_for_ai = None # Resetuj zakresy
+                        should_break_loop = False # Czy zakończyć pętlę AI w tym cyklu?
+
+                        # --- Sprawdzanie znaczników akcji ---
+                        action_tag_found = False
+
+                        # Akcja: Sprawdź dostępność
+                        if ACTION_CHECK_AVAILABILITY in ai_response_text:
+                            logging.info(f"      AI zażądało sprawdzenia dostępności [{ACTION_CHECK_AVAILABILITY}]")
+                            action_tag_found = True
+                            text_to_send_user = ai_response_text.replace(ACTION_CHECK_AVAILABILITY, "").strip()
+                            tz = _get_calendar_timezone(); now = datetime.datetime.now(tz); search_start = now; search_end_date = (search_start + datetime.timedelta(days=MAX_SEARCH_DAYS)).date(); search_end = tz.localize(datetime.datetime.combine(search_end_date, datetime.time(WORK_END_HOUR, 0)))
+                            _simulate_typing(sender_id, MAX_TYPING_DELAY_SECONDS * 0.6)
+                            free_ranges = get_free_time_ranges(TARGET_CALENDAR_ID, search_start, search_end)
+                            context_data_to_save['available_ranges'] = free_ranges # Zapisz zakresy w kontekście
+                            if free_ranges: system_message_for_ai = f"[SYSTEM_INFO: Dostępne zakresy zostały pobrane i zapisane w kontekście. Zaproponuj termin.]"
+                            else: system_message_for_ai = f"[SYSTEM_INFO: Brak dostępnych zakresów w kalendarzu w ciągu najbliższych {MAX_SEARCH_DAYS} dni z wymaganym wyprzedzeniem {MIN_BOOKING_LEAD_HOURS}h. Poinformuj użytkownika.]"
+
+                        # Akcja: Weryfikuj Slot (Kalendarz + Arkusz)
+                        verify_match = re.search(rf"{re.escape(ACTION_VERIFY_SLOT)}(.*?)]", ai_response_text)
+                        if verify_match:
+                            iso_to_verify = verify_match.group(1).strip()
+                            logging.info(f"      AI zażądało weryfikacji slotu [{ACTION_VERIFY_SLOT}{iso_to_verify}]")
+                            action_tag_found = True
+                            text_to_send_user = re.sub(rf"{re.escape(ACTION_VERIFY_SLOT)}.*?]", "", ai_response_text).strip()
+                            try:
+                                proposed_start = datetime.datetime.fromisoformat(iso_to_verify)
+                                tz_cal = _get_calendar_timezone()
+                                if proposed_start.tzinfo is None: proposed_start = tz_cal.localize(proposed_start)
+                                else: proposed_start = proposed_start.astimezone(tz_cal)
+                                context_data_to_save['proposed_slot_iso'] = proposed_start.isoformat() # Zapisz proponowany slot
+                                context_data_to_save['proposed_slot_formatted'] = format_slot_for_user(proposed_start)
+                                _simulate_typing(sender_id, MIN_TYPING_DELAY_SECONDS * 1.5)
+                                calendar_free = is_slot_actually_free(proposed_start, TARGET_CALENDAR_ID)
+                                sheet_free = False
+                                if calendar_free: sheet_free = not is_slot_in_sheet(proposed_start)
+                                if calendar_free and sheet_free: system_message_for_ai = f"[SYSTEM_INFO: Slot {iso_to_verify} jest DOSTĘPNY. Wygeneruj akcję zapisu Fazy 1: {ACTION_WRITE_PHASE1}{iso_to_verify}]"
+                                else: reason = "Kalendarz" if not calendar_free else "Arkusz"; system_message_for_ai = f"[SYSTEM_INFO: Slot {iso_to_verify} jest ZAJĘTY ({reason}). Poinformuj użytkownika i zaproponuj inny termin z dostępnych zakresów.]"; context_data_to_save.pop('proposed_slot_iso', None); context_data_to_save.pop('proposed_slot_formatted', None)
+                            except Exception as e: logging.error(f"Błąd podczas weryfikacji slotu {iso_to_verify}: {e}", exc_info=True); system_message_for_ai = "[SYSTEM_INFO: Błąd wewnętrzny podczas weryfikacji terminu. Poinformuj użytkownika.]"
+
+                        # Akcja: Zapisz Fazę 1
+                        write1_match = re.search(rf"{re.escape(ACTION_WRITE_PHASE1)}(.*?)]", ai_response_text)
+                        if write1_match:
+                            iso_to_write = write1_match.group(1).strip()
+                            logging.info(f"      AI zażądało zapisu Fazy 1 dla slotu [{ACTION_WRITE_PHASE1}{iso_to_write}]")
+                            action_tag_found = True
+                            text_to_send_user = re.sub(rf"{re.escape(ACTION_WRITE_PHASE1)}.*?]", "", ai_response_text).strip()
+                            try:
+                                start_time_obj = datetime.datetime.fromisoformat(iso_to_write)
+                                if context_data_to_save.get('proposed_slot_iso') != iso_to_write: logging.warning(f"Niezgodność ISO w akcji WRITE_PHASE1 ({iso_to_write}) z kontekstem ({context_data_to_save.get('proposed_slot_iso')}). Używam ISO z akcji."); context_data_to_save['proposed_slot_iso'] = iso_to_write; tz_cal = _get_calendar_timezone(); start_time_obj = start_time_obj.astimezone(tz_cal) if start_time_obj.tzinfo else tz_cal.localize(start_time_obj); context_data_to_save['proposed_slot_formatted'] = format_slot_for_user(start_time_obj)
+                                write_ok, write_msg_or_row = write_to_sheet_phase1(sender_id, start_time_obj)
+                                if write_ok:
+                                    system_message_for_ai = f"[SYSTEM_INFO: Zapis Fazy 1 dla {iso_to_write} zakończony pomyślnie. Przejdź do zbierania danych ucznia generując akcję {ACTION_GATHER_INFO}.]"
+                                    if isinstance(write_msg_or_row, int): context_data_to_save['sheet_row_index'] = write_msg_or_row # Zapisz indeks wiersza
+                                else: system_message_for_ai = f"[SYSTEM_INFO: Błąd zapisu Fazy 1 dla {iso_to_write}: {write_msg_or_row}. Poinformuj użytkownika o problemie technicznym.]"; context_data_to_save.pop('proposed_slot_iso', None); context_data_to_save.pop('proposed_slot_formatted', None)
+                            except Exception as e: logging.error(f"Błąd podczas zapisu Fazy 1 dla {iso_to_write}: {e}", exc_info=True); system_message_for_ai = "[SYSTEM_INFO: Błąd wewnętrzny podczas zapisu Fazy 1. Poinformuj użytkownika.]"
+
+                        # Akcja: Rozpocznij Zbieranie Danych
+                        if ACTION_GATHER_INFO in ai_response_text:
+                            logging.info(f"      AI zażądało rozpoczęcia zbierania danych [{ACTION_GATHER_INFO}]")
+                            action_tag_found = True
+                            text_to_send_user = ai_response_text.replace(ACTION_GATHER_INFO, "").strip()
+                            if 'known_parent_first_name' not in context_data_to_save: # Pobierz tylko jeśli brakuje
+                                parent_profile = get_user_profile(sender_id)
+                                context_data_to_save['known_parent_first_name'] = parent_profile.get('first_name', '') if parent_profile else ''
+                                context_data_to_save['known_parent_last_name'] = parent_profile.get('last_name', '') if parent_profile else ''
+                            system_message_for_ai = "[SYSTEM_INFO: Rozpocznij zbieranie danych ucznia (Imię, Nazwisko, KlasaInfo, Poziom). Dane rodzica zostały pobrane/sprawdzone.]"
+
+                        # Akcja: Finalizuj i Zaktualizuj Arkusz
+                        finalize_match = re.search(rf"{re.escape(ACTION_FINALIZE)}(.*?)\]", ai_response_text)
+                        if finalize_match:
+                            student_data_str = finalize_match.group(1).strip()
+                            logging.info(f"      AI zażądało finalizacji i aktualizacji arkusza [{ACTION_FINALIZE}{student_data_str}]")
+                            action_tag_found = True
+                            text_to_send_user = re.sub(rf"{re.escape(ACTION_FINALIZE)}.*?]", "", ai_response_text).strip()
+                            parsed_student_data = {}
+                            try:
+                                parts = [p.strip() for p in student_data_str.split(',')]
+                                if len(parts) == 4:
+                                    parsed_student_data['student_first_name'] = parts[0]
+                                    parsed_student_data['student_last_name'] = parts[1]
+                                    parsed_student_data['grade_info'] = parts[2]
+                                    parsed_student_data['level_info'] = parts[3] if parts[3].lower() != 'brak' else 'Brak'
+                                    logging.info(f"      Dane ucznia sparsowane ze znacznika AI: {parsed_student_data}")
+                                    psid_to_update = sender_id
+                                    iso_to_update = context_data_to_save.get('proposed_slot_iso')
+                                    parent_fn = context_data_to_save.get('known_parent_first_name', 'Brak (API?)')
+                                    parent_ln = context_data_to_save.get('known_parent_last_name', 'Brak (API?)')
+                                    sheet_row_idx = context_data_to_save.get('sheet_row_index') # Pobierz zapisany indeks
+
+                                    if iso_to_update:
+                                        start_time_obj = datetime.datetime.fromisoformat(iso_to_update)
+                                        full_data_for_update = {'parent_first_name': parent_fn, 'parent_last_name': parent_ln, **parsed_student_data}
+                                        update_ok, update_msg = find_row_and_update_sheet(psid_to_update, start_time_obj, full_data_for_update, sheet_row_index=sheet_row_idx)
+                                        if update_ok: system_message_for_ai = "[SYSTEM_INFO: Aktualizacja Fazy 2 zakończona pomyślnie. Wyślij finalne potwierdzenie użytkownikowi.]"; context_data_to_save = {} # Wyczyść kontekst
+                                        else: system_message_for_ai = f"[SYSTEM_INFO: Błąd aktualizacji Fazy 2: {update_msg}. Poinformuj użytkownika o problemie technicznym.]"
+                                    else: logging.error("Brak 'proposed_slot_iso' w kontekście podczas próby aktualizacji Fazy 2."); system_message_for_ai = "[SYSTEM_INFO: Błąd wewnętrzny (brak terminu w kontekście). Poinformuj użytkownika o problemie.]"
+                                else: raise ValueError(f"Nieprawidłowa liczba części w danych ucznia: {len(parts)}")
+                            except Exception as parse_err: logging.error(f"Błąd parsowania danych ucznia ze znacznika '{student_data_str}': {parse_err}"); system_message_for_ai = "[SYSTEM_INFO: Błąd wewnętrzny podczas parsowania danych ucznia. Poinformuj użytkownika.]"
+
+                        # 3. Jeśli wykonano akcję, przygotuj następne wywołanie AI
+                        if system_message_for_ai:
+                            logging.debug(f"      Przygotowano system_message_for_ai: {system_message_for_ai}")
+                            # Dodaj wiadomość użytkownika (jeśli była) i odpowiedź AI (bez znacznika akcji) do historii
+                            if user_content:
+                                history_for_gemini.append(user_content)
+                            if text_to_send_user: # Jeśli AI coś odpowiedziało oprócz znacznika akcji
+                                 history_for_gemini.append(Content(role="model", parts=[Part.from_text(text_to_send_user)]))
+                                 # Wyślij tę część odpowiedzi do użytkownika od razu
+                                 send_message(sender_id, text_to_send_user)
+
+                            # Dodaj wiadomość systemową jako input dla następnego kroku AI
+                            current_user_message_text = system_message_for_ai # To będzie input dla kolejnego wywołania
+                            user_content = Content(role="user", parts=[Part.from_text(system_message_for_ai)]) # Zapisz do historii jako user
+                            # Kontynuuj pętlę, aby wywołać AI z wiadomością systemową
                             continue
+                        else:
+                            # Jeśli nie było akcji do wykonania przez Pythona, to odpowiedź AI jest finalna dla tego cyklu
+                            should_break_loop = True
 
-                        # Zaktualizuj text_to_send_user ostateczną odpowiedzią AI
-                        text_to_send_user = ai_response_text
-                        # Sprawdź, czy ta nowa odpowiedź nie zawiera kolejnej akcji (mało prawdopodobne, ale możliwe)
-                        # W tej uproszczonej pętli nie będziemy obsługiwać wielokrotnych akcji z rzędu
-                        if any(marker in text_to_send_user for marker in [ACTION_CHECK_AVAILABILITY, ACTION_VERIFY_SLOT, ACTION_WRITE_PHASE1, ACTION_GATHER_INFO, ACTION_FINALIZE]):
-                            logging.warning(f"AI zwróciło kolejny znacznik akcji po wiadomości systemowej: {text_to_send_user}. Ignorowanie akcji w tym kroku.")
-                            # Usuń znaczniki akcji przed wysłaniem do użytkownika
-                            text_to_send_user = re.sub(r"\[ACTION:.*?\]", "", text_to_send_user).strip()
+                        # 4. Jeśli pętla ma się zakończyć, wyślij ostatnią odpowiedź AI
+                        if should_break_loop:
+                            if text_to_send_user:
+                                send_message(sender_id, text_to_send_user)
+                            else:
+                                # Jeśli AI zwróciło tylko znacznik akcji, który został obsłużony,
+                                # ale nie wygenerowało wiadomości systemowej (np. błąd)
+                                # lub jeśli AI nie zwróciło ani tekstu ani akcji.
+                                if action_tag_found:
+                                     logging.debug("Akcja wykonana, ale brak finalnej odpowiedzi tekstowej AI dla użytkownika.")
+                                else:
+                                     logging.error("AI nie zwróciło ani tekstu, ani znacznika akcji w finalnym kroku!")
+                                     # Można wysłać generyczny błąd
+                                     # send_message(sender_id, "Przepraszam, wystąpił nieoczekiwany błąd.")
+                            break # Zakończ pętlę while
 
+                    # --- Koniec pętli AI ---
 
-                    # 4. Wyślij finalną odpowiedź do użytkownika (jeśli jest co wysłać)
-                    if text_to_send_user:
-                        send_message(sender_id, text_to_send_user)
-                        model_resp_content = Content(role="model", parts=[Part.from_text(text_to_send_user)])
-                    else:
-                        # Jeśli AI zwróciło tylko znacznik akcji i nie było nic do wysłania
-                        model_resp_content = None
-                        if action_performed:
-                             logging.debug("Akcja wykonana, ale brak odpowiedzi tekstowej AI dla użytkownika.")
-                        # Jeśli nie było akcji i nie ma tekstu - to błąd AI
-                        elif not action_performed:
-                             logging.error("AI nie zwróciło ani tekstu, ani znacznika akcji!")
-                             # Wyślij generyczny błąd? Lub nic nie rób? Na razie nic.
-
-
-                    # 5. Zapisz historię i kontekst
+                    # 5. Zapisz historię i kontekst po zakończeniu pętli
                     history_to_save = list(history_for_gemini)
-                    if user_content and not action_performed: # Dodaj user_content jeśli nie był dodany przed drugim wywołaniem AI
+                    if user_content: # Dodaj ostatnią wiadomość usera, jeśli nie została dodana w pętli
                         history_to_save.append(user_content)
-                    if model_resp_content:
-                        history_to_save.append(model_resp_content)
+                    if last_ai_response: # Dodaj ostatnią odpowiedź AI
+                        history_to_save.append(last_ai_response)
 
                     max_hist_len = MAX_HISTORY_TURNS * 2
                     if len(history_to_save) > max_hist_len:
@@ -1132,40 +1380,77 @@ if __name__ == '__main__':
     print("-" * 60)
     print("  Konfiguracja Facebook:")
     print(f"    FB_VERIFY_TOKEN: {'OK' if VERIFY_TOKEN != 'KOLAGEN' else 'Użyto domyślny (KOLAGEN!)'}")
-    if not PAGE_ACCESS_TOKEN or len(PAGE_ACCESS_TOKEN) < 50: print("!!! KRYTYCZNE: FB_PAGE_ACCESS_TOKEN PUSTY lub ZBYT KRÓTKI !!!")
-    elif PAGE_ACCESS_TOKEN == "EACNAHFzEhkUBOxSDMfOZCYbQAFKfVzJWowJpX8mcX0BvBGaWFRiUwNHjojZBcRXIPFszKzzRZBEqFI7AFD0DpI5sOeiN7HKLBGxBZB7tAgCkFdipRNQKevuP3F4kvSTIZCqqkrBaq7rPRM7FIqNQjP2Ju9UdZB5FNcvndzdZBZBGxTyyw9hkWmBndNr2A0VwO2Gf8QZDZD": print("!!! UWAGA: Używany jest TESTOWY/DOMYŚLNY FB_PAGE_ACCESS_TOKEN - NIE zadziała w produkcji! !!!")
-    else: print("    FB_PAGE_ACCESS_TOKEN: Ustawiony (OK)")
+    if not PAGE_ACCESS_TOKEN or len(PAGE_ACCESS_TOKEN) < 50:
+        print("!!! KRYTYCZNE: FB_PAGE_ACCESS_TOKEN PUSTY lub ZBYT KRÓTKI !!!")
+    elif PAGE_ACCESS_TOKEN == "EACNAHFzEhkUBO5sicIUMoIwuZCZC1ZAduL8gb5sZAjWX2oErT4esklQALmstq2bkZAnWq3CVNF0IO3gZB44ip3XCXG40revvmpFKOLlC9jBStCNAwbIXZBWfawg0z0YH6GLGZCE1gFfgEF5A6DEIKbu5FYZB6XKXHECTeW6PNZAUQrPiKxrPCjbz7QFiBtGROvZCPR4rAZDZD":
+        print("    FB_PAGE_ACCESS_TOKEN: Ustawiony (OK - Nowy)") # Zaktualizowano info
+    else:
+        print("    FB_PAGE_ACCESS_TOKEN: Ustawiony (OK - Inny niż domyślny)")
     print("-" * 60)
     print("  Konfiguracja Ogólna:")
-    print(f"    Katalog historii: {HISTORY_DIR}"); print(f"    Maks. tur historii AI: {MAX_HISTORY_TURNS}"); print(f"    Limit znaków wiad. FB: {MESSAGE_CHAR_LIMIT}"); print(f"    Opóźnienie między fragm.: {MESSAGE_DELAY_SECONDS}s"); print(f"    Symulacja pisania: {'Włączona' if ENABLE_TYPING_DELAY else 'Wyłączona'}")
-    if ENABLE_TYPING_DELAY: print(f"      Min/Max czas pisania: {MIN_TYPING_DELAY_SECONDS}s / {MAX_TYPING_DELAY_SECONDS}s; Prędkość: {TYPING_CHARS_PER_SECOND} zn/s")
+    print(f"    Katalog historii: {HISTORY_DIR}")
+    print(f"    Maks. tur historii AI: {MAX_HISTORY_TURNS}")
+    print(f"    Limit znaków wiad. FB: {MESSAGE_CHAR_LIMIT}")
+    print(f"    Opóźnienie między fragm.: {MESSAGE_DELAY_SECONDS}s")
+    print(f"    Symulacja pisania: {'Włączona' if ENABLE_TYPING_DELAY else 'Wyłączona'}")
+    if ENABLE_TYPING_DELAY:
+        print(f"      Min/Max czas pisania: {MIN_TYPING_DELAY_SECONDS}s / {MAX_TYPING_DELAY_SECONDS}s; Prędkość: {TYPING_CHARS_PER_SECOND} zn/s")
     print("-" * 60)
     print("  Konfiguracja Vertex AI:")
-    print(f"    Projekt GCP: {PROJECT_ID}"); print(f"    Lokalizacja GCP: {LOCATION}"); print(f"    Model AI: {MODEL_ID}"); print(f"    Ustawienia bezpieczeństwa: {SAFETY_SETTINGS}")
-    if not gemini_model: print("!!! OSTRZEŻENIE: Model Gemini AI NIE załadowany poprawnie! Funkcjonalność AI niedostępna. !!!")
-    else: print(f"    Model Gemini AI ({MODEL_ID}): Załadowany (OK)")
+    print(f"    Projekt GCP: {PROJECT_ID}")
+    print(f"    Lokalizacja GCP: {LOCATION}")
+    print(f"    Model AI: {MODEL_ID}")
+    print(f"    Ustawienia bezpieczeństwa: {SAFETY_SETTINGS}")
+    if not gemini_model:
+        print("!!! OSTRZEŻENIE: Model Gemini AI NIE załadowany poprawnie! Funkcjonalność AI niedostępna. !!!")
+    else:
+        print(f"    Model Gemini AI ({MODEL_ID}): Załadowany (OK)")
     print("-" * 60)
     print("  Konfiguracja Google Calendar (Odczyt/Weryfikacja):")
-    print(f"    ID Kalendarza (odczyt): {TARGET_CALENDAR_ID}"); print(f"    Strefa czasowa kalendarza: {CALENDAR_TIMEZONE} (Obiekt TZ: {_get_calendar_timezone()})"); print(f"    Czas trwania wizyty (do obliczeń): {APPOINTMENT_DURATION_MINUTES} min"); print(f"    Godziny pracy (filtr): {WORK_START_HOUR}:00 - {WORK_END_HOUR}:00"); print(f"    Min. wyprzedzenie (filtr): {MIN_BOOKING_LEAD_HOURS} godz."); print(f"    Maks. zakres szukania: {MAX_SEARCH_DAYS} dni"); print(f"    Plik klucza Calendar API: {CALENDAR_SERVICE_ACCOUNT_FILE} ({'Znaleziono' if os.path.exists(CALENDAR_SERVICE_ACCOUNT_FILE) else 'BRAK!!!'})")
-    cal_service = get_calendar_service();
-    if not cal_service and os.path.exists(CALENDAR_SERVICE_ACCOUNT_FILE): print(f"!!! OSTRZ.: Usługa Google Calendar NIE zainicjowana mimo obecności pliku '{CALENDAR_SERVICE_ACCOUNT_FILE}'.")
-    elif not os.path.exists(CALENDAR_SERVICE_ACCOUNT_FILE): print(f"!!! OSTRZ.: Brak pliku klucza Google Calendar '{CALENDAR_SERVICE_ACCOUNT_FILE}'.")
-    elif cal_service: print("    Usługa Google Calendar (odczyt): Zainicjowana (OK)")
+    print(f"    ID Kalendarza (odczyt): {TARGET_CALENDAR_ID}")
+    print(f"    Strefa czasowa kalendarza: {CALENDAR_TIMEZONE} (Obiekt TZ: {_get_calendar_timezone()})")
+    print(f"    Czas trwania wizyty (do obliczeń): {APPOINTMENT_DURATION_MINUTES} min")
+    print(f"    Godziny pracy (filtr): {WORK_START_HOUR}:00 - {WORK_END_HOUR}:00")
+    print(f"    Min. wyprzedzenie (filtr): {MIN_BOOKING_LEAD_HOURS} godz.")
+    print(f"    Maks. zakres szukania: {MAX_SEARCH_DAYS} dni")
+    print(f"    Plik klucza Calendar API: {CALENDAR_SERVICE_ACCOUNT_FILE} ({'Znaleziono' if os.path.exists(CALENDAR_SERVICE_ACCOUNT_FILE) else 'BRAK!!!'})")
+    cal_service = get_calendar_service()
+    if not cal_service and os.path.exists(CALENDAR_SERVICE_ACCOUNT_FILE):
+        print(f"!!! OSTRZ.: Usługa Google Calendar NIE zainicjowana mimo obecności pliku '{CALENDAR_SERVICE_ACCOUNT_FILE}'.")
+    elif not os.path.exists(CALENDAR_SERVICE_ACCOUNT_FILE):
+        print(f"!!! OSTRZ.: Brak pliku klucza Google Calendar '{CALENDAR_SERVICE_ACCOUNT_FILE}'.")
+    elif cal_service:
+        print("    Usługa Google Calendar (odczyt): Zainicjowana (OK)")
     print("-" * 60)
     print("  Konfiguracja Google Sheets (Zapis + Odczyt):")
-    print(f"    ID Arkusza: {SPREADSHEET_ID}"); print(f"    Nazwa Arkusza: {SHEET_NAME}"); print(f"    Strefa czasowa arkusza: {SHEET_TIMEZONE} (Obiekt TZ: {_get_sheet_timezone()}")
-    print(f"    Kolumny do sprawdzania: Data={SHEET_DATE_COLUMN_INDEX}, Czas={SHEET_TIME_COLUMN_INDEX}")
+    print(f"    ID Arkusza: {SPREADSHEET_ID}")
+    print(f"    Nazwa Arkusza: {SHEET_NAME}")
+    print(f"    Strefa czasowa arkusza: {SHEET_TIMEZONE} (Obiekt TZ: {_get_sheet_timezone()})")
+    print(f"    Kolumny do sprawdzania/zapisu: Data={SHEET_DATE_COLUMN_INDEX}, Czas={SHEET_TIME_COLUMN_INDEX}, PSID={SHEET_PSID_COLUMN_INDEX}")
     print(f"    Plik klucza Sheets API: {SHEETS_SERVICE_ACCOUNT_FILE} ({'Znaleziono' if os.path.exists(SHEETS_SERVICE_ACCOUNT_FILE) else 'BRAK!!!'})")
-    sheets_service = get_sheets_service();
-    if not sheets_service and os.path.exists(SHEETS_SERVICE_ACCOUNT_FILE): print(f"!!! OSTRZ.: Usługa Google Sheets NIE zainicjowana mimo obecności pliku '{SHEETS_SERVICE_ACCOUNT_FILE}' (sprawdź uprawnienia API/klucza!).")
-    elif not os.path.exists(SHEETS_SERVICE_ACCOUNT_FILE): print(f"!!! OSTRZ.: Brak pliku klucza Google Sheets '{SHEETS_SERVICE_ACCOUNT_FILE}'.")
-    elif sheets_service: print("    Usługa Google Sheets (odczyt/zapis): Zainicjowana (OK)")
+    sheets_service = get_sheets_service()
+    if not sheets_service and os.path.exists(SHEETS_SERVICE_ACCOUNT_FILE):
+        print(f"!!! OSTRZ.: Usługa Google Sheets NIE zainicjowana mimo obecności pliku '{SHEETS_SERVICE_ACCOUNT_FILE}' (sprawdź uprawnienia API/klucza!).")
+    elif not os.path.exists(SHEETS_SERVICE_ACCOUNT_FILE):
+        print(f"!!! OSTRZ.: Brak pliku klucza Google Sheets '{SHEETS_SERVICE_ACCOUNT_FILE}'.")
+    elif sheets_service:
+        print("    Usługa Google Sheets (odczyt/zapis): Zainicjowana (OK)")
     print("--- KONIEC KONFIGURACJI BOTA ---")
     print("="*60 + "\n")
 
-    port = int(os.environ.get("PORT", 8080)); run_flask_in_debug = (log_level == logging.DEBUG)
+    port = int(os.environ.get("PORT", 8080))
+    run_flask_in_debug = (log_level == logging.DEBUG)
+
     print(f"Uruchamianie serwera Flask na porcie {port}...")
     if not run_flask_in_debug:
-        try: from waitress import serve; print(">>> Serwer produkcyjny Waitress START <<<"); serve(app, host='0.0.0.0', port=port, threads=8)
-        except ImportError: print("!!! Ostrzeżenie: 'waitress' nie znaleziono. Uruchamianie wbudowanego serwera deweloperskiego Flask (niezalecane w produkcji)."); print(">>> Serwer deweloperski Flask START <<<"); app.run(host='0.0.0.0', port=port, debug=False)
-    else: print(">>> Serwer deweloperski Flask (Tryb DEBUG) START <<<"); app.run(host='0.0.0.0', port=port, debug=True, use_reloader=False)
+        try:
+            from waitress import serve
+            print(">>> Serwer produkcyjny Waitress START <<<")
+            serve(app, host='0.0.0.0', port=port, threads=8)
+        except ImportError:
+            print("!!! Ostrzeżenie: 'waitress' nie znaleziono. Uruchamianie wbudowanego serwera deweloperskiego Flask (niezalecane w produkcji).")
+            print(">>> Serwer deweloperski Flask START <<<")
+            app.run(host='0.0.0.0', port=port, debug=False)
+    else:
+        print(">>> Serwer deweloperski Flask (Tryb DEBUG) START <<<")
+        app.run(host='0.0.0.0', port=port, debug=True, use_reloader=False)
