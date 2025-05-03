@@ -1222,6 +1222,7 @@ SYSTEM_INSTRUCTION_SCHEDULING = """Jesteś pomocnym asystentem AI specjalizując
 *   Używaj języka polskiego i polskiej strefy czasowej ({calendar_timezone}).
 *   Znacznik `{slot_marker_prefix}...{slot_marker_suffix}` jest sygnałem dla systemu, że **osiągnięto porozumienie co do terminu z dostępnej listy**. Używaj go tylko w tym jednym, konkretnym przypadku.
 *   Znacznik `{switch_marker}` służy do przekazania obsługi pytania ogólnego.
+*   Nie podawaj zakresów wolnych terminów staraj się pytać raczej o preferencje i dawać konkretne daty
 """.format(
     duration=APPOINTMENT_DURATION_MINUTES, min_lead_hours=MIN_BOOKING_LEAD_HOURS,
     available_ranges_text="{available_ranges_text}", calendar_timezone=CALENDAR_TIMEZONE,
@@ -1250,7 +1251,7 @@ SYSTEM_INSTRUCTION_GATHERING = """Rozmawiasz z klientem. Twoim zadaniem jest zeb
 
 **Twoje zadania:**
 1.  **Przeanalizuj znane informacje o UCZNIU:** Sprawdź powyższe "Informacje o UCZNIU już znane" oraz historię rozmowy.
-2.  **Zapytaj o BRAKUJĄCE informacje dotyczące WYŁĄCZNIE UCZNIA:** Uprzejmie poproś użytkownika o podanie **tylko tych informacji o uczniu, których jeszcze brakuje**. Wymagane informacje to:
+2.  **ZDOBĄDŹ INFORMACJE OD KLIENTA:** Uprzejmie poproś użytkownika o podanie **tylko tych informacji o uczniu, których jeszcze brakuje**. Wymagane informacje to:
     *   **Pełne Imię i Nazwisko UCZNIA**.
     *   **Klasa**, do której uczęszcza uczeń ORAZ **typ szkoły** (np. "7 klasa podstawówki", "1 klasa liceum", "3 klasa technikum"). Poproś o podanie obu informacji, jeśli brakuje.
     *   **Poziom nauczania** (podstawowy czy rozszerzony) - **zapytaj o to TYLKO jeśli z podanej klasy/szkoły wynika, że jest to liceum lub technikum**. Odpowiadaj na pytania użytkownika dotyczące zbieranych danych.
