@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# verify_server.py (Wersja: Rozdzielone Osobowości + Przełączanie Kontekstu + Sprawdzanie Arkusza w get_free_time_ranges + Dwufazowy Zapis + Poprawki)
+# verify_server.py (Wersja: Rozdzielone Osobowości + Przełączanie Kontekstu + Sprawdzanie Arkusza w get_free_time_ranges + Dwufazowy Zapis + Poprawki + Poprawka Powrotu Scheduling + Poprawka Pustej Odp.)
 
 from flask import Flask, request, Response
 import os
@@ -983,6 +983,7 @@ def _send_single_message(recipient_id, message_text):
         logging.error(f"!!! Nieoczekiwany BŁĄD podczas wysyłania wiadomości do {recipient_id}: {e} !!!", exc_info=True)
         return False
 
+
 def send_message(recipient_id, full_message_text):
     """Wysyła wiadomość do użytkownika, dzieląc ją na fragmenty, jeśli jest za długa."""
     if not full_message_text or not isinstance(full_message_text, str) or not full_message_text.strip():
@@ -1067,16 +1068,33 @@ def _call_gemini(user_psid, prompt_history, generation_config, task_name, max_re
         logging.debug(f"    Brak wiadomości użytkownika w bezpośrednim prompcie ({task_name}).")
     attempt = 0
     finish_reason = None # Zmienna do przechowywania ostatniego powodu zakończenia
+    response = None # Zmienna do przechowywania ostatniej odpowiedzi
+    candidate = None # Zmienna do przechowywania ostatniego kandydata
+
     while attempt < max_retries:
         attempt += 1
         logging.debug(f"    Próba {attempt}/{max_retries} wywołania Gemini ({task_name})...")
         try:
             _simulate_typing(user_psid, MIN_TYPING_DELAY_SECONDS * 0.8)
-            response = gemini_model.generate_content(prompt_history, generation_config=generation_config, safety_settings=SAFETY_SETTINGS) # Używa globalnych SAFETY_SETTINGS
+            # Dodano stream=False
+            response = gemini_model.generate_content(
+                prompt_history,
+                generation_config=generation_config,
+                safety_settings=SAFETY_SETTINGS,
+                stream=False
+            )
             if response and response.candidates:
+                # Sprawdź, czy jest co najmniej jeden kandydat
+                if not response.candidates:
+                    logging.warning(f"[{user_psid}] Gemini ({task_name}) zwróciło odpowiedź bez kandydatów.")
+                    if attempt < max_retries: time.sleep(1.5 * attempt); continue
+                    else: return "Przepraszam, wystąpił problem z generowaniem odpowiedzi (brak kandydatów)."
+
                 candidate = response.candidates[0]
                 finish_reason = candidate.finish_reason # Zapisz ostatni powód
-                if finish_reason != 1:
+
+                # Sprawdź finish_reason
+                if finish_reason != 1: # 1 = STOP
                     safety_ratings = candidate.safety_ratings
                     logging.warning(f"[{user_psid}] Gemini ({task_name}) ZAKOŃCZONE NIEPRAWIDŁOWO! Powód: {finish_reason.name} ({finish_reason.value}). Safety Ratings: {safety_ratings}")
                     if finish_reason in [3, 4] and attempt < max_retries: # SAFETY lub RECITATION
@@ -1085,11 +1103,10 @@ def _call_gemini(user_psid, prompt_history, generation_config, task_name, max_re
                         continue
                     else:
                         logging.error(f"!!! [{user_psid}] Gemini ({task_name}) nieudane po blokadzie lub innym błędzie.")
-                        # Zwróć specyficzną wiadomość tylko w przypadku błędu SAFETY
-                        if finish_reason == 3:
-                            return "Przepraszam, nie mogę przetworzyć tej prośby ze względu na zasady bezpieczeństwa."
-                        else:
-                            return "Wystąpił problem z generowaniem odpowiedzi." # Inny błąd
+                        if finish_reason == 3: return "Przepraszam, nie mogę przetworzyć tej prośby ze względu na zasady bezpieczeństwa."
+                        else: return "Przepraszam, wystąpił nieoczekiwany problem z generowaniem odpowiedzi."
+
+                # Sprawdź content (nawet jeśli finish_reason=STOP)
                 if candidate.content and candidate.content.parts:
                     generated_text = "".join(part.text for part in candidate.content.parts if hasattr(part, 'text')).strip()
                     if generated_text:
@@ -1097,15 +1114,22 @@ def _call_gemini(user_psid, prompt_history, generation_config, task_name, max_re
                         logging.debug(f"    Pełna odpowiedź Gemini ({task_name}): '{generated_text}'")
                         return generated_text # Sukces
                     else:
-                        # Jeśli jest pusty content, ale finish_reason to STOP, to jest to problem modelu
+                        # Pusty content mimo finish_reason=STOP
                         logging.warning(f"[{user_psid}] Gemini ({task_name}) zwróciło kandydata z pustą treścią (Finish Reason: {finish_reason.name}).")
-                        # Traktuj to jako błąd, aby wymusić ponowienie lub zwrócenie błędu
-                        # return None # Lub specyficzna wiadomość? Na razie None, żeby ponowiło.
+                        if attempt < max_retries: time.sleep(1.5 * attempt); continue
+                        else: logging.error(f"!!! [{user_psid}] Gemini ({task_name}) zwróciło pustą treść po {max_retries} próbach."); return "Przepraszam, wystąpił problem z wygenerowaniem odpowiedzi (pusta treść)."
                 else:
-                    logging.warning(f"[{user_psid}] Gemini ({task_name}) zwróciło kandydata bez treści (content/parts).")
+                    # Brak contentu w kandydacie
+                    logging.warning(f"[{user_psid}] Gemini ({task_name}) zwróciło kandydata bez treści (content/parts). Finish Reason: {finish_reason.name}")
+                    if attempt < max_retries: time.sleep(1.5 * attempt); continue
+                    else: logging.error(f"!!! [{user_psid}] Gemini ({task_name}) zwróciło kandydata bez treści po {max_retries} próbach."); return "Przepraszam, wystąpił problem z wygenerowaniem odpowiedzi (brak treści)."
             else:
+                # Odpowiedź bez kandydatów
                 prompt_feedback = response.prompt_feedback if hasattr(response, 'prompt_feedback') else 'Brak informacji zwrotnej'
-                logging.error(f"!!! BŁĄD [{user_psid}] Gemini ({task_name}) - Brak kandydatów w odpowiedzi. Feedback: {prompt_feedback}.")
+                logging.error(f"!!! BŁĄD [{user_psid}] Gemini ({task_name}) - Brak kandydatów w odpowiedzi (ponownie). Feedback: {prompt_feedback}.")
+                if attempt < max_retries: time.sleep(1.5 * attempt); continue
+                else: return "Przepraszam, wystąpił problem z generowaniem odpowiedzi (brak kandydatów)."
+
         except HttpError as http_err:
              status_code = http_err.resp.status if http_err.resp else 'Nieznany'
              reason = http_err.resp.reason if http_err.resp else 'Nieznany'
@@ -1116,13 +1140,15 @@ def _call_gemini(user_psid, prompt_history, generation_config, task_name, max_re
                  time.sleep(sleep_time)
                  continue
              else:
-                 break
+                 break # Nie ponawiaj innych błędów HTTP
         except Exception as e:
              if isinstance(e, NameError) and 'gemini_model' in str(e):
                  logging.critical(f"!!! KRYTYCZNY NameError [{user_psid}] w _call_gemini: {e}. gemini_model jest None!", exc_info=True)
                  return None
              else:
                  logging.error(f"!!! BŁĄD [{user_psid}] Gemini ({task_name}) - Nieoczekiwany błąd Python (Próba {attempt}/{max_retries}): {e}", exc_info=True)
+                 break # Nie ponawiaj nieznanych błędów Pythona
+
         # Jeśli doszło tutaj, oznacza to błąd inny niż HTTP lub brak poprawnej odpowiedzi
         if attempt < max_retries:
             logging.warning(f"    Problem z odpowiedzią Gemini ({task_name}). Oczekiwanie przed ponowieniem ({attempt+1}/{max_retries})...")
@@ -1134,7 +1160,8 @@ def _call_gemini(user_psid, prompt_history, generation_config, task_name, max_re
     if finish_reason == 3:
         return "Przepraszam, nie mogę przetworzyć tej prośby ze względu na zasady bezpieczeństwa."
     # Jeśli ostatni błąd to pusty content, zwróć generyczny błąd
-    if finish_reason == 1 and not (response and response.candidates and candidate.content and candidate.content.parts):
+    # Sprawdzenie response i candidate jest potrzebne, bo mogły nie zostać przypisane przy błędzie HTTP/Exception
+    if finish_reason == 1 and not (response and response.candidates and candidate and candidate.content and candidate.content.parts):
          return "Przepraszam, wystąpił problem z wygenerowaniem odpowiedzi."
     return None # Ogólny błąd po wszystkich próbach
 
@@ -1142,22 +1169,26 @@ def _call_gemini(user_psid, prompt_history, generation_config, task_name, max_re
 # === INSTRUKCJE SYSTEMOWE I GŁÓWNE FUNKCJE AI ========================
 # =====================================================================
 
-# --- SYSTEM_INSTRUCTION_SCHEDULING (z obsługą pytań ogólnych) ---
+# --- SYSTEM_INSTRUCTION_SCHEDULING (Poprawiona obsługa powrotu) ---
 SYSTEM_INSTRUCTION_SCHEDULING = """Jesteś pomocnym asystentem AI specjalizującym się w umawianiu terminów korepetycji online. Twoim zadaniem jest znalezienie pasującego terminu dla użytkownika na podstawie jego preferencji oraz dostarczonej listy dostępnych zakresów czasowych z kalendarza.
+
 **Kontekst:**
 *   Rozmawiasz z użytkownikiem, który wyraził chęć umówienia się na lekcję.
 *   Poniżej znajduje się lista AKTUALNIE dostępnych ZAKRESÓW czasowych z kalendarza, w których można umówić wizytę (każda trwa {duration} minut). **Wszystkie podane zakresy są już odpowiednio odsunięte w czasie (filtr {min_lead_hours}h) i gotowe do zaproponowania.**
-*   Masz dostęp do historii poprzedniej rozmowy.
+*   Masz dostęp do historii poprzedniej rozmowy. Czasami rozmowa mogła zostać przerwana pytaniem ogólnym i teraz do niej wracamy.
+
 **Styl pisania:**
 *   Używaj zwrotów typu "Państwo".
 *   Unikaj zbyt entuzjastycznych wiadomości i wykrzykników.
 *   Zwracaj uwagę na ortografię i interpunkcję.
 *   Proponuj terminy w formie pytania, np. "Czy odpowiadałby Państwu termin w najbliższy wtorek o 17:00?".
+
 **Dostępne zakresy czasowe z kalendarza:**
 {available_ranges_text}
+
 **Twoje zadanie:**
-1.  **Zaproponuj pierwszy termin:** Rozpocznij od zaproponowania **konkretnego terminu** z podanej listy "Dostępne zakresy czasowe". Wybierz termin w miarę możliwości w najbliższych dniach, biorąc pod uwagę potencjalne preferencje ucznia (np. popołudnia w tygodniu).
-2.  **Negocjuj:** Na podstawie odpowiedzi użytkownika, historii konwersacji i **wyłącznie dostępnych zakresów z listy**, kontynuuj rozmowę, aby znaleźć termin pasujący obu stronom. Proponuj konkretne godziny rozpoczęcia (np. "Może w takim razie czwartek o 16:00?").
+1.  **Rozpocznij rozmowę LUB WZNÓW:** Jeśli to początek umawiania lub jeśli ostatnia wiadomość użytkownika nie dotyczyła preferencji terminu (np. było to podziękowanie po odpowiedzi na pytanie ogólne), potwierdź, że widzisz dostępne terminy i zapytaj użytkownika o jego **ogólne preferencje** dotyczące dnia tygodnia lub pory dnia (np. "Mamy kilka wolnych terminów. Czy preferują Państwo jakiś konkretny dzień tygodnia lub porę dnia - rano, popołudnie, wieczór?"). **Nie proponuj jeszcze konkretnej daty i godziny.**
+2.  **Negocjuj:** Na podstawie odpowiedzi użytkownika **dotyczącej preferencji terminu**, historii konwersacji i **wyłącznie dostępnych zakresów z listy**, kontynuuj rozmowę, aby znaleźć termin pasujący obu stronom. Gdy użytkownik poda preferencje, **zaproponuj konkretny termin z listy**, który im odpowiada (np. "W takim razie, może środa o 17:00?"). Jeśli ostatnia wiadomość użytkownika nie była odpowiedzią na pytanie o termin, wróć do kroku 1.
 3.  **Potwierdź i dodaj znacznik:** Kiedy wspólnie ustalicie **dokładny termin** (np. "Środa, 15 maja o 18:30"), który **znajduje się na liście dostępnych zakresów**, potwierdź go w swojej odpowiedzi (np. "Świetnie, w takim razie proponowany termin to środa, 15 maja o 18:30.") i **zakończ swoją odpowiedź potwierdzającą DOKŁADNIE znacznikiem** `{slot_marker_prefix}YYYY-MM-DDTHH:MM:SS{slot_marker_suffix}`. Użyj formatu ISO 8601 dla ustalonego czasu rozpoczęcia (np. 2024-05-15T18:30:00). Upewnij się, że data i godzina w znaczniku są poprawne, zgodne z ustaleniami i **pochodzą z listy dostępnych zakresów**.
 4.  **NIE dodawaj znacznika**, jeśli:
     *   Użytkownik jeszcze się zastanawia lub prosi o więcej opcji.
@@ -1273,7 +1304,8 @@ def get_gemini_scheduling_response(user_psid, history_for_scheduling_ai, current
         return "Błąd wewnętrzny konfiguracji asystenta planowania."
     initial_prompt = [
         Content(role="user", parts=[Part.from_text(system_instruction)]),
-        Content(role="model", parts=[Part.from_text(f"Rozumiem. Zaproponuję pierwszy dostępny termin z podanej listy i będę negocjować z użytkownikiem na podstawie dostępnych zakresów. Znacznik {SLOT_ISO_MARKER_PREFIX}...{SLOT_ISO_MARKER_SUFFIX} dodam tylko po uzyskaniu ostatecznej zgody na termin z listy. Jeśli użytkownik zada pytanie ogólne, odpowiem tylko znacznikiem {SWITCH_TO_GENERAL}.")])
+        # Zaktualizowana odpowiedź modelu
+        Content(role="model", parts=[Part.from_text(f"Rozumiem. Potwierdzę dostępne terminy i zapytam użytkownika o preferencje. Następnie będę negocjować na podstawie dostępnych zakresów. Znacznik {SLOT_ISO_MARKER_PREFIX}...{SLOT_ISO_MARKER_SUFFIX} dodam tylko po uzyskaniu ostatecznej zgody na termin z listy. Jeśli użytkownik zada pytanie ogólne, odpowiem tylko znacznikiem {SWITCH_TO_GENERAL}.")])
     ]
     full_prompt = initial_prompt + history_for_scheduling_ai
     if current_user_message_text:
@@ -1283,6 +1315,7 @@ def get_gemini_scheduling_response(user_psid, history_for_scheduling_ai, current
         full_prompt.pop(2)
         if len(full_prompt) > 2:
             full_prompt.pop(2)
+    # Wywołanie _call_gemini pozostaje bez zmian tutaj
     response_text = _call_gemini(user_psid, full_prompt, GENERATION_CONFIG_SCHEDULING, "Scheduling Conversation")
     if response_text:
         # Nie usuwamy już tutaj SWITCH_TO_GENERAL, bo jest potrzebny w logice webhooka
@@ -1538,23 +1571,16 @@ def webhook_handle():
                                         # Ustaw odpowiednią akcję do wykonania w następnej pętli
                                         if next_state == STATE_SCHEDULING_ACTIVE:
                                             action = 'handle_scheduling'
-                                            # Wywołaj AI planujące bez inputu, aby przypomniało kontekst
-                                            msg_result = "Wracając do ustalania terminu..." # Opcjonalna wiadomość
-                                            model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
-                                            # Wyślij wiadomość od razu, bo nie będzie kolejnego wywołania AI w tej pętli
-                                            send_message(sender_id, msg_result)
-                                            # Dodaj do historii przed zapisem
-                                            # user_content już dodany, model_resp_content też
-                                            # Resetuj msg_result i model_resp_content, aby nie wysłać/zapisać podwójnie
+                                            # --- USUNIĘTO WYSYŁANIE WIADOMOŚCI "WRACAJĄC DO..." ---
                                             msg_result = None
                                             model_resp_content = None
-                                            # Nie ustawiamy trigger_gathering_ai_immediately
+                                            # ------------------------------------------------------
+                                            trigger_gathering_ai_immediately = False # Nie triggerujemy od razu
 
                                         elif next_state == STATE_GATHERING_INFO:
                                             action = 'handle_gathering'
                                             trigger_gathering_ai_immediately = True # Wywołaj AI zbierające od razu
                                             logging.debug("      Ustawiono trigger_gathering_ai_immediately po powrocie.")
-                                            # Nie wysyłamy wiadomości, AI zbierające samo zapyta
                                             msg_result = None
                                             model_resp_content = None
                                         else:
@@ -1629,7 +1655,7 @@ def webhook_handle():
                                         if ai_response_text.strip() == SWITCH_TO_GENERAL: # Przywrócono sprawdzanie
                                             logging.info(f"      AI Planujące zasygnalizowało pytanie ogólne [{SWITCH_TO_GENERAL}]. Przełączanie.")
                                             context_data_to_save['return_to_state'] = STATE_SCHEDULING_ACTIVE
-                                            scheduling_context_minimal = {}
+                                            scheduling_context_minimal = {} # Można tu dodać np. ostatnio proponowany zakres
                                             context_data_to_save['return_to_context'] = scheduling_context_minimal
                                             context_data_to_save['type'] = STATE_GENERAL
                                             next_state = STATE_GENERAL
