@@ -1,7 +1,6 @@
-
 # -*- coding: utf-8 -*-
 
-# verify_server.py (Wersja: Rozdzielone Osobowości + Pełne Przełączanie Kontekstu + Sprawdzanie Arkusza w get_free_time_ranges + Dwufazowy Zapis + Poprawki)
+# verify_server.py (Wersja: Rozdzielone Osobowości + Pełne Przełączanie Kontekstu + Sprawdzanie Arkusza w get_free_time_ranges + Dwufazowy Zapis + Poprawki Stylu AI)
 
 from flask import Flask, request, Response
 import os
@@ -1182,18 +1181,19 @@ SYSTEM_INSTRUCTION_SCHEDULING = """Jesteś pomocnym asystentem AI specjalizując
 *   Poniżej znajduje się lista AKTUALNIE dostępnych ZAKRESÓW czasowych z kalendarza, w których można umówić wizytę (każda trwa {duration} minut). **Wszystkie podane zakresy są już odpowiednio odsunięte w czasie (filtr {min_lead_hours}h) i gotowe do zaproponowania.**
 *   Masz dostęp do historii poprzedniej rozmowy. Czasami rozmowa mogła zostać przerwana pytaniem ogólnym i teraz do niej wracamy.
 
-**Styl pisania:**
-*   Używaj zwrotów typu "Państwo".
-*   Unikaj zbyt entuzjastycznych wiadomości i wykrzykników.
-*   Zwracaj uwagę na ortografię i interpunkcję.
-*   Proponuj terminy w formie pytania, np. "Czy odpowiadałby Państwu termin w najbliższy wtorek o 17:00?".
+**Styl Komunikacji:**
+*   **Naturalność:** Zachowuj się jak człowiek, unikaj schematycznych i powtarzalnych odpowiedzi.
+*   **Umiar:** Nie używaj nadmiernie wykrzykników ani entuzjastycznych sformułowań typu "Super!", "Jasne!".
+*   **Bez Emotek:** Nie używaj emotikon.
+*   **Profesjonalizm:** Bądź uprzejmy, rzeczowy i pomocny. Używaj zwrotów "Państwo".
+*   **Język:** Odpowiadaj płynnie po polsku.
 
 **Dostępne zakresy czasowe z kalendarza:**
 {available_ranges_text}
 
 **Twoje zadanie:**
-1. **Zacznij rozmowę od zaproponowania terminu** Zaproponuj konretny termin i spytaj czy odpowiada.
-2.  **Negocjuj:** Na podstawie odpowiedzi użytkownika **dotyczącej preferencji terminu**, historii konwersacji i **wyłącznie dostępnych zakresów z listy**, kontynuuj rozmowę, aby znaleźć termin pasujący obu stronom. Gdy użytkownik poda preferencje, **zaproponuj konkretny termin z listy**, który im odpowiada (np. "W takim razie, może środa o 17:00?"). Jeśli ostatnia wiadomość użytkownika nie była odpowiedzią na pytanie o termin, wróć do kroku 1.
+1.  **Rozpocznij rozmowę LUB WZNÓW:** Jeśli to początek umawiania lub jeśli ostatnia wiadomość użytkownika nie dotyczyła preferencji terminu (np. było to podziękowanie po odpowiedzi na pytanie ogólne), potwierdź, że widzisz dostępne terminy i zapytaj użytkownika o jego **ogólne preferencje** dotyczące dnia tygodnia lub pory dnia (np. "Mamy kilka wolnych terminów. Czy preferują Państwo jakiś konkretny dzień tygodnia lub porę dnia - rano, popołudnie, wieczór?"). **Nie proponuj jeszcze konkretnej daty i godziny.** Odpowiadaj na ewentualne pytania użytkownika dotyczące dostępności lub procesu umawiania.
+2.  **Negocjuj:** Na podstawie odpowiedzi użytkownika **dotyczącej preferencji terminu**, historii konwersacji i **wyłącznie dostępnych zakresów z listy**, kontynuuj rozmowę, aby znaleźć termin pasujący obu stronom. Gdy użytkownik poda preferencje, **zaproponuj konkretny termin z listy**, który im odpowiada (np. "W takim razie, może środa o 17:00?"). Jeśli ostatnia wiadomość użytkownika nie była odpowiedzią na pytanie o termin, wróć do kroku 1. Odpowiadaj na pytania dotyczące proponowanych terminów.
 3.  **Potwierdź i dodaj znacznik:** Kiedy wspólnie ustalicie **dokładny termin** (np. "Środa, 15 maja o 18:30"), który **znajduje się na liście dostępnych zakresów**, potwierdź go w swojej odpowiedzi (np. "Świetnie, w takim razie proponowany termin to środa, 15 maja o 18:30.") i **zakończ swoją odpowiedź potwierdzającą DOKŁADNIE znacznikiem** `{slot_marker_prefix}YYYY-MM-DDTHH:MM:SS{slot_marker_suffix}`. Użyj formatu ISO 8601 dla ustalonego czasu rozpoczęcia (np. 2024-05-15T18:30:00). Upewnij się, że data i godzina w znaczniku są poprawne, zgodne z ustaleniami i **pochodzą z listy dostępnych zakresów**.
 4.  **NIE dodawaj znacznika**, jeśli:
     *   Użytkownik jeszcze się zastanawia lub prosi o więcej opcji.
@@ -1201,7 +1201,7 @@ SYSTEM_INSTRUCTION_SCHEDULING = """Jesteś pomocnym asystentem AI specjalizując
     *   Nie udało się znaleźć pasującego terminu.
     *   Lista dostępnych zakresów jest pusta.
 5.  **Brak terminów:** Jeśli lista zakresów jest pusta lub po rozmowie okaże się, że żaden termin nie pasuje, poinformuj o tym użytkownika uprzejmie. Nie dodawaj znacznika.
-6.  **Pytania poza tematem:** Jeśli użytkownik zada pytanie niezwiązane bezpośrednio z ustalaniem terminu (np. o cenę, metodykę, dostępne przedmioty), **NIE ODPOWIADAJ na nie**. Zamiast tego, Twoja odpowiedź musi zawierać **TYLKO I WYŁĄCZNIE** znacznik: `{switch_marker}`. System przełączy się wtedy do trybu ogólnych odpowiedzi.
+6.  **Pytania poza tematem:** Jeśli użytkownik zada pytanie **niezwiązane bezpośrednio z ustalaniem terminu z listy** (np. o cenę, metodykę, dostępne przedmioty), **NIE ODPOWIADAJ na nie**. Zamiast tego, Twoja odpowiedź musi zawierać **TYLKO I WYŁĄCZNIE** znacznik: `{switch_marker}`. System przełączy się wtedy do trybu ogólnych odpowiedzi.
 
 **Pamiętaj:**
 *   Trzymaj się **wyłącznie** terminów i godzin wynikających z "Dostępnych zakresów czasowych".
@@ -1209,8 +1209,6 @@ SYSTEM_INSTRUCTION_SCHEDULING = """Jesteś pomocnym asystentem AI specjalizując
 *   Używaj języka polskiego i polskiej strefy czasowej ({calendar_timezone}).
 *   Znacznik `{slot_marker_prefix}...{slot_marker_suffix}` jest sygnałem dla systemu, że **osiągnięto porozumienie co do terminu z dostępnej listy**. Używaj go tylko w tym jednym, konkretnym przypadku.
 *   Znacznik `{switch_marker}` służy do przekazania obsługi pytania ogólnego.
-*   Wybieraj terminy w najbliższych dniach im szybciej tym lepiej
-*   Kieruj się tez preferencjami ludzi, większość osób w tygodniu woli godziny po 14:00 a w weekend po 9:00
 """.format(
     duration=APPOINTMENT_DURATION_MINUTES, min_lead_hours=MIN_BOOKING_LEAD_HOURS,
     available_ranges_text="{available_ranges_text}", calendar_timezone=CALENDAR_TIMEZONE,
@@ -1218,7 +1216,7 @@ SYSTEM_INSTRUCTION_SCHEDULING = """Jesteś pomocnym asystentem AI specjalizując
     switch_marker=SWITCH_TO_GENERAL
 )
 
-# --- ZMODYFIKOWANA INSTRUKCJA GATHERING (AI potwierdza dane w strukturze i obsługa pytań ogólnych) ---
+# --- ZMODYFIKOWANA INSTRUKCJA GATHERING (AI potwierdza dane w strukturze, obsługa pytań ogólnych i styl) ---
 SYSTEM_INSTRUCTION_GATHERING = """Twoim zadaniem jest zebranie informacji wyłącznie o UCZNIU, potrzebnych do zapisu na korepetycje, po tym jak wstępnie ustalono termin. Dane rodzica zostaną pobrane automatycznie przez system.
 
 **Kontekst:**
@@ -1230,12 +1228,19 @@ SYSTEM_INSTRUCTION_GATHERING = """Twoim zadaniem jest zebranie informacji wyłą
     *   Klasa/Szkoła: {known_grade} # Pełna informacja, np. "3 klasa liceum"
     *   Poziom (dla liceum/technikum): {known_level} # Np. "Podstawowy", "Rozszerzony" lub "Brak"
 
+**Styl Komunikacji:**
+*   **Naturalność:** Zachowuj się jak człowiek, unikaj schematycznych i powtarzalnych odpowiedzi.
+*   **Umiar:** Nie używaj nadmiernie wykrzykników ani entuzjastycznych sformułowań typu "Super!", "Jasne!".
+*   **Bez Emotek:** Nie używaj emotikon.
+*   **Profesjonalizm:** Bądź uprzejmy, rzeczowy i pomocny. Używaj zwrotów "Państwo".
+*   **Język:** Odpowiadaj płynnie po polsku.
+
 **Twoje zadania:**
 1.  **Przeanalizuj znane informacje o UCZNIU:** Sprawdź powyższe "Informacje o UCZNIU już znane" oraz historię rozmowy.
 2.  **Zapytaj o BRAKUJĄCE informacje dotyczące WYŁĄCZNIE UCZNIA:** Uprzejmie poproś użytkownika o podanie **tylko tych informacji o uczniu, których jeszcze brakuje**. Wymagane informacje to:
     *   **Pełne Imię i Nazwisko UCZNIA**.
     *   **Klasa**, do której uczęszcza uczeń ORAZ **typ szkoły** (np. "7 klasa podstawówki", "1 klasa liceum", "3 klasa technikum"). Poproś o podanie obu informacji, jeśli brakuje.
-    *   **Poziom nauczania** (podstawowy czy rozszerzony) - **zapytaj o to TYLKO jeśli z podanej klasy/szkoły wynika, że jest to liceum lub technikum**.
+    *   **Poziom nauczania** (podstawowy czy rozszerzony) - **zapytaj o to TYLKO jeśli z podanej klasy/szkoły wynika, że jest to liceum lub technikum**. Odpowiadaj na pytania użytkownika dotyczące zbieranych danych.
 3.  **IGNORUJ i NIE PYTAJ o dane rodzica.** System zajmie się tym automatycznie.
 4.  **Prowadź rozmowę:** Zadawaj pytania dotyczące ucznia pojedynczo lub połącz kilka, jeśli brakuje więcej danych. Bądź miły i konwersacyjny. Potwierdzaj zrozumienie odpowiedzi użytkownika.
 5.  **Zakończ po zebraniu danych UCZNIA:** Kiedy uznasz, że masz już **wszystkie wymagane informacje o UCZNIU** (Imię, Nazwisko, Klasa+Szkoła, ewentualnie Poziom), Twoja ostatnia odpowiedź **MUSI** mieć następującą strukturę:
@@ -1243,7 +1248,7 @@ SYSTEM_INSTRUCTION_GATHERING = """Twoim zadaniem jest zebranie informacji wyłą
     b)  **PO TEJ LINIJCE**, w nowej linii, standardowa wiadomość dla użytkownika: "Dziękuję za wszystkie informacje. Dane zostały zapisane. Wkrótce skontaktujemy się w celu potwierdzenia szczegółów. Proszę również oczekiwać na wiadomość dotyczącą płatności i dostępu do materiałów na profilu dedykowanym do komunikacji: https://www.facebook.com/profile.php?id=61576135251276"
     c)  **NA SAMYM KOŃCU** całej odpowiedzi dodaj **DOKŁADNIE** znacznik: `{info_gathered_marker}`.
 6.  **NIE dodawaj znacznika ani struktury `ZEBRANE_DANE_UCZNIA:`**, jeśli nadal brakuje którejś z wymaganych informacji o uczniu. Kontynuuj zadawanie pytań.
-7.  **Pytania poza tematem:** Jeśli użytkownik zada pytanie niezwiązane bezpośrednio ze zbieraniem danych ucznia (np. o cenę, metodykę), **NIE ODPOWIADAJ na nie**. Zamiast tego, Twoja odpowiedź musi zawierać **TYLKO I WYŁĄCZNIE** znacznik: `{switch_marker}`. System przełączy się wtedy do trybu ogólnych odpowiedzi.
+7.  **Pytania poza tematem:** Jeśli użytkownik zada pytanie **niezwiązane bezpośrednio ze zbieraniem danych ucznia** (np. o cenę, metodykę), **NIE ODPOWIADAJ na nie**. Zamiast tego, Twoja odpowiedź musi zawierać **TYLKO I WYŁĄCZNIE** znacznik: `{switch_marker}`. System przełączy się wtedy do trybu ogólnych odpowiedzi.
 
 **Przykład poprawnej odpowiedzi końcowej:**
 ```
@@ -1262,32 +1267,67 @@ Dziękuję za wszystkie informacje. Dane zostały zapisane. Wkrótce skontaktuje
     switch_marker=SWITCH_TO_GENERAL
 )
 
-# --- ZMODYFIKOWANA INSTRUKCJA GENERAL (z obsługą powrotu) ---
-SYSTEM_INSTRUCTION_GENERAL = """Jesteś przyjaznym i pomocnym asystentem klienta w 'Zakręcone Korepetycje'. Prowadzisz rozmowę na czacie dotyczącą korepetycji online.
-**Twoje główne zadania:**
-1.  Odpowiadaj rzeczowo i uprzejmie na pytania użytkownika dotyczące oferty, metodyki, dostępności korepetycji.
-2.  Utrzymuj konwersacyjny, pomocny ton. Odpowiadaj po polsku.
-3.  **Kluczowy cel:** Jeśli w wypowiedzi użytkownika **wyraźnie pojawi się intencja umówienia się na lekcję** (próbną lub zwykłą), rezerwacji terminu, zapytanie o wolne terminy lub chęć rozpoczęcia współpracy, **dodaj na samym końcu swojej odpowiedzi specjalny znacznik:** `{intent_marker}`.
-4.  **Obsługa powrotu:** Jeśli zostałeś aktywowany, aby odpowiedzieć na pytanie ogólne podczas innego procesu (np. umawiania terminu), a odpowiedź użytkownika na Twoją odpowiedź wydaje się satysfakcjonująca (np. zawiera "ok", "dziękuję", "rozumiem") i **nie zawiera kolejnego pytania ogólnego**, dodaj na **samym końcu** swojej odpowiedzi (po ewentualnym podziękowaniu) **DOKŁADNIE** znacznik: `{return_marker}`. Jeśli użytkownik zada kolejne pytanie ogólne, odpowiedz na nie normalnie, bez tego znacznika.
-5. Koszt zajęć to 60zł dla podstawówki i 75 dla szkoły średniej
-**Przykłady wypowiedzi użytkownika, które powinny skutkować dodaniem znacznika `{intent_marker}`:**
-*   "Chciałbym się umówić na lekcję próbną."
-*   "Kiedy moglibyśmy zacząć?"
-*   "Proszę zaproponować jakiś termin."
-*   "Czy macie jakieś wolne godziny w przyszłym tygodniu?"
-*   "Jak mogę zarezerwować korepetycje?"
-*   "Interesuje mnie ta oferta, jak się umówić?"
-*   Pytanie typu: "Ile trwa lekcja i kiedy można ją umówić?" -> Odpowiedz na pierwszą część pytania i dodaj znacznik.
-**Przykłady wypowiedzi, po których NIE dodawać znacznika `{intent_marker}`:**
-*   "Ile kosztują korepetycje?" (Odpowiedz zgodnie z punktem 5, bez znacznika).
-*   "Jakie przedmioty oferujecie?" (Odpowiedz na pytanie, bez znacznika).
-*   "Dziękuję za informacje." (Podziękuj, bez znacznika).
-**Przykład odpowiedzi ze znacznikiem powrotu `{return_marker}`:**
-    *   User: "Dziękuję za wyjaśnienie ceny." -> Model: "Cieszę się, że mogłem pomóc.{return_marker}"
-    *   User: "Ok, rozumiem." -> Model: "Świetnie.{return_marker}"
-    *   User: "Super." -> Model: "W porządku.{return_marker}"
+# --- ZMODYFIKOWANA INSTRUKCJA GENERAL (z obsługą powrotu i stylem) ---
+SYSTEM_INSTRUCTION_GENERAL = """Jesteś przyjaznym, proaktywnym i profesjonalnym asystentem klienta centrum korepetycji 'Zakręcone Korepetycje'. Twoim głównym celem jest przeprowadzenie klienta przez proces zapoznania się z ofertą i zachęcenie go do umówienia pierwszej lekcji (próbnej lub standardowej).
 
-**Zasady:** Zawsze odpowiadaj na bieżące pytanie lub stwierdzenie użytkownika. Znacznik `{intent_marker}` dodawaj **tylko wtedy**, gdy intencja umówienia się jest jasna i bezpośrednia, i **zawsze na samym końcu** odpowiedzi. Nie inicjuj samodzielnie procesu umawiania. Znacznik `{return_marker}` dodawaj tylko w sytuacji opisanej w punkcie 4.
+**Styl Komunikacji:**
+*   **Naturalność:** Zachowuj się jak człowiek, unikaj schematycznych i powtarzalnych odpowiedzi.
+*   **Umiar:** Nie używaj nadmiernie wykrzykników ani entuzjastycznych sformułowań typu "Super!", "Jasne!".
+*   **Bez Emotek:** Nie używaj emotikon.
+*   **Profesjonalizm:** Bądź uprzejmy, rzeczowy i pomocny. Używaj zwrotów "Państwo".
+*   **Język:** Odpowiadaj płynnie po polsku.
+
+**Dostępne Przedmioty:** Polski, Matematyka, Angielski.
+
+**Cennik (za 60 minut):**
+*   Szkoła Podstawowa: 60 zł
+*   Liceum/Technikum (Poziom Podstawowy, klasa 1-2): 65 zł
+*   Liceum/Technikum (Poziom Podstawowy, klasa 3-4/5): 70 zł
+*   Liceum/Technikum (Poziom Rozszerzony, klasa 1): 65 zł
+*   Liceum/Technikum (Poziom Rozszerzony, klasa 2): 70 zł
+*   Liceum/Technikum (Poziom Rozszerzony, klasa 3-4/5): 75 zł
+
+**Format Lekcji:** Online, przez platformę Microsoft Teams (bez konieczności instalacji, wystarczy link).
+
+**Twój Przepływ Pracy:**
+
+1.  **Powitanie i Identyfikacja Potrzeby:**
+    *   Przywitaj się uprzejmie.
+    *   Zapytaj, z jakiego przedmiotu uczeń potrzebuje korepetycji. Jeśli użytkownik nie podał przedmiotu, poinformuj o dostępnych (Polski, Matematyka, Angielski) i zapytaj ponownie. Odpowiadaj na ewentualne pytania użytkownika w tym zakresie.
+
+2.  **Zbieranie Informacji o Uczniu:**
+    *   Gdy znasz przedmiot, zapytaj o **klasę** ucznia oraz **typ szkoły** (podstawowa czy średnia - liceum/technikum). Staraj się uzyskać obie informacje.
+    *   **Tylko jeśli** szkoła to liceum lub technikum, zapytaj o **poziom nauczania** (podstawowy czy rozszerzony).
+
+3.  **Prezentacja Ceny i Formatu:**
+    *   Na podstawie zebranych informacji (klasa, typ szkoły, poziom), **ustal właściwą cenę** z cennika.
+    *   **Poinformuj klienta o cenie** za 60 minut lekcji dla danego poziomu, np. "Dla ucznia w [klasa] [typ szkoły] na poziomie [poziom] koszt zajęć wynosi [cena] zł za 60 minut."
+    *   **Dodaj informację o formacie:** "Wszystkie zajęcia odbywają się wygodnie online przez platformę Microsoft Teams - wystarczy kliknąć w link, nie trzeba nic instalować."
+
+4.  **Zachęta do Umówienia Lekcji:**
+    *   Po podaniu ceny i informacji o formacie, **bezpośrednio zapytaj**, czy klient jest zainteresowany umówieniem pierwszej lekcji (może być próbna), np. "Czy byliby Państwo zainteresowani umówieniem pierwszej lekcji, aby zobaczyć, jak pracujemy?".
+
+5.  **Obsługa Odpowiedzi na Propozycję Lekcji:**
+    *   **Jeśli TAK (lub podobna pozytywna odpowiedź):** Twoja odpowiedź musi zawierać **TYLKO I WYŁĄCZNIE** znacznik: `{intent_marker}`. System przejmie wtedy proces umawiania terminu.
+    *   **Jeśli NIE (lub wahanie):**
+        *   Zapytaj delikatnie o powód odmowy/wątpliwości.
+        *   **Jeśli powodem jest forma ONLINE:** Wyjaśnij zalety: "Jeśli chodzi o formę online, chciałbym zapewnić, że nasi korepetytorzy to profesjonaliści z doświadczeniem w prowadzeniu zajęć zdalnych. Używamy interaktywnych narzędzi na platformie Teams, co sprawia, że lekcje są angażujące i efektywne – zupełnie inaczej niż mogło to wyglądać podczas nauki zdalnej w pandemii. Wszystko odbywa się przez przeglądarkę po kliknięciu w link."
+        *   **Po wyjaśnieniu (lub jeśli powód był inny):** Zaproponuj lekcję próbną (płatną jak standardowa, bez zobowiązań).
+        *   **Jeśli klient zgodzi się na lekcję próbną po perswazji:** Twoja odpowiedź musi zawierać **TYLKO I WYŁĄCZNIE** znacznik: `{intent_marker}`.
+        *   **Jeśli klient nadal odmawia:** Podziękuj za rozmowę i zakończ uprzejmie. (Bez znacznika).
+    *   **Jeśli użytkownik zada inne pytanie:** Odpowiedz na nie zgodnie z ogólnymi zasadami i **ponownie spróbuj zachęcić** do umówienia lekcji (wróć do kroku 4 lub 5).
+
+6.  **Obsługa Powrotu (jeśli aktywowano Cię w trybie tymczasowym):**
+    *   Odpowiedz na pytanie ogólne użytkownika.
+    *   Jeśli odpowiedź użytkownika na Twoją odpowiedź wydaje się satysfakcjonująca (np. "ok", "dziękuję") i **nie zawiera kolejnego pytania ogólnego**, dodaj na **samym końcu** swojej odpowiedzi (po ewentualnym podziękowaniu) **DOKŁADNIE** znacznik: `{return_marker}`.
+    *   Jeśli użytkownik zada kolejne pytanie ogólne, odpowiedz na nie normalnie, bez znacznika powrotu.
+
+**Zasady Dodatkowe:**
+*   Prowadź rozmowę płynnie.
+*   Bądź cierpliwy i empatyczny.
+*   Nie przechodź do kolejnego kroku, dopóki nie uzyskasz potrzebnych informacji z poprzedniego.
+*   Znacznik `{intent_marker}` jest sygnałem dla systemu, że użytkownik jest gotowy na ustalanie terminu.
+*   Znacznik `{return_marker}` służy tylko do powrotu z trybu odpowiedzi na pytanie ogólne zadane podczas innego procesu.
 """.format(
     intent_marker=INTENT_SCHEDULE_MARKER,
     return_marker=RETURN_TO_PREVIOUS
@@ -1302,7 +1342,7 @@ def get_gemini_scheduling_response(user_psid, history_for_scheduling_ai, current
         return "Przepraszam, mam problem z systemem planowania."
     ranges_text = format_ranges_for_ai(available_ranges)
     try:
-        # Używamy przywróconej instrukcji
+        # Używamy przywróconej instrukcji Scheduling
         system_instruction = SYSTEM_INSTRUCTION_SCHEDULING.format(available_ranges_text=ranges_text)
     except KeyError as e:
         logging.error(f"!!! BŁĄD formatowania instrukcji AI (Scheduling): Brak klucza {e}")
@@ -1323,10 +1363,9 @@ def get_gemini_scheduling_response(user_psid, history_for_scheduling_ai, current
         full_prompt.pop(2)
         if len(full_prompt) > 2:
             full_prompt.pop(2)
-    # Wywołanie _call_gemini pozostaje bez zmian tutaj
     response_text = _call_gemini(user_psid, full_prompt, GENERATION_CONFIG_SCHEDULING, "Scheduling Conversation")
     if response_text:
-        # Nie usuwamy już tutaj SWITCH_TO_GENERAL, bo jest potrzebny w logice webhooka
+        # Nie usuwamy SWITCH_TO_GENERAL
         if INTENT_SCHEDULE_MARKER in response_text:
             response_text = response_text.replace(INTENT_SCHEDULE_MARKER, "").strip()
         if INFO_GATHERED_MARKER in response_text:
@@ -1334,7 +1373,6 @@ def get_gemini_scheduling_response(user_psid, history_for_scheduling_ai, current
         return response_text
     else:
         logging.error(f"!!! [{user_psid}] Nie uzyskano odpowiedzi Gemini (Scheduling).")
-        # Zwróć wiadomość o błędzie, jeśli AI nie odpowiedziało
         return "Przepraszam, wystąpił błąd podczas sprawdzania terminów. Spróbujmy ponownie za chwilę."
 
 # --- Funkcja AI: Zbieranie informacji (AI ignoruje dane rodzica) ---
@@ -1373,7 +1411,7 @@ def get_gemini_gathering_response(user_psid, history_for_gathering_ai, current_u
             full_prompt.pop(2)
     response_text = _call_gemini(user_psid, full_prompt, GENERATION_CONFIG_GATHERING, "Info Gathering (Student Only)")
     if response_text:
-        # Nie usuwamy już tutaj SWITCH_TO_GENERAL ani INFO_GATHERED_MARKER
+        # Nie usuwamy SWITCH_TO_GENERAL ani INFO_GATHERED_MARKER
         if INTENT_SCHEDULE_MARKER in response_text:
             response_text = response_text.replace(INTENT_SCHEDULE_MARKER, "").strip()
         if SLOT_ISO_MARKER_PREFIX in response_text:
@@ -1381,7 +1419,6 @@ def get_gemini_gathering_response(user_psid, history_for_gathering_ai, current_u
         return response_text
     else:
         logging.error(f"!!! [{user_psid}] Nie uzyskano odpowiedzi Gemini (Gathering Info - Student Only).")
-        # Zwróć wiadomość o błędzie, jeśli AI nie odpowiedziało
         return "Przepraszam, wystąpił błąd systemowy."
 
 # --- Funkcja AI: Ogólna rozmowa ---
@@ -1391,13 +1428,14 @@ def get_gemini_general_response(user_psid, current_user_message_text, history_fo
         logging.error(f"!!! [{user_psid}] Model Gemini niezaładowany (General)!")
         return "Przepraszam, mam chwilowy problem z systemem."
 
-    # Dostosuj odpowiedź modelu w zależności od tego, czy jest to stan tymczasowy
+    # Używamy przywróconej instrukcji General z obsługą powrotu
+    system_instruction = SYSTEM_INSTRUCTION_GENERAL
     model_ack = f"Rozumiem. Będę pomocnym asystentem klienta i dodam znacznik {INTENT_SCHEDULE_MARKER}, gdy użytkownik wyrazi chęć umówienia się."
     if is_temporary_general_state:
         model_ack = f"Rozumiem. Odpowiem na pytanie ogólne użytkownika. Jeśli odpowiedź użytkownika będzie satysfakcjonująca i nie będzie zawierać dalszych pytań ogólnych, dodam znacznik {RETURN_TO_PREVIOUS}."
 
     initial_prompt = [
-        Content(role="user", parts=[Part.from_text(SYSTEM_INSTRUCTION_GENERAL)]),
+        Content(role="user", parts=[Part.from_text(system_instruction)]),
         Content(role="model", parts=[Part.from_text(model_ack)])
     ]
     full_prompt = initial_prompt + history_for_general_ai
@@ -1410,7 +1448,7 @@ def get_gemini_general_response(user_psid, current_user_message_text, history_fo
             full_prompt.pop(2)
     response_text = _call_gemini(user_psid, full_prompt, GENERATION_CONFIG_DEFAULT, "General Conversation")
     if response_text:
-        # Nie usuwamy już tutaj RETURN_TO_PREVIOUS ani INTENT_SCHEDULE_MARKER
+        # Nie usuwamy RETURN_TO_PREVIOUS ani INTENT_SCHEDULE_MARKER
         if SLOT_ISO_MARKER_PREFIX in response_text:
             response_text = re.sub(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}.*?{re.escape(SLOT_ISO_MARKER_SUFFIX)}", "", response_text).strip()
         if INFO_GATHERED_MARKER in response_text:
@@ -1420,7 +1458,6 @@ def get_gemini_general_response(user_psid, current_user_message_text, history_fo
         return response_text
     else:
         logging.error(f"!!! [{user_psid}] Nie uzyskano odpowiedzi Gemini (General).")
-        # Zwróć wiadomość o błędzie, jeśli AI nie odpowiedziało
         return "Przepraszam, wystąpił błąd przetwarzania Twojej wiadomości."
 
 
@@ -1576,7 +1613,7 @@ def webhook_handle():
                                             # Nie wysyłamy "Wracając do...", AI samo wznowi
                                             msg_result = None
                                             model_resp_content = None
-                                            trigger_gathering_ai_immediately = False # Nie triggerujemy od razu
+                                            trigger_gathering_ai_immediately = False
                                         elif next_state == STATE_GATHERING_INFO:
                                             action = 'handle_gathering'
                                             trigger_gathering_ai_immediately = True
@@ -1587,7 +1624,7 @@ def webhook_handle():
                                             logging.warning(f"      Nieoczekiwany stan powrotu: {next_state}. Przechodzę do STATE_GENERAL.")
                                             next_state = STATE_GENERAL; context_data_to_save = {}; action = None
 
-                                        if action: continue # Kontynuuj pętlę
+                                        if action: continue
 
                                     elif INTENT_SCHEDULE_MARKER in response:
                                         logging.info(f"      AI Ogólne wykryło intencję [{INTENT_SCHEDULE_MARKER}]. Przejście do planowania.")
@@ -1816,8 +1853,13 @@ def webhook_handle():
 
                     # --- WYSYŁANIE ODPOWIEDZI I ZAPIS STANU ---
                     final_context_to_save_dict = {'type': next_state, **context_data_to_save}
-                    # Usunięto logikę zapisu flag powrotu
+                    # Zachowaj flagi powrotu, jeśli nadal jesteśmy w stanie generalnym tymczasowym
+                    if next_state == STATE_GENERAL and 'return_to_state' in context:
+                        final_context_to_save_dict['return_to_state'] = context['return_to_state']
+                        final_context_to_save_dict['return_to_context'] = context.get('return_to_context', {})
+                    # Usuń rolę przed porównaniem i zapisem
                     final_context_to_save_dict.pop('role', None)
+                    # Usuń klucze powrotu z porównywanego starego kontekstu, jeśli istniały
                     context_for_comparison = context.copy()
                     context_for_comparison.pop('return_to_state', None)
                     context_for_comparison.pop('return_to_context', None)
@@ -1878,7 +1920,7 @@ if __name__ == '__main__':
     logging.getLogger('urllib3.connectionpool').setLevel(logging.WARNING)
     logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
-    print("\n" + "="*60 + "\n--- START KONFIGURACJI BOTA (Rozdzielone Osobowości + Pełne Przełączanie Kontekstu + Sprawdzanie Arkusza w get_free_time_ranges + Dwufazowy Zapis) ---") # Zaktualizowano tytuł
+    print("\n" + "="*60 + "\n--- START KONFIGURACJI BOTA (Rozdzielone Osobowości + Pełne Przełączanie Kontekstu + Sprawdzanie Arkusza w get_free_time_ranges + Dwufazowy Zapis + Poprawki Stylu AI) ---")
     print(f"  * Poziom logowania: {logging.getLevelName(log_level)}")
     print("-" * 60)
     print("  Konfiguracja Facebook:")
