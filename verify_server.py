@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# verify_server.py (Wersja: Autonomiczne AI + Odczyt Kalendarza + Weryfikacja + Info Ucznia + Zapis Sheets + Parent API + Osobne Klucze API - PEP8 Style)
+# verify_server.py (Wersja: Autonomiczne AI + Odczyt Kalendarza + Weryfikacja + Info Ucznia + Zapis Sheets + Parent API + Osobne Klucze API + Kolejność Kolumn + Typ Szkoły - PEP8 Style)
 
 from flask import Flask, request, Response
 import os
@@ -350,6 +350,39 @@ def format_slot_for_user(slot_start):
     except Exception as e:
         logging.error(f"Błąd formatowania slotu {slot_start}: {e}", exc_info=True)
         return slot_start.isoformat()
+
+def extract_school_type(grade_string):
+    """Próbuje wyodrębnić typ szkoły z ciągu opisującego klasę."""
+    if not grade_string or not isinstance(grade_string, str):
+        return "Nieokreślona" # Zwróć domyślną wartość, jeśli brak danych
+
+    grade_lower = grade_string.lower()
+
+    if 'liceum' in grade_lower or ' lo ' in grade_lower or re.search(r'\blo\b', grade_lower):
+        return "Liceum"
+    elif 'technikum' in grade_lower or ' tech ' in grade_lower or re.search(r'\btech\b', grade_lower):
+        return "Technikum"
+    elif 'podstaw' in grade_lower or ' sp ' in grade_lower or re.search(r'\bsp\b', grade_lower):
+        # Sprawdźmy jeszcze numer klasy, aby odróżnić starsze klasy podstawówki
+        match = re.search(r'\d+', grade_lower)
+        if match:
+            try:
+                class_num = int(match.group(0))
+                if class_num >= 1 and class_num <= 8:
+                    return "Szkoła Podstawowa"
+                # Można dodać logikę dla innych przypadków, jeśli potrzebne
+            except ValueError:
+                pass # Ignoruj, jeśli nie można sparsować numeru
+        return "Szkoła Podstawowa" # Domyślnie, jeśli zawiera 'podstaw'
+    elif 'zawodowa' in grade_lower or 'branżowa' in grade_lower or 'zasadnicza' in grade_lower:
+        return "Szkoła Branżowa/Zawodowa"
+    # Można dodać więcej warunków dla innych typów szkół (np. policealna)
+
+    # Jeśli żaden typ nie pasuje, ale jest numer klasy
+    if re.search(r'\d+', grade_lower):
+         return "Inna (z numerem klasy)" # Lub bardziej ogólnie
+
+    return "Nieokreślona" # Domyślna wartość, jeśli nic nie pasuje
 
 # =====================================================================
 # === FUNKCJE GOOGLE CALENDAR (ODCZYT/WERYFIKACJA) ====================
@@ -1361,6 +1394,7 @@ def webhook_handle():
                                         if not final_gathering_msg:
                                             final_gathering_msg = "Dziękuję za informacje. Dane zapisane."
                                         try:
+                                            # --- Przygotowanie danych do zapisu w NOWEJ KOLEJNOŚCI ---
                                             proposed_iso = context_data_to_save.get('proposed_slot_iso')
                                             dt_object = None
                                             lesson_date_str = "Brak danych"
@@ -1377,15 +1411,29 @@ def webhook_handle():
                                                     lesson_time_str = dt_object.strftime('%H:%M')
                                                 except Exception as dt_err:
                                                     logging.error(f"Błąd formatowania daty {proposed_iso} do arkusza: {dt_err}")
+
+                                            parent_first_name = context_data_to_save.get('known_parent_first_name', 'Brak (API?)')
+                                            parent_last_name = context_data_to_save.get('known_parent_last_name', 'Brak (API?)')
+                                            student_first_name = context_data_to_save.get('known_student_first_name', 'Brak')
+                                            student_last_name = context_data_to_save.get('known_student_last_name', 'Brak')
+                                            grade_info = context_data_to_save.get('known_grade', 'Brak')
+                                            level_info = context_data_to_save.get('known_level', 'Brak')
+                                            school_type = extract_school_type(grade_info)
+
                                             data_to_write = [
-                                                lesson_date_str, lesson_time_str,
-                                                context_data_to_save.get('known_student_first_name', 'Brak'),
-                                                context_data_to_save.get('known_student_last_name', 'Brak'),
-                                                context_data_to_save.get('known_parent_first_name', 'Brak (API?)'),
-                                                context_data_to_save.get('known_parent_last_name', 'Brak (API?)'),
-                                                context_data_to_save.get('known_grade', 'Brak'),
-                                                context_data_to_save.get('known_level', 'Brak')
+                                                sender_id,           # 1. ID konta
+                                                parent_first_name,   # 2. Imie rodzica
+                                                parent_last_name,    # 3. Nazwisko rodzica
+                                                student_first_name,  # 4. Imie ucznia
+                                                student_last_name,   # 5. Nazwisko ucznia
+                                                lesson_date_str,     # 6. Data
+                                                lesson_time_str,     # 7. Godzina
+                                                grade_info,          # 8. Klasa (pełna informacja)
+                                                school_type,         # 9. Jaka szkoła (wyodrębniona)
+                                                level_info           # 10. Podstawa lub rozszerzenie
                                             ]
+                                            # --------------------------------------------------------
+
                                             write_ok, write_error_msg = write_to_sheet(SPREADSHEET_ID, SHEET_NAME, data_to_write)
                                             if write_ok:
                                                 logging.info("      Zapis do Google Sheet zakończony sukcesem.")
@@ -1398,7 +1446,7 @@ def webhook_handle():
                                                 error_msg_user = f"Przepraszam, wystąpił problem podczas zapisywania danych ({write_error_msg}). Czy możemy spróbować ponownie uzupełnić informacje?"
                                                 msg_result = error_msg_user
                                                 model_resp_content = Content(role="model", parts=[Part.from_text(error_msg_user)])
-                                                next_state = STATE_GATHERING_INFO # Pozostań by spróbować ponownie
+                                                next_state = STATE_GATHERING_INFO
                                         except Exception as sheet_write_err:
                                             logging.error(f"!!! KRYTYCZNY BŁĄD podczas przygotowania/zapisu do arkusza: {sheet_write_err}", exc_info=True)
                                             msg_result = "Wystąpił krytyczny błąd podczas zapisywania danych. Proszę skontaktować się z nami bezpośrednio."
@@ -1489,7 +1537,7 @@ if __name__ == '__main__':
     logging.getLogger('urllib3.connectionpool').setLevel(logging.WARNING)
     logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
-    print("\n" + "="*60 + "\n--- START KONFIGURACJI BOTA (Odczyt Kalendarza + Weryfikacja + Info Ucznia + Zapis Sheets + Parent API + Osobne Klucze) ---")
+    print("\n" + "="*60 + "\n--- START KONFIGURACJI BOTA (Odczyt Kalendarza + Weryfikacja + Info Ucznia + Zapis Sheets + Parent API + Osobne Klucze + Kolejność Kolumn) ---")
     print(f"  * Poziom logowania: {logging.getLevelName(log_level)}")
     print("-" * 60)
     print("  Konfiguracja Facebook:")
