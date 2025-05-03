@@ -1249,6 +1249,7 @@ SYSTEM_INSTRUCTION_GATHERING = """Rozmawiasz z klientem. Twoim zadaniem jest zeb
     *   Nazwisko ucznia: {known_student_last_name}
     *   Klasa/Szkoła: {known_grade} # Pełna informacja, np. "3 klasa liceum"
     *   Poziom (dla liceum/technikum): {known_level} # Np. "Podstawowy", "Rozszerzony" lub "Brak"
+*  Zbieraj dane ucznia i ogranicz się do tego, ewent. możesz wytłumaczyc do czego są potrzebne. Gdy zbierzesz informację wymagane postępuj zgodnie z instrukcją
 
 **Styl Komunikacji:**
 *   **Naturalność:** Zachowuj się jak człowiek, unikaj schematycznych i powtarzalnych odpowiedzi.
