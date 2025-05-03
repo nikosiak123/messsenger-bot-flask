@@ -1371,6 +1371,7 @@ def get_gemini_gathering_response(user_psid, history_for_gathering_ai, current_u
         return "Przepraszam, wystąpił błąd systemowy."
 
 # --- Funkcja AI: Ogólna rozmowa ---
+# --- Funkcja AI: Ogólna rozmowa ---
 def get_gemini_general_response(user_psid, current_user_message_text, history_for_general_ai):
     """Prowadzi ogólną rozmowę z AI."""
     if not gemini_model:
@@ -1398,8 +1399,12 @@ def get_gemini_general_response(user_psid, current_user_message_text, history_fo
             response_text = re.sub(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}.*?{re.escape(SLOT_ISO_MARKER_SUFFIX)}", "", response_text).strip()
         if INFO_GATHERED_MARKER in response_text:
             response_text = response_text.replace(INFO_GATHERED_MARKER, "").strip()
-        if SWITCH_TO_GENERAL in response_text:
-            response_text = response_text.replace(SWITCH_TO_GENERAL, "").strip()
+        # --- USUNIĘTO SPRAWDZANIE SWITCH_TO_GENERAL ---
+        # if SWITCH_TO_GENERAL in response_text:
+        #     response_text = response_text.replace(SWITCH_TO_GENERAL, "").strip()
+        # ---------------------------------------------
+        # Sprawdzamy tylko INTENT_SCHEDULE_MARKER (który jest nadal potrzebny w tym stanie)
+        # Znacznik INTENT_SCHEDULE jest obsługiwany w webhook_handle, więc go tu nie usuwamy.
         return response_text
     else:
         logging.error(f"!!! [{user_psid}] Nie uzyskano odpowiedzi Gemini (General).")
