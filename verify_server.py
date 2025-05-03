@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# verify_server.py (Wersja: Rozdzielone Osobowości + Sprawdzanie Arkusza w get_free_time_ranges + Dwufazowy Zapis + Poprawki + Poprawka Powrotu Scheduling + Poprawka Pustej Odp.)
+# verify_server.py (Wersja: Rozdzielone Osobowości + Pełne Przełączanie Kontekstu + Sprawdzanie Arkusza w get_free_time_ranges + Dwufazowy Zapis + Poprawki)
 
 from flask import Flask, request, Response
 import os
@@ -88,8 +88,8 @@ INTENT_SCHEDULE_MARKER = "[INTENT_SCHEDULE]"
 SLOT_ISO_MARKER_PREFIX = "[SLOT_ISO:"
 SLOT_ISO_MARKER_SUFFIX = "]"
 INFO_GATHERED_MARKER = "[INFO_GATHERED]"
-SWITCH_TO_GENERAL = "[SWITCH_TO_GENERAL]" # Potrzebny do instrukcji AI
-RETURN_TO_PREVIOUS = "[RETURN_TO_PREVIOUS]" # Potrzebny do instrukcji AI
+SWITCH_TO_GENERAL = "[SWITCH_TO_GENERAL]"
+RETURN_TO_PREVIOUS = "[RETURN_TO_PREVIOUS]"
 
 STATE_GENERAL = "general"
 STATE_SCHEDULING_ACTIVE = "scheduling_active"
@@ -310,17 +310,14 @@ def save_history(user_psid, history, context_to_save=None):
              else:
                 logging.warning(f"Ostrz. [{user_psid}]: Pomijanie nieprawidłowego obiektu historii podczas zapisu: {type(msg)}")
         current_state_to_save = context_to_save.get('type', STATE_GENERAL) if context_to_save else STATE_GENERAL
-        # Zapisujemy kontekst tylko jeśli stan jest inny niż general (logika powrotu usunięta)
-        if context_to_save and isinstance(context_to_save, dict) and current_state_to_save != STATE_GENERAL:
+        # Zapisujemy kontekst tylko jeśli stan jest inny niż general lub zawiera informacje o powrocie
+        if context_to_save and isinstance(context_to_save, dict) and (current_state_to_save != STATE_GENERAL or 'return_to_state' in context_to_save):
              context_copy = context_to_save.copy()
-             # Usuń klucze powrotu przed zapisem, jeśli przypadkiem zostały
-             context_copy.pop('return_to_state', None)
-             context_copy.pop('return_to_context', None)
              context_copy['role'] = 'system' # Dodaj rolę systemową do zapisu
              history_data.append(context_copy)
              logging.debug(f"[{user_psid}] Dodano kontekst {current_state_to_save} do zapisu: {context_copy}")
         else:
-             logging.debug(f"[{user_psid}] Zapis bez kontekstu (stan general).")
+             logging.debug(f"[{user_psid}] Zapis bez kontekstu (stan general bez powrotu).")
         with open(temp_filepath, 'w', encoding='utf-8') as f:
             json.dump(history_data, f, ensure_ascii=False, indent=2)
         os.replace(temp_filepath, filepath)
@@ -1176,38 +1173,49 @@ def _call_gemini(user_psid, prompt_history, generation_config, task_name, max_re
 # === INSTRUKCJE SYSTEMOWE I GŁÓWNE FUNKCJE AI ========================
 # =====================================================================
 
-# --- SYSTEM_INSTRUCTION_SCHEDULING (Uproszczony start, bez przełączania) ---
-SYSTEM_INSTRUCTION_SCHEDULING = """Jesteś asystentem AI do umawiania terminów korepetycji. Twoim jedynym zadaniem jest zaproponowanie użytkownikowi terminu z podanej listy i doprowadzenie do akceptacji jednego z nich.
+# --- SYSTEM_INSTRUCTION_SCHEDULING (Wersja z pytaniem o preferencje i obsługą pytań ogólnych) ---
+SYSTEM_INSTRUCTION_SCHEDULING = """Jesteś pomocnym asystentem AI specjalizującym się w umawianiu terminów korepetycji online. Twoim zadaniem jest znalezienie pasującego terminu dla użytkownika na podstawie jego preferencji oraz dostarczonej listy dostępnych zakresów czasowych z kalendarza.
 
 **Kontekst:**
-*   Rozmawiasz z użytkownikiem chcącym umówić lekcję.
-*   Poniżej lista AKTUALNIE DOSTĘPNYCH ZAKRESÓW CZASOWYCH (wizyta trwa {duration} minut). Filtry ({min_lead_hours}h) zostały już zastosowane.
-*   Masz dostęp do historii rozmowy.
+*   Rozmawiasz z użytkownikiem, który wyraził chęć umówienia się na lekcję.
+*   Poniżej znajduje się lista AKTUALNIE dostępnych ZAKRESÓW czasowych z kalendarza, w których można umówić wizytę (każda trwa {duration} minut). **Wszystkie podane zakresy są już odpowiednio odsunięte w czasie (filtr {min_lead_hours}h) i gotowe do zaproponowania.**
+*   Masz dostęp do historii poprzedniej rozmowy. Czasami rozmowa mogła zostać przerwana pytaniem ogólnym i teraz do niej wracamy.
+
+**Styl pisania:**
+*   Używaj zwrotów typu "Państwo".
+*   Unikaj zbyt entuzjastycznych wiadomości i wykrzykników.
+*   Zwracaj uwagę na ortografię i interpunkcję.
+*   Proponuj terminy w formie pytania, np. "Czy odpowiadałby Państwu termin w najbliższy wtorek o 17:00?".
 
 **Dostępne zakresy czasowe z kalendarza:**
 {available_ranges_text}
 
 **Twoje zadanie:**
-1.  **Zaproponuj Terminy:** Zaproponuj użytkownikowi **2-3 konkretne, pierwsze dostępne terminy** z listy "Dostępne zakresy czasowe". Przedstaw je jasno, np. "Proponuję następujące terminy: [termin 1], [termin 2]. Czy któryś z nich Państwu odpowiada?".
-2.  **Reaguj na Odpowiedź:**
-    *   Jeśli użytkownik wybierze jeden z zaproponowanych terminów, potwierdź go i **zakończ odpowiedź DOKŁADNIE znacznikiem** `{slot_marker_prefix}YYYY-MM-DDTHH:MM:SS{slot_marker_suffix}` (używając ISO zaakceptowanego terminu).
-    *   Jeśli użytkownik odrzuci terminy lub poprosi o inne, zaproponuj **kolejne 1-2 konkretne terminy** z listy, których jeszcze nie proponowałeś.
-    *   Jeśli użytkownik poda własną propozycję, sprawdź, czy mieści się ona w którymś z **dostępnych zakresów na liście**. Jeśli tak, potwierdź i dodaj znacznik ISO. Jeśli nie, poinformuj, że ten termin jest niedostępny i zaproponuj najbliższy pasujący z listy.
-    *   Jeśli skończą się dostępne terminy na liście do zaproponowania, poinformuj o tym użytkownika.
-3.  **NIE dodawaj znacznika ISO**, jeśli termin nie został jednoznacznie zaakceptowany lub nie pochodzi z listy.
-4.  **IGNORUJ wszelkie pytania niezwiązane z wyborem terminu.** Skup się wyłącznie na umówieniu wizyty na podstawie podanej listy.
+1.  **Rozpocznij rozmowę LUB WZNÓW:** Jeśli to początek umawiania lub jeśli ostatnia wiadomość użytkownika nie dotyczyła preferencji terminu (np. było to podziękowanie po odpowiedzi na pytanie ogólne), potwierdź, że widzisz dostępne terminy i zapytaj użytkownika o jego **ogólne preferencje** dotyczące dnia tygodnia lub pory dnia (np. "Mamy kilka wolnych terminów. Czy preferują Państwo jakiś konkretny dzień tygodnia lub porę dnia - rano, popołudnie, wieczór?"). **Nie proponuj jeszcze konkretnej daty i godziny.**
+2.  **Negocjuj:** Na podstawie odpowiedzi użytkownika **dotyczącej preferencji terminu**, historii konwersacji i **wyłącznie dostępnych zakresów z listy**, kontynuuj rozmowę, aby znaleźć termin pasujący obu stronom. Gdy użytkownik poda preferencje, **zaproponuj konkretny termin z listy**, który im odpowiada (np. "W takim razie, może środa o 17:00?"). Jeśli ostatnia wiadomość użytkownika nie była odpowiedzią na pytanie o termin, wróć do kroku 1.
+3.  **Potwierdź i dodaj znacznik:** Kiedy wspólnie ustalicie **dokładny termin** (np. "Środa, 15 maja o 18:30"), który **znajduje się na liście dostępnych zakresów**, potwierdź go w swojej odpowiedzi (np. "Świetnie, w takim razie proponowany termin to środa, 15 maja o 18:30.") i **zakończ swoją odpowiedź potwierdzającą DOKŁADNIE znacznikiem** `{slot_marker_prefix}YYYY-MM-DDTHH:MM:SS{slot_marker_suffix}`. Użyj formatu ISO 8601 dla ustalonego czasu rozpoczęcia (np. 2024-05-15T18:30:00). Upewnij się, że data i godzina w znaczniku są poprawne, zgodne z ustaleniami i **pochodzą z listy dostępnych zakresów**.
+4.  **NIE dodawaj znacznika**, jeśli:
+    *   Użytkownik jeszcze się zastanawia lub prosi o więcej opcji.
+    *   Użytkownik proponuje termin, którego nie ma na liście dostępnych zakresów.
+    *   Nie udało się znaleźć pasującego terminu.
+    *   Lista dostępnych zakresów jest pusta.
+5.  **Brak terminów:** Jeśli lista zakresów jest pusta lub po rozmowie okaże się, że żaden termin nie pasuje, poinformuj o tym użytkownika uprzejmie. Nie dodawaj znacznika.
+6.  **Pytania poza tematem:** Jeśli użytkownik zada pytanie niezwiązane bezpośrednio z ustalaniem terminu (np. o cenę, metodykę, dostępne przedmioty), **NIE ODPOWIADAJ na nie**. Zamiast tego, Twoja odpowiedź musi zawierać **TYLKO I WYŁĄCZNIE** znacznik: `{switch_marker}`. System przełączy się wtedy do trybu ogólnych odpowiedzi.
 
 **Pamiętaj:**
-*   Proponuj tylko terminy wynikające z listy "Dostępne zakresy czasowe".
-*   Bądź bezpośredni i skupiony na celu.
-*   Znacznik `{slot_marker_prefix}...{slot_marker_suffix}` oznacza finalną akceptację terminu z listy.
+*   Trzymaj się **wyłącznie** terminów i godzin wynikających z "Dostępnych zakresów czasowych".
+*   Bądź elastyczny w rozmowie, ale propozycje muszą pochodzić z listy.
+*   Używaj języka polskiego i polskiej strefy czasowej ({calendar_timezone}).
+*   Znacznik `{slot_marker_prefix}...{slot_marker_suffix}` jest sygnałem dla systemu, że **osiągnięto porozumienie co do terminu z dostępnej listy**. Używaj go tylko w tym jednym, konkretnym przypadku.
+*   Znacznik `{switch_marker}` służy do przekazania obsługi pytania ogólnego.
 """.format(
     duration=APPOINTMENT_DURATION_MINUTES, min_lead_hours=MIN_BOOKING_LEAD_HOURS,
     available_ranges_text="{available_ranges_text}", calendar_timezone=CALENDAR_TIMEZONE,
-    slot_marker_prefix=SLOT_ISO_MARKER_PREFIX, slot_marker_suffix=SLOT_ISO_MARKER_SUFFIX
+    slot_marker_prefix=SLOT_ISO_MARKER_PREFIX, slot_marker_suffix=SLOT_ISO_MARKER_SUFFIX,
+    switch_marker=SWITCH_TO_GENERAL
 )
 
-# --- ZMODYFIKOWANA INSTRUKCJA GATHERING (AI potwierdza dane w strukturze, bez przełączania) ---
+# --- ZMODYFIKOWANA INSTRUKCJA GATHERING (AI potwierdza dane w strukturze i obsługa pytań ogólnych) ---
 SYSTEM_INSTRUCTION_GATHERING = """Twoim zadaniem jest zebranie informacji wyłącznie o UCZNIU, potrzebnych do zapisu na korepetycje, po tym jak wstępnie ustalono termin. Dane rodzica zostaną pobrane automatycznie przez system.
 
 **Kontekst:**
@@ -1232,7 +1240,7 @@ SYSTEM_INSTRUCTION_GATHERING = """Twoim zadaniem jest zebranie informacji wyłą
     b)  **PO TEJ LINIJCE**, w nowej linii, standardowa wiadomość dla użytkownika: "Dziękuję za wszystkie informacje. Dane zostały zapisane. Wkrótce skontaktujemy się w celu potwierdzenia szczegółów. Proszę również oczekiwać na wiadomość dotyczącą płatności i dostępu do materiałów na profilu dedykowanym do komunikacji: https://www.facebook.com/profile.php?id=61576135251276"
     c)  **NA SAMYM KOŃCU** całej odpowiedzi dodaj **DOKŁADNIE** znacznik: `{info_gathered_marker}`.
 6.  **NIE dodawaj znacznika ani struktury `ZEBRANE_DANE_UCZNIA:`**, jeśli nadal brakuje którejś z wymaganych informacji o uczniu. Kontynuuj zadawanie pytań.
-7.  **IGNORUJ pytania poza tematem:** Jeśli użytkownik zada pytanie niezwiązane bezpośrednio ze zbieraniem danych ucznia (np. o cenę, metodykę), **NIE ODPOWIADAJ na nie** i kontynuuj zadawanie pytań o dane ucznia.
+7.  **Pytania poza tematem:** Jeśli użytkownik zada pytanie niezwiązane bezpośrednio ze zbieraniem danych ucznia (np. o cenę, metodykę), **NIE ODPOWIADAJ na nie**. Zamiast tego, Twoja odpowiedź musi zawierać **TYLKO I WYŁĄCZNIE** znacznik: `{switch_marker}`. System przełączy się wtedy do trybu ogólnych odpowiedzi.
 
 **Przykład poprawnej odpowiedzi końcowej:**
 ```
@@ -1240,24 +1248,25 @@ ZEBRANE_DANE_UCZNIA: [Imię: Jan, Nazwisko: Kowalski, KlasaInfo: 2 klasa liceum,
 Dziękuję za wszystkie informacje. Dane zostały zapisane. Wkrótce skontaktujemy się w celu potwierdzenia szczegółów. Proszę również oczekiwać na wiadomość dotyczącą płatności i dostępu do materiałów na profilu dedykowanym do komunikacji: https://www.facebook.com/profile.php?id=61576135251276[INFO_GATHERED]
 ```
 
-**Pamiętaj:** Kluczowe jest dokładne przestrzeganie formatu `ZEBRANE_DANE_UCZNIA: [...]` w przedostatniej linijce odpowiedzi końcowej.
+**Pamiętaj:** Kluczowe jest dokładne przestrzeganie formatu `ZEBRANE_DANE_UCZNIA: [...]` w przedostatniej linijce odpowiedzi końcowej. Znacznik `{switch_marker}` służy do przekazania obsługi pytania ogólnego.
 """.format(
     proposed_slot_formatted="{proposed_slot_formatted}",
     known_student_first_name="{known_student_first_name}",
     known_student_last_name="{known_student_last_name}",
     known_grade="{known_grade}",
     known_level="{known_level}",
-    info_gathered_marker=INFO_GATHERED_MARKER
-    # Usunięto switch_marker
+    info_gathered_marker=INFO_GATHERED_MARKER,
+    switch_marker=SWITCH_TO_GENERAL
 )
 
-# --- SYSTEM_INSTRUCTION_GENERAL (bez obsługi powrotu) ---
+# --- ZMODYFIKOWANA INSTRUKCJA GENERAL (z obsługą powrotu) ---
 SYSTEM_INSTRUCTION_GENERAL = """Jesteś przyjaznym i pomocnym asystentem klienta w 'Zakręcone Korepetycje'. Prowadzisz rozmowę na czacie dotyczącą korepetycji online.
 **Twoje główne zadania:**
 1.  Odpowiadaj rzeczowo i uprzejmie na pytania użytkownika dotyczące oferty, metodyki, dostępności korepetycji.
 2.  Utrzymuj konwersacyjny, pomocny ton. Odpowiadaj po polsku.
 3.  **Kluczowy cel:** Jeśli w wypowiedzi użytkownika **wyraźnie pojawi się intencja umówienia się na lekcję** (próbną lub zwykłą), rezerwacji terminu, zapytanie o wolne terminy lub chęć rozpoczęcia współpracy, **dodaj na samym końcu swojej odpowiedzi specjalny znacznik:** `{intent_marker}`.
-4. Koszt zajęć to 60zł dla podstawówki i 75 dla szkoły średniej. Podawaj tę informację tylko na wyraźne pytanie.
+4.  **Obsługa powrotu:** Jeśli zostałeś aktywowany, aby odpowiedzieć na pytanie ogólne podczas innego procesu (np. umawiania terminu), a odpowiedź użytkownika na Twoją odpowiedź wydaje się satysfakcjonująca (np. zawiera "ok", "dziękuję", "rozumiem") i **nie zawiera kolejnego pytania ogólnego**, dodaj na **samym końcu** swojej odpowiedzi (po ewentualnym podziękowaniu) **DOKŁADNIE** znacznik: `{return_marker}`. Jeśli użytkownik zada kolejne pytanie ogólne, odpowiedz na nie normalnie, bez tego znacznika.
+5. Koszt zajęć to 60zł dla podstawówki i 75 dla szkoły średniej
 **Przykłady wypowiedzi użytkownika, które powinny skutkować dodaniem znacznika `{intent_marker}`:**
 *   "Chciałbym się umówić na lekcję próbną."
 *   "Kiedy moglibyśmy zacząć?"
@@ -1267,14 +1276,18 @@ SYSTEM_INSTRUCTION_GENERAL = """Jesteś przyjaznym i pomocnym asystentem klienta
 *   "Interesuje mnie ta oferta, jak się umówić?"
 *   Pytanie typu: "Ile trwa lekcja i kiedy można ją umówić?" -> Odpowiedz na pierwszą część pytania i dodaj znacznik.
 **Przykłady wypowiedzi, po których NIE dodawać znacznika `{intent_marker}`:**
-*   "Ile kosztują korepetycje?" (Odpowiedz zgodnie z punktem 4, bez znacznika).
+*   "Ile kosztują korepetycje?" (Odpowiedz zgodnie z punktem 5, bez znacznika).
 *   "Jakie przedmioty oferujecie?" (Odpowiedz na pytanie, bez znacznika).
 *   "Dziękuję za informacje." (Podziękuj, bez znacznika).
+**Przykład odpowiedzi ze znacznikiem powrotu `{return_marker}`:**
+    *   User: "Dziękuję za wyjaśnienie ceny." -> Model: "Cieszę się, że mogłem pomóc.{return_marker}"
+    *   User: "Ok, rozumiem." -> Model: "Świetnie.{return_marker}"
+    *   User: "Super." -> Model: "W porządku.{return_marker}"
 
-**Zasady:** Zawsze odpowiadaj na bieżące pytanie lub stwierdzenie użytkownika. Znacznik `{intent_marker}` dodawaj **tylko wtedy**, gdy intencja umówienia się jest jasna i bezpośrednia, i **zawsze na samym końcu** odpowiedzi. Nie inicjuj samodzielnie procesu umawiania.
+**Zasady:** Zawsze odpowiadaj na bieżące pytanie lub stwierdzenie użytkownika. Znacznik `{intent_marker}` dodawaj **tylko wtedy**, gdy intencja umówienia się jest jasna i bezpośrednia, i **zawsze na samym końcu** odpowiedzi. Nie inicjuj samodzielnie procesu umawiania. Znacznik `{return_marker}` dodawaj tylko w sytuacji opisanej w punkcie 4.
 """.format(
-    intent_marker=INTENT_SCHEDULE_MARKER
-    # Usunięto return_marker
+    intent_marker=INTENT_SCHEDULE_MARKER,
+    return_marker=RETURN_TO_PREVIOUS
 )
 
 
@@ -1286,7 +1299,7 @@ def get_gemini_scheduling_response(user_psid, history_for_scheduling_ai, current
         return "Przepraszam, mam problem z systemem planowania."
     ranges_text = format_ranges_for_ai(available_ranges)
     try:
-        # Używamy uproszczonej instrukcji
+        # Używamy przywróconej instrukcji
         system_instruction = SYSTEM_INSTRUCTION_SCHEDULING.format(available_ranges_text=ranges_text)
     except KeyError as e:
         logging.error(f"!!! BŁĄD formatowania instrukcji AI (Scheduling): Brak klucza {e}")
@@ -1296,8 +1309,8 @@ def get_gemini_scheduling_response(user_psid, history_for_scheduling_ai, current
         return "Błąd wewnętrzny konfiguracji asystenta planowania."
     initial_prompt = [
         Content(role="user", parts=[Part.from_text(system_instruction)]),
-        # Uproszczona odpowiedź modelu
-        Content(role="model", parts=[Part.from_text(f"Rozumiem. Zaproponuję 2-3 pierwsze dostępne terminy z listy i będę negocjować. Znacznik {SLOT_ISO_MARKER_PREFIX}...{SLOT_ISO_MARKER_SUFFIX} dodam po akceptacji terminu z listy.")])
+        # Przywrócona odpowiedź modelu
+        Content(role="model", parts=[Part.from_text(f"Rozumiem. Zapytam o preferencje, a następnie zaproponuję konkretny termin z listy i będę negocjować. Znacznik {SLOT_ISO_MARKER_PREFIX}...{SLOT_ISO_MARKER_SUFFIX} dodam tylko po uzyskaniu ostatecznej zgody na termin z listy. Jeśli użytkownik zada pytanie ogólne, odpowiem tylko znacznikiem {SWITCH_TO_GENERAL}.")])
     ]
     full_prompt = initial_prompt + history_for_scheduling_ai
     if current_user_message_text:
@@ -1310,12 +1323,11 @@ def get_gemini_scheduling_response(user_psid, history_for_scheduling_ai, current
     # Wywołanie _call_gemini pozostaje bez zmian tutaj
     response_text = _call_gemini(user_psid, full_prompt, GENERATION_CONFIG_SCHEDULING, "Scheduling Conversation")
     if response_text:
-        # Usuwamy tylko pozostałe niepotrzebne znaczniki
+        # Nie usuwamy już tutaj SWITCH_TO_GENERAL, bo jest potrzebny w logice webhooka
         if INTENT_SCHEDULE_MARKER in response_text:
             response_text = response_text.replace(INTENT_SCHEDULE_MARKER, "").strip()
         if INFO_GATHERED_MARKER in response_text:
             response_text = response_text.replace(INFO_GATHERED_MARKER, "").strip()
-        # Usunięto sprawdzanie SWITCH_TO_GENERAL
         return response_text
     else:
         logging.error(f"!!! [{user_psid}] Nie uzyskano odpowiedzi Gemini (Scheduling).")
@@ -1346,7 +1358,7 @@ def get_gemini_gathering_response(user_psid, history_for_gathering_ai, current_u
         return "Błąd konfiguracji asystenta zbierania informacji."
     initial_prompt = [
         Content(role="user", parts=[Part.from_text(system_instruction)]),
-        Content(role="model", parts=[Part.from_text(f"Rozumiem. Sprawdzę znane informacje o uczniu i zapytam o brakujące dane: Imię/Nazwisko Ucznia, Klasa, Poziom (dla liceum/technikum). Zignoruję dane rodzica i pytania ogólne. Po zebraniu kompletu informacji o uczniu zwrócę strukturę ZEBRANE_DANE_UCZNIA i znacznik {INFO_GATHERED_MARKER}.")])
+        Content(role="model", parts=[Part.from_text(f"Rozumiem. Sprawdzę znane informacje o uczniu i zapytam o brakujące dane: Imię/Nazwisko Ucznia, Klasa, Poziom (dla liceum/technikum). Zignoruję dane rodzica. Po zebraniu kompletu informacji o uczniu zwrócę strukturę ZEBRANE_DANE_UCZNIA i znacznik {INFO_GATHERED_MARKER}. Jeśli użytkownik zada pytanie ogólne, odpowiem tylko znacznikiem {SWITCH_TO_GENERAL}.")])
     ]
     full_prompt = initial_prompt + history_for_gathering_ai
     if current_user_message_text:
@@ -1358,12 +1370,11 @@ def get_gemini_gathering_response(user_psid, history_for_gathering_ai, current_u
             full_prompt.pop(2)
     response_text = _call_gemini(user_psid, full_prompt, GENERATION_CONFIG_GATHERING, "Info Gathering (Student Only)")
     if response_text:
-        # Nie usuwamy już tutaj INFO_GATHERED_MARKER
+        # Nie usuwamy już tutaj SWITCH_TO_GENERAL ani INFO_GATHERED_MARKER
         if INTENT_SCHEDULE_MARKER in response_text:
             response_text = response_text.replace(INTENT_SCHEDULE_MARKER, "").strip()
         if SLOT_ISO_MARKER_PREFIX in response_text:
             response_text = re.sub(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}.*?{re.escape(SLOT_ISO_MARKER_SUFFIX)}", "", response_text).strip()
-        # Usunięto sprawdzanie SWITCH_TO_GENERAL
         return response_text
     else:
         logging.error(f"!!! [{user_psid}] Nie uzyskano odpowiedzi Gemini (Gathering Info - Student Only).")
@@ -1371,17 +1382,20 @@ def get_gemini_gathering_response(user_psid, history_for_gathering_ai, current_u
         return "Przepraszam, wystąpił błąd systemowy."
 
 # --- Funkcja AI: Ogólna rozmowa ---
-def get_gemini_general_response(user_psid, current_user_message_text, history_for_general_ai):
-    """Prowadzi ogólną rozmowę z AI."""
+def get_gemini_general_response(user_psid, current_user_message_text, history_for_general_ai, is_temporary_general_state=False):
+    """Prowadzi ogólną rozmowę z AI, z obsługą powrotu do poprzedniego stanu."""
     if not gemini_model:
         logging.error(f"!!! [{user_psid}] Model Gemini niezaładowany (General)!")
         return "Przepraszam, mam chwilowy problem z systemem."
 
-    # Używamy standardowej instrukcji General
-    system_instruction = SYSTEM_INSTRUCTION_GENERAL
+    # Dostosuj odpowiedź modelu w zależności od tego, czy jest to stan tymczasowy
+    model_ack = f"Rozumiem. Będę pomocnym asystentem klienta i dodam znacznik {INTENT_SCHEDULE_MARKER}, gdy użytkownik wyrazi chęć umówienia się."
+    if is_temporary_general_state:
+        model_ack = f"Rozumiem. Odpowiem na pytanie ogólne użytkownika. Jeśli odpowiedź użytkownika będzie satysfakcjonująca i nie będzie zawierać dalszych pytań ogólnych, dodam znacznik {RETURN_TO_PREVIOUS}."
+
     initial_prompt = [
-        Content(role="user", parts=[Part.from_text(system_instruction)]),
-        Content(role="model", parts=[Part.from_text(f"Rozumiem. Będę pomocnym asystentem klienta i dodam znacznik {INTENT_SCHEDULE_MARKER}, gdy użytkownik wyrazi chęć umówienia się.")])
+        Content(role="user", parts=[Part.from_text(SYSTEM_INSTRUCTION_GENERAL)]),
+        Content(role="model", parts=[Part.from_text(model_ack)])
     ]
     full_prompt = initial_prompt + history_for_general_ai
     if current_user_message_text:
@@ -1393,14 +1407,13 @@ def get_gemini_general_response(user_psid, current_user_message_text, history_fo
             full_prompt.pop(2)
     response_text = _call_gemini(user_psid, full_prompt, GENERATION_CONFIG_DEFAULT, "General Conversation")
     if response_text:
-        # Usunięto sprawdzanie RETURN_TO_PREVIOUS
+        # Nie usuwamy już tutaj RETURN_TO_PREVIOUS ani INTENT_SCHEDULE_MARKER
         if SLOT_ISO_MARKER_PREFIX in response_text:
             response_text = re.sub(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}.*?{re.escape(SLOT_ISO_MARKER_SUFFIX)}", "", response_text).strip()
         if INFO_GATHERED_MARKER in response_text:
             response_text = response_text.replace(INFO_GATHERED_MARKER, "").strip()
-        # Usunięto sprawdzanie SWITCH_TO_GENERAL
-        # Sprawdzamy tylko INTENT_SCHEDULE_MARKER (który jest nadal potrzebny w tym stanie)
-        # Znacznik INTENT_SCHEDULE jest obsługiwany w webhook_handle, więc go tu nie usuwamy.
+        if SWITCH_TO_GENERAL in response_text: # Usunięcie na wszelki wypadek
+            response_text = response_text.replace(SWITCH_TO_GENERAL, "").strip()
         return response_text
     else:
         logging.error(f"!!! [{user_psid}] Nie uzyskano odpowiedzi Gemini (General).")
@@ -1456,13 +1469,14 @@ def webhook_handle():
                     next_state = current_state
                     model_resp_content = None
                     user_content = None
-                    # Kopiujemy kontekst
+                    # Kopiujemy kontekst, usuwając potencjalne klucze powrotu na start cyklu
                     context_data_to_save = context.copy()
-                    # Usunięto usuwanie flag powrotu
+                    context_data_to_save.pop('return_to_state', None)
+                    context_data_to_save.pop('return_to_context', None)
 
                     trigger_gathering_ai_immediately = False
                     slot_verification_failed = False
-                    # Usunięto is_temporary_general_state
+                    is_temporary_general_state = 'return_to_state' in context # Sprawdź, czy byliśmy w stanie tymczasowym
 
                     # === Obsługa wiadomości tekstowych ===
                     if message_data := event.get("message"):
@@ -1480,7 +1494,7 @@ def webhook_handle():
                                 action = 'handle_scheduling'
                             elif current_state == STATE_GATHERING_INFO:
                                 action = 'handle_gathering'
-                            else: # STATE_GENERAL
+                            else: # STATE_GENERAL (może być normalny lub tymczasowy)
                                 action = 'handle_general'
                         elif attachments := message_data.get("attachments"):
                              att_type = attachments[0].get('type','nieznany')
@@ -1521,21 +1535,58 @@ def webhook_handle():
                         logging.warning(f"    Otrzymano nieobsługiwany typ zdarzenia: {json.dumps(event)}")
                         continue
 
-                    # --- Pętla przetwarzania akcji (teraz prostsza) ---
+                    # --- Pętla przetwarzania akcji ---
                     loop_guard = 0
-                    while action and loop_guard < 2: # Zwykle wystarczy 1 iteracja
+                    while action and loop_guard < 3: # Zwiększono limit na wszelki wypadek
                         loop_guard += 1
-                        logging.debug(f"  >> Pętla akcji {loop_guard}/2 | Akcja: {action} | Stan wejściowy: {current_state} | Kontekst wej.: {context_data_to_save}")
+                        logging.debug(f"  >> Pętla akcji {loop_guard}/3 | Akcja: {action} | Stan wejściowy: {current_state} | Kontekst wej.: {context_data_to_save}")
                         current_action = action
                         action = None # Reset
 
-                        # --- Obsługa Stanu Generalnego ---
+                        # --- Obsługa Stanu Generalnego (w tym powrotu) ---
                         if current_action == 'handle_general':
                             logging.debug("  >> Wykonanie: handle_general")
                             if user_content and user_content.parts:
-                                response = get_gemini_general_response(sender_id, user_content.parts[0].text, history_for_gemini)
+                                was_temporary_general = 'return_to_state' in context
+                                response = get_gemini_general_response(sender_id, user_content.parts[0].text, history_for_gemini, was_temporary_general)
+
                                 if response:
-                                    if INTENT_SCHEDULE_MARKER in response:
+                                    if RETURN_TO_PREVIOUS in response and was_temporary_general:
+                                        logging.info(f"      AI Ogólne zasygnalizowało powrót [{RETURN_TO_PREVIOUS}]. Przywracanie stanu.")
+                                        msg_result = response.split(RETURN_TO_PREVIOUS, 1)[0].strip()
+                                        if msg_result:
+                                            send_message(sender_id, msg_result)
+                                            model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                            history_for_gemini.append(user_content)
+                                            history_for_gemini.append(model_resp_content)
+                                        else:
+                                             history_for_gemini.append(user_content)
+
+                                        user_content = None; model_resp_content = None
+                                        next_state = context.get('return_to_state', STATE_GENERAL)
+                                        context_data_to_save = context.get('return_to_context', {})
+                                        logging.info(f"      Przywrócono stan: {next_state}")
+                                        logging.debug(f"      Przywrócony kontekst: {context_data_to_save}")
+
+                                        if next_state == STATE_SCHEDULING_ACTIVE:
+                                            action = 'handle_scheduling'
+                                            # Nie wysyłamy "Wracając do...", AI samo wznowi
+                                            msg_result = None
+                                            model_resp_content = None
+                                            trigger_gathering_ai_immediately = False # Nie triggerujemy od razu
+                                        elif next_state == STATE_GATHERING_INFO:
+                                            action = 'handle_gathering'
+                                            trigger_gathering_ai_immediately = True
+                                            logging.debug("      Ustawiono trigger_gathering_ai_immediately po powrocie.")
+                                            msg_result = None
+                                            model_resp_content = None
+                                        else:
+                                            logging.warning(f"      Nieoczekiwany stan powrotu: {next_state}. Przechodzę do STATE_GENERAL.")
+                                            next_state = STATE_GENERAL; context_data_to_save = {}; action = None
+
+                                        if action: continue # Kontynuuj pętlę
+
+                                    elif INTENT_SCHEDULE_MARKER in response:
                                         logging.info(f"      AI Ogólne wykryło intencję [{INTENT_SCHEDULE_MARKER}]. Przejście do planowania.")
                                         initial_resp_text = response.split(INTENT_SCHEDULE_MARKER, 1)[0].strip()
                                         if initial_resp_text:
@@ -1545,40 +1596,29 @@ def webhook_handle():
                                             history_for_gemini.append(model_resp_content)
                                         else:
                                             history_for_gemini.append(user_content)
-                                        user_content = None
-                                        model_resp_content = None
-                                        next_state = STATE_SCHEDULING_ACTIVE
-                                        action = 'handle_scheduling' # Ustaw akcję na następną iterację
-                                        context_data_to_save = {} # Wyczyść kontekst
+                                        user_content = None; model_resp_content = None
+                                        next_state = STATE_SCHEDULING_ACTIVE; action = 'handle_scheduling'; context_data_to_save = {}
                                         logging.debug("      Przekierowanie do handle_scheduling...")
-                                        continue # Kontynuuj pętlę, aby od razu pobrać zakresy
+                                        continue
                                     else:
-                                        # Normalna odpowiedź
-                                        msg_result = response
-                                        model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                        msg_result = response; model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
                                         next_state = STATE_GENERAL
-                                        context_data_to_save = {}
+                                        if was_temporary_general:
+                                            context_data_to_save['return_to_state'] = context.get('return_to_state')
+                                            context_data_to_save['return_to_context'] = context.get('return_to_context')
+                                        else: context_data_to_save = {}
                                 else:
-                                    # Błąd AI
-                                    msg_result = "Przepraszam, mam problem z przetworzeniem Twojej wiadomości."
-                                    model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
-                                    next_state = STATE_GENERAL
-                                    context_data_to_save = {}
-                            else:
-                                logging.warning("handle_general wywołane bez user_content.")
+                                    msg_result = "Przepraszam, mam problem z przetworzeniem Twojej wiadomości."; model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                    next_state = STATE_GENERAL; context_data_to_save = {}
+                            else: logging.warning("handle_general wywołane bez user_content.")
 
                         # --- Obsługa Stanu Planowania ---
                         elif current_action == 'handle_scheduling':
                             logging.debug("  >> Wykonanie: handle_scheduling")
                             try:
-                                tz = _get_calendar_timezone()
-                                now = datetime.datetime.now(tz)
-                                search_start = now
-                                search_end_date = (search_start + datetime.timedelta(days=MAX_SEARCH_DAYS)).date()
-                                search_end = tz.localize(datetime.datetime.combine(search_end_date, datetime.time(WORK_END_HOUR, 0)))
+                                tz = _get_calendar_timezone(); now = datetime.datetime.now(tz); search_start = now; search_end_date = (search_start + datetime.timedelta(days=MAX_SEARCH_DAYS)).date(); search_end = tz.localize(datetime.datetime.combine(search_end_date, datetime.time(WORK_END_HOUR, 0)))
                                 logging.info(f"      Pobieranie wolnych zakresów (z filtrem {MIN_BOOKING_LEAD_HOURS}h) od {search_start:%Y-%m-%d %H:%M} do {search_end:%Y-%m-%d %H:%M}")
-                                _simulate_typing(sender_id, MAX_TYPING_DELAY_SECONDS * 0.6)
-                                free_ranges = get_free_time_ranges(TARGET_CALENDAR_ID, search_start, search_end) # Ta funkcja już sprawdza arkusz
+                                _simulate_typing(sender_id, MAX_TYPING_DELAY_SECONDS * 0.6); free_ranges = get_free_time_ranges(TARGET_CALENDAR_ID, search_start, search_end)
 
                                 if free_ranges:
                                     logging.info(f"      Znaleziono {len(free_ranges)} zakresów. Wywołanie AI Planującego...")
@@ -1586,15 +1626,23 @@ def webhook_handle():
                                     ai_response_text = get_gemini_scheduling_response(sender_id, history_for_gemini, current_input_text, free_ranges)
 
                                     if ai_response_text:
-                                        # Usunięto sprawdzanie SWITCH_TO_GENERAL
+                                        # Sprawdź, czy AI chce przełączyć do General
+                                        if ai_response_text.strip() == SWITCH_TO_GENERAL: # Przywrócono sprawdzanie
+                                            logging.info(f"      AI Planujące zasygnalizowało pytanie ogólne [{SWITCH_TO_GENERAL}]. Przełączanie.")
+                                            context_data_to_save['return_to_state'] = STATE_SCHEDULING_ACTIVE
+                                            scheduling_context_minimal = {}
+                                            context_data_to_save['return_to_context'] = scheduling_context_minimal
+                                            context_data_to_save['type'] = STATE_GENERAL
+                                            next_state = STATE_GENERAL
+                                            action = 'handle_general'
+                                            msg_result = None; model_resp_content = None
+                                            logging.debug(f"      Zapisano stan powrotu. Nowy stan: {next_state}. Kontekst: {context_data_to_save}")
+                                            continue
 
                                         # Sprawdź, czy AI ustaliło termin
                                         iso_match = re.search(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}(.*?){re.escape(SLOT_ISO_MARKER_SUFFIX)}", ai_response_text)
                                         if iso_match:
-                                            extracted_iso = iso_match.group(1).strip()
-                                            logging.info(f"      AI Planujące zwróciło potencjalny finalny slot: {extracted_iso}")
-                                            text_for_user = re.sub(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}.*?{re.escape(SLOT_ISO_MARKER_SUFFIX)}", "", ai_response_text).strip()
-                                            text_for_user = re.sub(r'\s+', ' ', text_for_user).strip()
+                                            extracted_iso = iso_match.group(1).strip(); logging.info(f"      AI Planujące zwróciło potencjalny finalny slot: {extracted_iso}"); text_for_user = re.sub(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}.*?{re.escape(SLOT_ISO_MARKER_SUFFIX)}", "", ai_response_text).strip(); text_for_user = re.sub(r'\s+', ' ', text_for_user).strip()
                                             try:
                                                 proposed_start = datetime.datetime.fromisoformat(extracted_iso)
                                                 tz_cal = _get_calendar_timezone()
@@ -1609,48 +1657,29 @@ def webhook_handle():
                                                     logging.info("      Weryfikacja Kalendarza OK! Zapis Fazy 1 i przejście do zbierania danych.")
                                                     write_ok, write_msg_or_row = write_to_sheet_phase1(sender_id, proposed_start)
                                                     if write_ok:
-                                                        parent_profile = get_user_profile(sender_id)
-                                                        parent_first_name_api = parent_profile.get('first_name', '') if parent_profile else ''
-                                                        parent_last_name_api = parent_profile.get('last_name', '') if parent_profile else ''
-                                                        confirm_msg = text_for_user if text_for_user else f"Dobrze, potwierdzam termin {proposed_slot_formatted}."
-                                                        confirm_msg += " Teraz poproszę o kilka dodatkowych informacji dotyczących ucznia."
+                                                        parent_profile = get_user_profile(sender_id); parent_first_name_api = parent_profile.get('first_name', '') if parent_profile else ''; parent_last_name_api = parent_profile.get('last_name', '') if parent_profile else ''
+                                                        confirm_msg = text_for_user if text_for_user else f"Dobrze, potwierdzam termin {proposed_slot_formatted}."; confirm_msg += " Teraz poproszę o kilka dodatkowych informacji dotyczących ucznia."
                                                         send_message(sender_id, confirm_msg)
                                                         if user_content: history_for_gemini.append(user_content)
-                                                        model_resp_content_confirm = Content(role="model", parts=[Part.from_text(confirm_msg)])
-                                                        history_for_gemini.append(model_resp_content_confirm)
+                                                        model_resp_content_confirm = Content(role="model", parts=[Part.from_text(confirm_msg)]); history_for_gemini.append(model_resp_content_confirm)
                                                         user_content = None; model_resp_content = None
-                                                        context_data_to_save = {
-                                                            'proposed_slot_iso': proposed_start.isoformat(),
-                                                            'proposed_slot_formatted': proposed_slot_formatted,
-                                                            'known_parent_first_name': parent_first_name_api,
-                                                            'known_parent_last_name': parent_last_name_api,
-                                                            'known_student_first_name': '', 'known_student_last_name': '',
-                                                            'known_grade': '', 'known_level': '',
-                                                            'sheet_row_index': write_msg_or_row
-                                                        }
-                                                        next_state = STATE_GATHERING_INFO
-                                                        action = 'handle_gathering'
-                                                        trigger_gathering_ai_immediately = True
-                                                        logging.debug(f"      Ustawiono stan '{next_state}', akcję '{action}', trigger={trigger_gathering_ai_immediately}. Kontekst: {context_data_to_save}")
-                                                        continue
+                                                        context_data_to_save = {'proposed_slot_iso': proposed_start.isoformat(), 'proposed_slot_formatted': proposed_slot_formatted, 'known_parent_first_name': parent_first_name_api, 'known_parent_last_name': parent_last_name_api, 'known_student_first_name': '', 'known_student_last_name': '', 'known_grade': '', 'known_level': '', 'sheet_row_index': write_msg_or_row}
+                                                        next_state = STATE_GATHERING_INFO; action = 'handle_gathering'; trigger_gathering_ai_immediately = True; logging.debug(f"      Ustawiono stan '{next_state}', akcję '{action}', trigger={trigger_gathering_ai_immediately}. Kontekst: {context_data_to_save}"); continue
                                                     else:
                                                         logging.error(f"Błąd zapisu Fazy 1 do arkusza: {write_msg_or_row}")
-                                                        msg_result = f"Przepraszam, wystąpił błąd techniczny podczas wstępnej rezerwacji terminu ({write_msg_or_row}). Proszę spróbować ponownie później."
-                                                        model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
-                                                        next_state = STATE_GENERAL; context_data_to_save = {}
+                                                        msg_result = f"Przepraszam, wystąpił błąd techniczny podczas wstępnej rezerwacji terminu ({write_msg_or_row}). Proszę spróbować ponownie później."; model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)]); next_state = STATE_GENERAL; context_data_to_save = {}
                                                 else:
                                                     logging.warning(f"      Weryfikacja KALENDARZA NIEUDANA! Slot {extracted_iso} ({proposed_slot_formatted}) został zajęty.")
                                                     fail_msg = f"Ojej, wygląda na to, że termin {proposed_slot_formatted} został właśnie zajęty w kalendarzu! Przepraszam za zamieszanie. Spróbujmy znaleźć inny."
                                                     fail_msg_for_ai = f"\n[SYSTEM: Termin {proposed_slot_formatted} okazał się zajęty (kalendarz). Zaproponuj inny termin z dostępnej listy.]"
                                                     msg_result = fail_msg
                                                     if user_content: history_for_gemini.append(user_content)
-                                                    model_resp_content = Content(role="model", parts=[Part.from_text(fail_msg + fail_msg_for_ai)])
-                                                    user_content = None
+                                                    model_resp_content = Content(role="model", parts=[Part.from_text(fail_msg + fail_msg_for_ai)]); user_content = None
                                                     next_state = STATE_SCHEDULING_ACTIVE; slot_verification_failed = True; context_data_to_save = {}
                                             except ValueError: logging.error(f"!!! BŁĄD: AI zwróciło nieprawidłowy format ISO w znaczniku: '{extracted_iso}'"); msg_result = "Przepraszam, wystąpił błąd techniczny przy przetwarzaniu zaproponowanego terminu. Spróbujmy jeszcze raz."; model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)]); next_state = STATE_SCHEDULING_ACTIVE; context_data_to_save = {}
                                             except Exception as verif_err: logging.error(f"!!! BŁĄD podczas weryfikacji slotu {extracted_iso}: {verif_err}", exc_info=True); msg_result = "Przepraszam, wystąpił nieoczekiwany błąd podczas sprawdzania dostępności terminu."; model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)]); next_state = STATE_SCHEDULING_ACTIVE; context_data_to_save = {}
                                         else:
-                                            logging.info("      AI Planujące kontynuuje rozmowę (brak znacznika ISO).")
+                                            logging.info("      AI Planujące kontynuuje rozmowę (brak znacznika ISO/SWITCH).")
                                             msg_result = ai_response_text
                                             model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
                                             next_state = STATE_SCHEDULING_ACTIVE
@@ -1676,13 +1705,24 @@ def webhook_handle():
                                 logging.debug(f"    Kontekst przekazywany do AI (Gathering): {known_info_for_ai}")
                                 current_input_text = user_content.parts[0].text if user_content and user_content.parts else None
                                 if trigger_gathering_ai_immediately:
-                                    logging.info("      Pierwsze wywołanie AI zbierającego (po ustaleniu terminu).")
+                                    logging.info("      Pierwsze wywołanie AI zbierającego (po ustaleniu terminu lub powrocie).")
                                     current_input_text = None
                                     trigger_gathering_ai_immediately = False
                                 ai_response_text = get_gemini_gathering_response(sender_id, history_for_gemini, current_input_text, known_info_for_ai)
 
                                 if ai_response_text:
-                                     # Usunięto sprawdzanie SWITCH_TO_GENERAL
+                                     # Sprawdź, czy AI chce przełączyć do General
+                                    if ai_response_text.strip() == SWITCH_TO_GENERAL:
+                                        logging.info(f"      AI Zbierające zasygnalizowało pytanie ogólne [{SWITCH_TO_GENERAL}]. Przełączanie.")
+                                        context_data_to_save['return_to_state'] = STATE_GATHERING_INFO
+                                        context_data_to_save['return_to_context'] = context_data_to_save.copy()
+                                        context_data_to_save['type'] = STATE_GENERAL
+                                        next_state = STATE_GENERAL
+                                        action = 'handle_general'
+                                        msg_result = None
+                                        model_resp_content = None
+                                        logging.debug(f"      Zapisano stan powrotu. Nowy stan: {next_state}. Kontekst: {context_data_to_save}")
+                                        continue
 
                                     # Sprawdź, czy AI zakończyło zbieranie danych
                                     if INFO_GATHERED_MARKER in ai_response_text:
@@ -1835,7 +1875,7 @@ if __name__ == '__main__':
     logging.getLogger('urllib3.connectionpool').setLevel(logging.WARNING)
     logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
-    print("\n" + "="*60 + "\n--- START KONFIGURACJI BOTA (Rozdzielone Osobowości + Sprawdzanie Arkusza w get_free_time_ranges + Dwufazowy Zapis + Uproszczony Scheduling) ---")
+    print("\n" + "="*60 + "\n--- START KONFIGURACJI BOTA (Rozdzielone Osobowości + Pełne Przełączanie Kontekstu + Sprawdzanie Arkusza w get_free_time_ranges + Dwufazowy Zapis) ---") # Zaktualizowano tytuł
     print(f"  * Poziom logowania: {logging.getLevelName(log_level)}")
     print("-" * 60)
     print("  Konfiguracja Facebook:")
