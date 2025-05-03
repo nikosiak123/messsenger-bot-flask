@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# verify_server.py (Wersja: Autonomiczne AI + Odczyt Kalendarza + Weryfikacja + Info Ucznia (AI Parse) + Zapis Sheets + Parent API + Osobne Klucze + Kolejność Kolumn + Złagodzone Filtry Bezp. - PEP8 Style)
+# verify_server.py (Wersja: Finalna - Przełączanie Kontekstu + Poprawki Arkusza)
 
 from flask import Flask, request, Response
 import os
@@ -75,9 +75,14 @@ INTENT_SCHEDULE_MARKER = "[INTENT_SCHEDULE]"
 SLOT_ISO_MARKER_PREFIX = "[SLOT_ISO:"
 SLOT_ISO_MARKER_SUFFIX = "]"
 INFO_GATHERED_MARKER = "[INFO_GATHERED]"
+SWITCH_TO_GENERAL = "[SWITCH_TO_GENERAL]" # NOWY ZNACZNIK
+RETURN_TO_PREVIOUS = "[RETURN_TO_PREVIOUS]" # NOWY ZNACZNIK
+
 STATE_GENERAL = "general"
 STATE_SCHEDULING_ACTIVE = "scheduling_active"
 STATE_GATHERING_INFO = "gathering_info"
+# Dodajemy informację o stanie tymczasowym w kontekście
+# np. context = {'type': 'general', 'return_to_state': 'scheduling_active', 'return_to_context': {...}}
 
 # --- Ustawienia Modelu Gemini ---
 GENERATION_CONFIG_SCHEDULING = GenerationConfig(
@@ -242,6 +247,7 @@ def load_history(user_psid):
                         logging.warning(f"[{user_psid}] Wczytany kontekst ma nieprawidłowy typ '{context.get('type')}'. Reset do {STATE_GENERAL}.")
                     context = {'type': STATE_GENERAL}
                 logging.info(f"[{user_psid}] Wczytano historię: {len(history)} wiad. Stan: {context.get('type', STATE_GENERAL)}")
+                # Usuń 'role' z wczytanego kontekstu, jeśli istnieje
                 context.pop('role', None)
                 return history, context
             else:
@@ -282,13 +288,14 @@ def save_history(user_psid, history, context_to_save=None):
              else:
                 logging.warning(f"Ostrz. [{user_psid}]: Pomijanie nieprawidłowego obiektu historii podczas zapisu: {type(msg)}")
         current_state_to_save = context_to_save.get('type', STATE_GENERAL) if context_to_save else STATE_GENERAL
-        if context_to_save and isinstance(context_to_save, dict) and current_state_to_save != STATE_GENERAL:
+        # Zapisujemy kontekst tylko jeśli stan jest inny niż general lub zawiera informacje o powrocie
+        if context_to_save and isinstance(context_to_save, dict) and (current_state_to_save != STATE_GENERAL or 'return_to_state' in context_to_save):
              context_copy = context_to_save.copy()
-             context_copy['role'] = 'system'
+             context_copy['role'] = 'system' # Dodaj rolę systemową do zapisu
              history_data.append(context_copy)
              logging.debug(f"[{user_psid}] Dodano kontekst {current_state_to_save} do zapisu: {context_copy}")
         else:
-             logging.debug(f"[{user_psid}] Zapis bez kontekstu (stan general).")
+             logging.debug(f"[{user_psid}] Zapis bez kontekstu (stan general bez powrotu).")
         with open(temp_filepath, 'w', encoding='utf-8') as f:
             json.dump(history_data, f, ensure_ascii=False, indent=2)
         os.replace(temp_filepath, filepath)
@@ -352,37 +359,50 @@ def format_slot_for_user(slot_start):
         return slot_start.isoformat()
 
 def extract_school_type(grade_string):
-    """Próbuje wyodrębnić typ szkoły z ciągu opisującego klasę."""
+    """Próbuje wyodrębnić typ szkoły i opis klasy z ciągu."""
     if not grade_string or not isinstance(grade_string, str):
-        return "Nieokreślona" # Zwróć domyślną wartość, jeśli brak danych
+        return "Nieokreślona", "Nieokreślona" # Zwróć krotkę
 
-    grade_lower = grade_string.lower()
+    grade_lower = grade_string.lower().strip()
+    class_desc = grade_string # Domyślnie cała informacja to opis klasy
+    school_type = "Nieokreślona" # Domyślny typ szkoły
 
-    if 'liceum' in grade_lower or ' lo ' in grade_lower or re.search(r'\blo\b', grade_lower):
-        return "Liceum"
-    elif 'technikum' in grade_lower or ' tech ' in grade_lower or re.search(r'\btech\b', grade_lower):
-        return "Technikum"
-    elif 'podstaw' in grade_lower or ' sp ' in grade_lower or re.search(r'\bsp\b', grade_lower):
-        # Sprawdźmy jeszcze numer klasy, aby odróżnić starsze klasy podstawówki
-        match = re.search(r'\d+', grade_lower)
-        if match:
-            try:
-                class_num = int(match.group(0))
-                if class_num >= 1 and class_num <= 8:
-                    return "Szkoła Podstawowa"
-                # Można dodać logikę dla innych przypadków, jeśli potrzebne
-            except ValueError:
-                pass # Ignoruj, jeśli nie można sparsować numeru
-        return "Szkoła Podstawowa" # Domyślnie, jeśli zawiera 'podstaw'
-    elif 'zawodowa' in grade_lower or 'branżowa' in grade_lower or 'zasadnicza' in grade_lower:
-        return "Szkoła Branżowa/Zawodowa"
-    # Można dodać więcej warunków dla innych typów szkół (np. policealna)
+    # Szukaj słów kluczowych dla typu szkoły
+    type_mapping = {
+        "Liceum": [r'liceum', r' lo ', r'\blo\b'],
+        "Technikum": [r'technikum', r' tech ', r'\btech\b'],
+        "Szkoła Podstawowa": [r'podstaw', r' sp ', r'\bsp\b'],
+        "Szkoła Branżowa/Zawodowa": [r'zawodowa', r'branżowa', r'zasadnicza']
+    }
 
-    # Jeśli żaden typ nie pasuje, ale jest numer klasy
-    if re.search(r'\d+', grade_lower):
-         return "Inna (z numerem klasy)" # Lub bardziej ogólnie
+    found_type = False
+    for type_name, patterns in type_mapping.items():
+        for pattern in patterns:
+            if re.search(pattern, grade_lower):
+                school_type = type_name
+                # Usuń znaleziony wzorzec (i ewentualne otaczające spacje) z opisu klasy
+                # Używamy \b dla słów, ale spacje dla ' lo ', ' tech ', ' sp '
+                cleaned_desc = re.sub(r'\s*' + pattern.replace(r'\b', '') + r'\b?\s*', ' ', grade_string, flags=re.IGNORECASE).strip()
+                # Sprawdź, czy coś zostało po czyszczeniu
+                if cleaned_desc:
+                    class_desc = cleaned_desc
+                found_type = True
+                break # Znaleziono typ, przejdź do następnego
+        if found_type:
+            break
 
-    return "Nieokreślona" # Domyślna wartość, jeśli nic nie pasuje
+    # Jeśli typ szkoły nadal nieokreślony, ale jest numer klasy
+    if school_type == "Nieokreślona" and re.search(r'\d', grade_lower): # Szukaj cyfry
+         school_type = "Inna (z numerem klasy)"
+
+    # Dodatkowe czyszczenie opisu klasy (np. usunięcie słowa "klasa")
+    class_desc = re.sub(r'\bklasa\b', '', class_desc, flags=re.IGNORECASE).strip()
+    # Jeśli opis klasy jest pusty po czyszczeniu, wróć do oryginalnego stringu
+    if not class_desc:
+        class_desc = grade_string.strip()
+
+    # Zwróć krotkę: (opis klasy, typ szkoły)
+    return class_desc, school_type
 
 # =====================================================================
 # === FUNKCJE GOOGLE CALENDAR (ODCZYT/WERYFIKACJA) ====================
@@ -824,6 +844,7 @@ def _call_gemini(user_psid, prompt_history, generation_config, task_name, max_re
     else:
         logging.debug(f"    Brak wiadomości użytkownika w bezpośrednim prompcie ({task_name}).")
     attempt = 0
+    finish_reason = None # Zmienna do przechowywania ostatniego powodu zakończenia
     while attempt < max_retries:
         attempt += 1
         logging.debug(f"    Próba {attempt}/{max_retries} wywołania Gemini ({task_name})...")
@@ -832,7 +853,7 @@ def _call_gemini(user_psid, prompt_history, generation_config, task_name, max_re
             response = gemini_model.generate_content(prompt_history, generation_config=generation_config, safety_settings=SAFETY_SETTINGS) # Używa globalnych SAFETY_SETTINGS
             if response and response.candidates:
                 candidate = response.candidates[0]
-                finish_reason = candidate.finish_reason
+                finish_reason = candidate.finish_reason # Zapisz ostatni powód
                 if finish_reason != 1:
                     safety_ratings = candidate.safety_ratings
                     logging.warning(f"[{user_psid}] Gemini ({task_name}) ZAKOŃCZONE NIEPRAWIDŁOWO! Powód: {finish_reason.name} ({finish_reason.value}). Safety Ratings: {safety_ratings}")
@@ -842,8 +863,9 @@ def _call_gemini(user_psid, prompt_history, generation_config, task_name, max_re
                         continue
                     else:
                         logging.error(f"!!! [{user_psid}] Gemini ({task_name}) nieudane po blokadzie lub innym błędzie.")
+                        # Zwróć specyficzną wiadomość tylko w przypadku błędu SAFETY
                         if finish_reason == 3:
-                            return "Przepraszam, nie mogę przetworzyć tej prośby ze względu na zasady bezpieczeństwa." # Zwróć generyczną wiadomość o błędzie bezpieczeństwa
+                            return "Przepraszam, nie mogę przetworzyć tej prośby ze względu na zasady bezpieczeństwa."
                         else:
                             return "Wystąpił problem z generowaniem odpowiedzi." # Inny błąd
                 if candidate.content and candidate.content.parts:
@@ -851,7 +873,7 @@ def _call_gemini(user_psid, prompt_history, generation_config, task_name, max_re
                     if generated_text:
                         logging.info(f"[{user_psid}] Gemini ({task_name}) zwróciło odpowiedź (długość: {len(generated_text)}).")
                         logging.debug(f"    Pełna odpowiedź Gemini ({task_name}): '{generated_text}'")
-                        return generated_text
+                        return generated_text # Sukces
                     else:
                         logging.warning(f"[{user_psid}] Gemini ({task_name}) zwróciło kandydata z pustą treścią.")
                 else:
@@ -876,12 +898,14 @@ def _call_gemini(user_psid, prompt_history, generation_config, task_name, max_re
                  return None
              else:
                  logging.error(f"!!! BŁĄD [{user_psid}] Gemini ({task_name}) - Nieoczekiwany błąd Python (Próba {attempt}/{max_retries}): {e}", exc_info=True)
+        # Jeśli doszło tutaj, oznacza to błąd inny niż HTTP lub brak poprawnej odpowiedzi
         if attempt < max_retries:
             logging.warning(f"    Problem z odpowiedzią Gemini ({task_name}). Oczekiwanie przed ponowieniem ({attempt+1}/{max_retries})...")
             time.sleep(1.5 * attempt)
+
+    # Po wszystkich próbach
     logging.error(f"!!! KRYTYCZNY BŁĄD [{user_psid}] Gemini ({task_name}) - Nie udało się uzyskać poprawnej odpowiedzi po {max_retries} próbach.")
-    # Zwróć None lub specyficzną wiadomość błędu, jeśli wszystkie próby zawiodły
-    # W przypadku błędu SAFETY po wszystkich próbach, zwracamy wiadomość z kroku 5
+    # Zwróć None lub specyficzną wiadomość błędu, jeśli ostatni błąd to SAFETY
     if finish_reason == 3:
         return "Przepraszam, nie mogę przetworzyć tej prośby ze względu na zasady bezpieczeństwa."
     return None # Ogólny błąd po wszystkich próbach
@@ -890,7 +914,7 @@ def _call_gemini(user_psid, prompt_history, generation_config, task_name, max_re
 # === INSTRUKCJE SYSTEMOWE I GŁÓWNE FUNKCJE AI ========================
 # =====================================================================
 
-# --- SYSTEM_INSTRUCTION_SCHEDULING ---
+# --- SYSTEM_INSTRUCTION_SCHEDULING (z obsługą pytań ogólnych) ---
 SYSTEM_INSTRUCTION_SCHEDULING = """Jesteś pomocnym asystentem AI specjalizującym się w umawianiu terminów korepetycji online. Twoim zadaniem jest znalezienie pasującego terminu dla użytkownika na podstawie jego preferencji oraz dostarczonej listy dostępnych zakresów czasowych z kalendarza.
 **Kontekst:**
 *   Rozmawiasz z użytkownikiem, który wyraził chęć umówienia się na lekcję.
@@ -913,41 +937,22 @@ SYSTEM_INSTRUCTION_SCHEDULING = """Jesteś pomocnym asystentem AI specjalizując
     *   Nie udało się znaleźć pasującego terminu.
     *   Lista dostępnych zakresów jest pusta.
 5.  **Brak terminów:** Jeśli lista zakresów jest pusta lub po rozmowie okaże się, że żaden termin nie pasuje, poinformuj o tym użytkownika uprzejmie. Nie dodawaj znacznika.
+6.  **Pytania poza tematem:** Jeśli użytkownik zada pytanie niezwiązane bezpośrednio z ustalaniem terminu (np. o cenę, metodykę, dostępne przedmioty), **NIE ODPOWIADAJ na nie**. Zamiast tego, Twoja odpowiedź musi zawierać **TYLKO I WYŁĄCZNIE** znacznik: `{switch_marker}`. System przełączy się wtedy do trybu ogólnych odpowiedzi.
+
 **Pamiętaj:**
 *   Trzymaj się **wyłącznie** terminów i godzin wynikających z "Dostępnych zakresów czasowych".
 *   Bądź elastyczny w rozmowie, ale propozycje muszą pochodzić z listy.
 *   Używaj języka polskiego i polskiej strefy czasowej ({calendar_timezone}).
 *   Znacznik `{slot_marker_prefix}...{slot_marker_suffix}` jest sygnałem dla systemu, że **osiągnięto porozumienie co do terminu z dostępnej listy**. Używaj go tylko w tym jednym, konkretnym przypadku.
+*   Znacznik `{switch_marker}` służy do przekazania obsługi pytania ogólnego.
 """.format(
     duration=APPOINTMENT_DURATION_MINUTES, min_lead_hours=MIN_BOOKING_LEAD_HOURS,
     available_ranges_text="{available_ranges_text}", calendar_timezone=CALENDAR_TIMEZONE,
-    slot_marker_prefix=SLOT_ISO_MARKER_PREFIX, slot_marker_suffix=SLOT_ISO_MARKER_SUFFIX
+    slot_marker_prefix=SLOT_ISO_MARKER_PREFIX, slot_marker_suffix=SLOT_ISO_MARKER_SUFFIX,
+    switch_marker=SWITCH_TO_GENERAL
 )
 
-# --- SYSTEM_INSTRUCTION_GENERAL ---
-SYSTEM_INSTRUCTION_GENERAL = """Jesteś przyjaznym i pomocnym asystentem klienta w 'Zakręcone Korepetycje'. Prowadzisz rozmowę na czacie dotyczącą korepetycji online.
-**Twoje główne zadania:**
-1.  Odpowiadaj rzeczowo i uprzejmie na pytania użytkownika dotyczące oferty, metodyki, dostępności korepetycji.
-2.  Utrzymuj konwersacyjny, pomocny ton. Odpowiadaj po polsku.
-3.  **Nie podawaj samodzielnie informacji o cenach ani dokładnych metodach płatności.** Jeśli użytkownik o to zapyta, możesz odpowiedzieć ogólnie, np. "Szczegóły dotyczące płatności omawiamy indywidualnie." lub "Informacje o cenach prześlemy po ustaleniu terminu.".
-4.  **Kluczowy cel:** Jeśli w wypowiedzi użytkownika **wyraźnie pojawi się intencja umówienia się na lekcję** (próbną lub zwykłą), rezerwacji terminu, zapytanie o wolne terminy lub chęć rozpoczęcia współpracy, **dodaj na samym końcu swojej odpowiedzi specjalny znacznik:** `{intent_marker}`.
-**Przykłady wypowiedzi użytkownika, które powinny skutkować dodaniem znacznika `{intent_marker}`:**
-*   "Chciałbym się umówić na lekcję próbną."
-*   "Kiedy moglibyśmy zacząć?"
-*   "Proszę zaproponować jakiś termin."
-*   "Czy macie jakieś wolne godziny w przyszłym tygodniu?"
-*   "Jak mogę zarezerwować korepetycje?"
-*   "Interesuje mnie ta oferta, jak się umówić?"
-*   Pytanie typu: "Ile trwa lekcja i kiedy można ją umówić?" -> Odpowiedz na pierwszą część pytania i dodaj znacznik.
-**Przykłady wypowiedzi, po których NIE dodawać znacznika:**
-*   "Ile kosztują korepetycje?" (Odpowiedz ogólnie o cenach, bez znacznika).
-*   "Jakie przedmioty oferujecie?" (Odpowiedz na pytanie, bez znacznika).
-*   "Dziękuję za informacje." (Podziękuj, bez znacznika).
-**Zasady:** Zawsze odpowiadaj na bieżące pytanie lub stwierdzenie użytkownika. Znacznik `{intent_marker}` dodawaj **tylko wtedy**, gdy intencja umówienia się jest jasna i bezpośrednia, i **zawsze na samym końcu** odpowiedzi. Nie inicjuj samodzielnie procesu umawiania.
-""".format(intent_marker=INTENT_SCHEDULE_MARKER)
-
-
-# --- ZMODYFIKOWANA INSTRUKCJA GATHERING (AI potwierdza dane w strukturze) ---
+# --- ZMODYFIKOWANA INSTRUKCJA GATHERING (AI potwierdza dane w strukturze i obsługa pytań ogólnych) ---
 SYSTEM_INSTRUCTION_GATHERING = """Twoim zadaniem jest zebranie informacji wyłącznie o UCZNIU, potrzebnych do zapisu na korepetycje, po tym jak wstępnie ustalono termin. Dane rodzica zostaną pobrane automatycznie przez system.
 
 **Kontekst:**
@@ -972,6 +977,7 @@ SYSTEM_INSTRUCTION_GATHERING = """Twoim zadaniem jest zebranie informacji wyłą
     b)  **PO TEJ LINIJCE**, w nowej linii, standardowa wiadomość dla użytkownika: "Dziękuję za wszystkie informacje. Dane zostały zapisane. Wkrótce skontaktujemy się w celu potwierdzenia szczegółów. Proszę również oczekiwać na wiadomość dotyczącą płatności i dostępu do materiałów na profilu dedykowanym do komunikacji: https://www.facebook.com/profile.php?id=61576135251276"
     c)  **NA SAMYM KOŃCU** całej odpowiedzi dodaj **DOKŁADNIE** znacznik: `{info_gathered_marker}`.
 6.  **NIE dodawaj znacznika ani struktury `ZEBRANE_DANE_UCZNIA:`**, jeśli nadal brakuje którejś z wymaganych informacji o uczniu. Kontynuuj zadawanie pytań.
+7.  **Pytania poza tematem:** Jeśli użytkownik zada pytanie niezwiązane bezpośrednio ze zbieraniem danych ucznia (np. o cenę, metodykę), **NIE ODPOWIADAJ na nie**. Zamiast tego, Twoja odpowiedź musi zawierać **TYLKO I WYŁĄCZNIE** znacznik: `{switch_marker}`. System przełączy się wtedy do trybu ogólnych odpowiedzi.
 
 **Przykład poprawnej odpowiedzi końcowej:**
 ```
@@ -979,16 +985,48 @@ ZEBRANE_DANE_UCZNIA: [Imię: Jan, Nazwisko: Kowalski, KlasaInfo: 2 klasa liceum,
 Dziękuję za wszystkie informacje. Dane zostały zapisane. Wkrótce skontaktujemy się w celu potwierdzenia szczegółów. Proszę również oczekiwać na wiadomość dotyczącą płatności i dostępu do materiałów na profilu dedykowanym do komunikacji: https://www.facebook.com/profile.php?id=61576135251276[INFO_GATHERED]
 ```
 
-**Pamiętaj:** Kluczowe jest dokładne przestrzeganie formatu `ZEBRANE_DANE_UCZNIA: [...]` w przedostatniej linijce odpowiedzi końcowej.
+**Pamiętaj:** Kluczowe jest dokładne przestrzeganie formatu `ZEBRANE_DANE_UCZNIA: [...]` w przedostatniej linijce odpowiedzi końcowej. Znacznik `{switch_marker}` służy do przekazania obsługi pytania ogólnego.
 """.format(
     proposed_slot_formatted="{proposed_slot_formatted}",
     known_student_first_name="{known_student_first_name}",
     known_student_last_name="{known_student_last_name}",
     known_grade="{known_grade}",
     known_level="{known_level}",
-    info_gathered_marker=INFO_GATHERED_MARKER
+    info_gathered_marker=INFO_GATHERED_MARKER,
+    switch_marker=SWITCH_TO_GENERAL
 )
-# --- KONIEC ZMODYFIKOWANEJ INSTRUKCJI GATHERING ---
+
+# --- ZMODYFIKOWANA INSTRUKCJA GENERAL (z obsługą powrotu) ---
+SYSTEM_INSTRUCTION_GENERAL = """Jesteś przyjaznym i pomocnym asystentem klienta w 'Zakręcone Korepetycje'. Prowadzisz rozmowę na czacie dotyczącą korepetycji online.
+**Twoje główne zadania:**
+1.  Odpowiadaj rzeczowo i uprzejmie na pytania użytkownika dotyczące oferty, metodyki, dostępności korepetycji.
+2.  Utrzymuj konwersacyjny, pomocny ton. Odpowiadaj po polsku.
+3.  **Nie podawaj samodzielnie informacji o cenach ani dokładnych metodach płatności.** Jeśli użytkownik o to zapyta, możesz odpowiedzieć ogólnie, np. "Szczegóły dotyczące płatności omawiamy indywidualnie." lub "Informacje o cenach prześlemy po ustaleniu terminu.".
+4.  **Kluczowy cel:** Jeśli w wypowiedzi użytkownika **wyraźnie pojawi się intencja umówienia się na lekcję** (próbną lub zwykłą), rezerwacji terminu, zapytanie o wolne terminy lub chęć rozpoczęcia współpracy, **dodaj na samym końcu swojej odpowiedzi specjalny znacznik:** `{intent_marker}`.
+5.  **Obsługa powrotu:** Jeśli zostałeś aktywowany, aby odpowiedzieć na pytanie ogólne podczas innego procesu (np. umawiania terminu), a odpowiedź użytkownika na Twoją odpowiedź wydaje się satysfakcjonująca (np. zawiera "ok", "dziękuję", "rozumiem") i **nie zawiera kolejnego pytania ogólnego**, dodaj na **samym końcu** swojej odpowiedzi (po ewentualnym podziękowaniu) **DOKŁADNIE** znacznik: `{return_marker}`. Jeśli użytkownik zada kolejne pytanie ogólne, odpowiedz na nie normalnie, bez tego znacznika.
+
+**Przykłady wypowiedzi użytkownika, które powinny skutkować dodaniem znacznika `{intent_marker}`:**
+*   "Chciałbym się umówić na lekcję próbną."
+*   "Kiedy moglibyśmy zacząć?"
+*   "Proszę zaproponować jakiś termin."
+*   "Czy macie jakieś wolne godziny w przyszłym tygodniu?"
+*   "Jak mogę zarezerwować korepetycje?"
+*   "Interesuje mnie ta oferta, jak się umówić?"
+*   Pytanie typu: "Ile trwa lekcja i kiedy można ją umówić?" -> Odpowiedz na pierwszą część pytania i dodaj znacznik.
+**Przykłady wypowiedzi, po których NIE dodawać znacznika `{intent_marker}`:**
+*   "Ile kosztują korepetycje?" (Odpowiedz ogólnie o cenach, bez znacznika).
+*   "Jakie przedmioty oferujecie?" (Odpowiedz na pytanie, bez znacznika).
+*   "Dziękuję za informacje." (Podziękuj, bez znacznika).
+**Przykład odpowiedzi ze znacznikiem powrotu `{return_marker}`:**
+    *   User: "Dziękuję za wyjaśnienie ceny." -> Model: "Cieszę się, że mogłem pomóc.{return_marker}"
+    *   User: "Ok, rozumiem." -> Model: "Świetnie.{return_marker}"
+    *   User: "Super." -> Model: "W porządku.{return_marker}"
+
+**Zasady:** Zawsze odpowiadaj na bieżące pytanie lub stwierdzenie użytkownika. Znacznik `{intent_marker}` dodawaj **tylko wtedy**, gdy intencja umówienia się jest jasna i bezpośrednia, i **zawsze na samym końcu** odpowiedzi. Nie inicjuj samodzielnie procesu umawiania. Znacznik `{return_marker}` dodawaj tylko w sytuacji opisanej w punkcie 5.
+""".format(
+    intent_marker=INTENT_SCHEDULE_MARKER,
+    return_marker=RETURN_TO_PREVIOUS
+)
 
 
 # --- Funkcja AI: Planowanie terminu ---
@@ -1008,7 +1046,7 @@ def get_gemini_scheduling_response(user_psid, history_for_scheduling_ai, current
         return "Błąd wewnętrzny konfiguracji asystenta planowania."
     initial_prompt = [
         Content(role="user", parts=[Part.from_text(system_instruction)]),
-        Content(role="model", parts=[Part.from_text(f"Rozumiem. Zaproponuję pierwszy dostępny termin z podanej listy i będę negocjować z użytkownikiem na podstawie dostępnych zakresów. Znacznik {SLOT_ISO_MARKER_PREFIX}...{SLOT_ISO_MARKER_SUFFIX} dodam tylko po uzyskaniu ostatecznej zgody na termin z listy.")])
+        Content(role="model", parts=[Part.from_text(f"Rozumiem. Zaproponuję pierwszy dostępny termin z podanej listy i będę negocjować z użytkownikiem na podstawie dostępnych zakresów. Znacznik {SLOT_ISO_MARKER_PREFIX}...{SLOT_ISO_MARKER_SUFFIX} dodam tylko po uzyskaniu ostatecznej zgody na termin z listy. Jeśli użytkownik zada pytanie ogólne, odpowiem tylko znacznikiem {SWITCH_TO_GENERAL}.")])
     ]
     full_prompt = initial_prompt + history_for_scheduling_ai
     if current_user_message_text:
@@ -1020,6 +1058,7 @@ def get_gemini_scheduling_response(user_psid, history_for_scheduling_ai, current
             full_prompt.pop(2)
     response_text = _call_gemini(user_psid, full_prompt, GENERATION_CONFIG_SCHEDULING, "Scheduling Conversation")
     if response_text:
+        # Nie usuwamy już tutaj SWITCH_TO_GENERAL, bo jest potrzebny w logice webhooka
         if INTENT_SCHEDULE_MARKER in response_text:
             response_text = response_text.replace(INTENT_SCHEDULE_MARKER, "").strip()
         if INFO_GATHERED_MARKER in response_text:
@@ -1053,7 +1092,7 @@ def get_gemini_gathering_response(user_psid, history_for_gathering_ai, current_u
         return "Błąd konfiguracji asystenta zbierania informacji."
     initial_prompt = [
         Content(role="user", parts=[Part.from_text(system_instruction)]),
-        Content(role="model", parts=[Part.from_text(f"Rozumiem. Sprawdzę znane informacje o uczniu i zapytam o brakujące dane: Imię/Nazwisko Ucznia, Klasa, Poziom (dla liceum/technikum). Zignoruję dane rodzica. Po zebraniu kompletu informacji o uczniu dodam znacznik {INFO_GATHERED_MARKER}.")])
+        Content(role="model", parts=[Part.from_text(f"Rozumiem. Sprawdzę znane informacje o uczniu i zapytam o brakujące dane: Imię/Nazwisko Ucznia, Klasa, Poziom (dla liceum/technikum). Zignoruję dane rodzica. Po zebraniu kompletu informacji o uczniu zwrócę strukturę ZEBRANE_DANE_UCZNIA i znacznik {INFO_GATHERED_MARKER}. Jeśli użytkownik zada pytanie ogólne, odpowiem tylko znacznikiem {SWITCH_TO_GENERAL}.")])
     ]
     full_prompt = initial_prompt + history_for_gathering_ai
     if current_user_message_text:
@@ -1065,6 +1104,7 @@ def get_gemini_gathering_response(user_psid, history_for_gathering_ai, current_u
             full_prompt.pop(2)
     response_text = _call_gemini(user_psid, full_prompt, GENERATION_CONFIG_GATHERING, "Info Gathering (Student Only)")
     if response_text:
+        # Nie usuwamy już tutaj SWITCH_TO_GENERAL ani INFO_GATHERED_MARKER
         if INTENT_SCHEDULE_MARKER in response_text:
             response_text = response_text.replace(INTENT_SCHEDULE_MARKER, "").strip()
         if SLOT_ISO_MARKER_PREFIX in response_text:
@@ -1075,14 +1115,20 @@ def get_gemini_gathering_response(user_psid, history_for_gathering_ai, current_u
         return "Przepraszam, wystąpił błąd systemowy."
 
 # --- Funkcja AI: Ogólna rozmowa ---
-def get_gemini_general_response(user_psid, current_user_message_text, history_for_general_ai):
-    """Prowadzi ogólną rozmowę z AI."""
+def get_gemini_general_response(user_psid, current_user_message_text, history_for_general_ai, is_temporary_general_state=False):
+    """Prowadzi ogólną rozmowę z AI, z obsługą powrotu do poprzedniego stanu."""
     if not gemini_model:
         logging.error(f"!!! [{user_psid}] Model Gemini niezaładowany (General)!")
         return "Przepraszam, mam chwilowy problem z systemem."
+
+    # Dostosuj odpowiedź modelu w zależności od tego, czy jest to stan tymczasowy
+    model_ack = f"Rozumiem. Będę pomocnym asystentem klienta i dodam znacznik {INTENT_SCHEDULE_MARKER}, gdy użytkownik wyrazi chęć umówienia się."
+    if is_temporary_general_state:
+        model_ack = f"Rozumiem. Odpowiem na pytanie ogólne użytkownika. Jeśli odpowiedź użytkownika będzie satysfakcjonująca i nie będzie zawierać dalszych pytań ogólnych, dodam znacznik {RETURN_TO_PREVIOUS}."
+
     initial_prompt = [
         Content(role="user", parts=[Part.from_text(SYSTEM_INSTRUCTION_GENERAL)]),
-        Content(role="model", parts=[Part.from_text(f"Rozumiem. Będę pomocnym asystentem klienta i dodam znacznik {INTENT_SCHEDULE_MARKER}, gdy użytkownik wyrazi chęć umówienia się.")])
+        Content(role="model", parts=[Part.from_text(model_ack)])
     ]
     full_prompt = initial_prompt + history_for_general_ai
     if current_user_message_text:
@@ -1094,14 +1140,18 @@ def get_gemini_general_response(user_psid, current_user_message_text, history_fo
             full_prompt.pop(2)
     response_text = _call_gemini(user_psid, full_prompt, GENERATION_CONFIG_DEFAULT, "General Conversation")
     if response_text:
+        # Nie usuwamy już tutaj RETURN_TO_PREVIOUS ani INTENT_SCHEDULE_MARKER
         if SLOT_ISO_MARKER_PREFIX in response_text:
             response_text = re.sub(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}.*?{re.escape(SLOT_ISO_MARKER_SUFFIX)}", "", response_text).strip()
         if INFO_GATHERED_MARKER in response_text:
             response_text = response_text.replace(INFO_GATHERED_MARKER, "").strip()
+        if SWITCH_TO_GENERAL in response_text:
+            response_text = response_text.replace(SWITCH_TO_GENERAL, "").strip() # General nie powinien tego zwracać
         return response_text
     else:
         logging.error(f"!!! [{user_psid}] Nie uzyskano odpowiedzi Gemini (General).")
         return "Przepraszam, wystąpił błąd przetwarzania Twojej wiadomości."
+
 
 # =====================================================================
 # === WEBHOOK HANDLERS ================================================
@@ -1151,9 +1201,14 @@ def webhook_handle():
                     next_state = current_state
                     model_resp_content = None
                     user_content = None
+                    # Kopiujemy kontekst, usuwając potencjalne klucze powrotu na start cyklu
                     context_data_to_save = context.copy()
+                    context_data_to_save.pop('return_to_state', None)
+                    context_data_to_save.pop('return_to_context', None)
+
                     trigger_gathering_ai_immediately = False
                     slot_verification_failed = False
+                    is_temporary_general_state = 'return_to_state' in context # Sprawdź, czy byliśmy w stanie tymczasowym
 
                     # === Obsługa wiadomości tekstowych ===
                     if message_data := event.get("message"):
@@ -1166,12 +1221,12 @@ def webhook_handle():
                             logging.info(f"    Otrzymano wiadomość tekstową (stan={current_state}): '{user_input_text[:100]}{'...' if len(user_input_text)>100 else ''}'")
                             if ENABLE_TYPING_DELAY:
                                 time.sleep(MIN_TYPING_DELAY_SECONDS * 0.5)
+                            # Ustalenie akcji na podstawie stanu
                             if current_state == STATE_SCHEDULING_ACTIVE:
                                 action = 'handle_scheduling'
                             elif current_state == STATE_GATHERING_INFO:
                                 action = 'handle_gathering'
-                                # Już nie używamy heurystyki tutaj
-                            else: # Stan GENERAL
+                            else: # STATE_GENERAL (może być normalny lub tymczasowy)
                                 action = 'handle_general'
                         elif attachments := message_data.get("attachments"):
                              att_type = attachments[0].get('type','nieznany')
@@ -1179,7 +1234,7 @@ def webhook_handle():
                              user_content = Content(role="user", parts=[Part.from_text(f"[Użytkownik wysłał załącznik typu: {att_type}]")])
                              msg_result = "Dziękuję, ale obecnie mogę przetwarzać tylko wiadomości tekstowe." if att_type not in ['sticker', 'image', 'audio', 'video', 'file'] else "Dzięki!"
                              action = 'send_info'
-                             next_state = current_state
+                             next_state = current_state # Pozostań w tym samym stanie
                         else:
                             logging.info("      Otrzymano pustą wiadomość lub nieobsługiwany typ.")
                             action = None
@@ -1194,7 +1249,7 @@ def webhook_handle():
                              msg_result = "Rozumiem, anulowano proces umawiania terminu. W czymś jeszcze mogę pomóc?"
                              action = 'send_info'
                              next_state = STATE_GENERAL
-                             context_data_to_save = {}
+                             context_data_to_save = {} # Wyczyść kontekst
                         elif current_state == STATE_SCHEDULING_ACTIVE:
                             action = 'handle_scheduling'
                         elif current_state == STATE_GATHERING_INFO:
@@ -1220,12 +1275,69 @@ def webhook_handle():
                         current_action = action
                         action = None # Reset
 
+                        # --- Obsługa Stanu Generalnego (w tym powrotu) ---
                         if current_action == 'handle_general':
                             logging.debug("  >> Wykonanie: handle_general")
                             if user_content and user_content.parts:
-                                response = get_gemini_general_response(sender_id, user_content.parts[0].text, history_for_gemini)
+                                # Sprawdź, czy to stan tymczasowy
+                                was_temporary_general = 'return_to_state' in context
+                                response = get_gemini_general_response(sender_id, user_content.parts[0].text, history_for_gemini, was_temporary_general)
+
                                 if response:
-                                    if INTENT_SCHEDULE_MARKER in response:
+                                    # Sprawdź, czy AI chce wrócić do poprzedniego stanu
+                                    if RETURN_TO_PREVIOUS in response and was_temporary_general:
+                                        logging.info(f"      AI Ogólne zasygnalizowało powrót [{RETURN_TO_PREVIOUS}]. Przywracanie stanu.")
+                                        msg_result = response.split(RETURN_TO_PREVIOUS, 1)[0].strip()
+                                        if msg_result: # Wyślij ostatnią wiadomość AI (np. podziękowanie)
+                                            send_message(sender_id, msg_result)
+                                            model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                            history_for_gemini.append(user_content) # Dodaj ostatnią wiadomość usera (np. "ok")
+                                            history_for_gemini.append(model_resp_content) # Dodaj ostatnią wiadomość AI
+                                        else: # Jeśli znacznik był sam
+                                             history_for_gemini.append(user_content) # Dodaj tylko wiadomość usera
+
+                                        user_content = None # Już przetworzone
+                                        model_resp_content = None # Już przetworzone
+
+                                        # Przywróć stan i kontekst
+                                        next_state = context.get('return_to_state', STATE_GENERAL) # Fallback na general
+                                        context_data_to_save = context.get('return_to_context', {})
+                                        logging.info(f"      Przywrócono stan: {next_state}")
+                                        logging.debug(f"      Przywrócony kontekst: {context_data_to_save}")
+
+                                        # Ustaw odpowiednią akcję do wykonania w następnej pętli
+                                        if next_state == STATE_SCHEDULING_ACTIVE:
+                                            action = 'handle_scheduling'
+                                            # Wywołaj AI planujące bez inputu, aby przypomniało kontekst
+                                            msg_result = "Wracając do ustalania terminu..." # Opcjonalna wiadomość
+                                            model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                            # Wyślij wiadomość od razu, bo nie będzie kolejnego wywołania AI w tej pętli
+                                            send_message(sender_id, msg_result)
+                                            # Dodaj do historii przed zapisem
+                                            # user_content już dodany, model_resp_content też
+                                            # Resetuj msg_result i model_resp_content, aby nie wysłać/zapisać podwójnie
+                                            msg_result = None
+                                            model_resp_content = None
+                                            # Nie ustawiamy trigger_gathering_ai_immediately
+
+                                        elif next_state == STATE_GATHERING_INFO:
+                                            action = 'handle_gathering'
+                                            trigger_gathering_ai_immediately = True # Wywołaj AI zbierające od razu
+                                            logging.debug("      Ustawiono trigger_gathering_ai_immediately po powrocie.")
+                                            # Nie wysyłamy wiadomości, AI zbierające samo zapyta
+                                            msg_result = None
+                                            model_resp_content = None
+                                        else:
+                                            logging.warning(f"      Nieoczekiwany stan powrotu: {next_state}. Przechodzę do STATE_GENERAL.")
+                                            next_state = STATE_GENERAL
+                                            context_data_to_save = {}
+                                            action = None # Zakończ pętlę
+
+                                        if action: # Jeśli ustawiono akcję powrotu
+                                            continue # Przejdź do następnej iteracji pętli
+
+                                    # Sprawdź, czy AI chce zainicjować planowanie
+                                    elif INTENT_SCHEDULE_MARKER in response:
                                         logging.info(f"      AI Ogólne wykryło intencję [{INTENT_SCHEDULE_MARKER}]. Przejście do planowania.")
                                         initial_resp_text = response.split(INTENT_SCHEDULE_MARKER, 1)[0].strip()
                                         if initial_resp_text:
@@ -1239,22 +1351,32 @@ def webhook_handle():
                                         model_resp_content = None
                                         next_state = STATE_SCHEDULING_ACTIVE
                                         action = 'handle_scheduling'
-                                        context_data_to_save = {}
+                                        context_data_to_save = {} # Wyczyść kontekst na start planowania
                                         logging.debug("      Przekierowanie do handle_scheduling...")
                                         continue
                                     else:
+                                        # Normalna odpowiedź AI w stanie generalnym (lub kontynuacja w tymczasowym)
                                         msg_result = response
                                         model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
-                                        next_state = STATE_GENERAL
-                                        context_data_to_save = {}
+                                        next_state = STATE_GENERAL # Pozostań w general
+                                        # Jeśli byliśmy w stanie tymczasowym, zachowaj flagi powrotu!
+                                        if was_temporary_general:
+                                            context_data_to_save['return_to_state'] = context.get('return_to_state')
+                                            context_data_to_save['return_to_context'] = context.get('return_to_context')
+                                        else:
+                                            # W normalnym stanie generalnym, upewnij się, że nie ma flag powrotu
+                                            context_data_to_save.pop('return_to_state', None)
+                                            context_data_to_save.pop('return_to_context', None)
                                 else:
+                                    # Błąd odpowiedzi AI
                                     msg_result = "Przepraszam, mam problem z przetworzeniem Twojej wiadomości."
                                     model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
                                     next_state = STATE_GENERAL
-                                    context_data_to_save = {}
+                                    context_data_to_save = {} # Wyczyść kontekst
                             else:
                                 logging.warning("handle_general wywołane bez user_content.")
 
+                        # --- Obsługa Stanu Planowania ---
                         elif current_action == 'handle_scheduling':
                             logging.debug("  >> Wykonanie: handle_scheduling")
                             try:
@@ -1271,7 +1393,26 @@ def webhook_handle():
                                     logging.info(f"      Znaleziono {len(free_ranges)} zakresów. Wywołanie AI Planującego...")
                                     current_input_text = user_content.parts[0].text if user_content and user_content.parts else None
                                     ai_response_text = get_gemini_scheduling_response(sender_id, history_for_gemini, current_input_text, free_ranges)
+
                                     if ai_response_text:
+                                        # Sprawdź, czy AI chce przełączyć do General
+                                        if ai_response_text.strip() == SWITCH_TO_GENERAL:
+                                            logging.info(f"      AI Planujące zasygnalizowało pytanie ogólne [{SWITCH_TO_GENERAL}]. Przełączanie.")
+                                            # Zapisz stan powrotu i obecny kontekst planowania
+                                            context_data_to_save['return_to_state'] = STATE_SCHEDULING_ACTIVE
+                                            # Zapisz tylko niezbędne dane kontekstu planowania (jeśli jakieś są)
+                                            # Na tym etapie kontekst planowania jest zwykle pusty, chyba że coś dodamy
+                                            scheduling_context_minimal = {} # Można tu dodać np. ostatnio proponowany zakres
+                                            context_data_to_save['return_to_context'] = scheduling_context_minimal
+                                            context_data_to_save['type'] = STATE_GENERAL # Ustaw nowy typ
+                                            next_state = STATE_GENERAL
+                                            action = 'handle_general' # Wykonaj general w następnej pętli
+                                            msg_result = None
+                                            model_resp_content = None
+                                            logging.debug(f"      Zapisano stan powrotu. Nowy stan: {next_state}. Kontekst: {context_data_to_save}")
+                                            continue
+
+                                        # Sprawdź, czy AI ustaliło termin
                                         iso_match = re.search(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}(.*?){re.escape(SLOT_ISO_MARKER_SUFFIX)}", ai_response_text)
                                         if iso_match:
                                             extracted_iso = iso_match.group(1).strip()
@@ -1339,17 +1480,20 @@ def webhook_handle():
                                                 next_state = STATE_SCHEDULING_ACTIVE
                                                 context_data_to_save = {}
                                         else:
-                                            logging.info("      AI Planujące kontynuuje rozmowę (brak znacznika ISO).")
+                                            # AI kontynuuje rozmowę planującą
+                                            logging.info("      AI Planujące kontynuuje rozmowę (brak znacznika ISO/SWITCH).")
                                             msg_result = ai_response_text
                                             model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
                                             next_state = STATE_SCHEDULING_ACTIVE
                                     else:
+                                        # Błąd odpowiedzi AI
                                         logging.error("!!! BŁĄD: AI Planujące nie zwróciło odpowiedzi.")
                                         msg_result = "Przepraszam, mam problem z systemem planowania. Spróbuj ponownie za chwilę."
                                         model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
                                         next_state = STATE_GENERAL
                                         context_data_to_save = {}
                                 else:
+                                    # Brak wolnych zakresów
                                     logging.warning(f"      Brak wolnych zakresów spełniających kryteria (w tym {MIN_BOOKING_LEAD_HOURS}h wyprzedzenia).")
                                     no_slots_msg = f"Niestety, wygląda na to, że nie mam żadnych wolnych terminów w ciągu najbliższych {MAX_SEARCH_DAYS} dni, które można zarezerwować z odpowiednim wyprzedzeniem ({MIN_BOOKING_LEAD_HOURS}h). Spróbuj ponownie później lub skontaktuj się z nami w inny sposób."
                                     msg_result = no_slots_msg
@@ -1363,6 +1507,7 @@ def webhook_handle():
                                 next_state = STATE_GENERAL
                                 context_data_to_save = {}
 
+                        # --- Obsługa Stanu Zbierania Informacji ---
                         elif current_action == 'handle_gathering':
                             logging.debug("  >> Wykonanie: handle_gathering")
                             try:
@@ -1370,18 +1515,31 @@ def webhook_handle():
                                 logging.debug(f"    Kontekst przekazywany do AI (Gathering): {known_info_for_ai}")
                                 current_input_text = user_content.parts[0].text if user_content and user_content.parts else None
                                 if trigger_gathering_ai_immediately:
-                                    logging.info("      Pierwsze wywołanie AI zbierającego (po ustaleniu terminu).")
-                                    current_input_text = None
+                                    logging.info("      Pierwsze wywołanie AI zbierającego (po ustaleniu terminu lub powrocie).")
+                                    current_input_text = None # Nie przekazuj inputu usera przy pierwszym wywołaniu
                                     trigger_gathering_ai_immediately = False
                                 ai_response_text = get_gemini_gathering_response(sender_id, history_for_gemini, current_input_text, known_info_for_ai)
 
                                 if ai_response_text:
+                                     # Sprawdź, czy AI chce przełączyć do General
+                                    if ai_response_text.strip() == SWITCH_TO_GENERAL:
+                                        logging.info(f"      AI Zbierające zasygnalizowało pytanie ogólne [{SWITCH_TO_GENERAL}]. Przełączanie.")
+                                        # Zapisz stan powrotu i obecny kontekst zbierania
+                                        context_data_to_save['return_to_state'] = STATE_GATHERING_INFO
+                                        context_data_to_save['return_to_context'] = context_data_to_save.copy() # Zapisz obecny kontekst
+                                        context_data_to_save['type'] = STATE_GENERAL # Ustaw nowy typ
+                                        next_state = STATE_GENERAL
+                                        action = 'handle_general' # Wykonaj general w następnej pętli
+                                        msg_result = None
+                                        model_resp_content = None
+                                        logging.debug(f"      Zapisano stan powrotu. Nowy stan: {next_state}. Kontekst: {context_data_to_save}")
+                                        continue
+
+                                    # Sprawdź, czy AI zakończyło zbieranie danych
                                     if INFO_GATHERED_MARKER in ai_response_text:
                                         logging.info(f"      AI Zbierające (Student Only) zasygnalizowało koniec [{INFO_GATHERED_MARKER}]. Próba parsowania danych i zapisu do arkusza.")
-
                                         response_parts = ai_response_text.split(INFO_GATHERED_MARKER, 1)
                                         ai_full_response_before_marker = response_parts[0].strip()
-
                                         final_gathering_msg_for_user = ""
                                         data_line_index = ai_full_response_before_marker.find("ZEBRANE_DANE_UCZNIA:")
                                         if data_line_index != -1:
@@ -1391,67 +1549,51 @@ def webhook_handle():
                                             else:
                                                 logging.warning("      Format odpowiedzi AI (Gathering) nie zawierał nowej linii po ZEBRANE_DANE_UCZNIA.")
                                                 final_gathering_msg_for_user = ""
-
                                         if not final_gathering_msg_for_user:
                                             final_gathering_msg_for_user = "Dziękuję za wszystkie informacje. Dane zostały zapisane. Wkrótce skontaktujemy się w celu potwierdzenia szczegółów. Proszę również oczekiwać na wiadomość dotyczącą płatności i dostępu do materiałów na profilu dedykowanym do komunikacji: https://www.facebook.com/profile.php?id=61576135251276"
                                             logging.warning("      Użyto domyślnej wiadomości końcowej dla użytkownika (Gathering).")
 
                                         # --- Parsowanie struktury ZEBRANE_DANE_UCZNIA ---
-                                        student_first_name = "Brak (Parse)"
-                                        student_last_name = "Brak (Parse)"
-                                        grade_info = "Brak (Parse)"
-                                        level_info = "Brak (Parse)"
+                                        student_first_name = "Brak (Parse)"; student_last_name = "Brak (Parse)"; grade_info = "Brak (Parse)"; level_info = "Brak (Parse)"
                                         data_regex = r"ZEBRANE_DANE_UCZNIA:\s*\[Imię:\s*(.*?),?\s*Nazwisko:\s*(.*?),?\s*KlasaInfo:\s*(.*?),?\s*Poziom:\s*(.*?)\]"
                                         match = re.search(data_regex, ai_full_response_before_marker, re.IGNORECASE | re.DOTALL)
-
                                         if match:
                                             logging.debug("      Znaleziono dopasowanie regex dla ZEBRANE_DANE_UCZNIA.")
                                             student_first_name = match.group(1).strip() if match.group(1) else student_first_name
                                             student_last_name = match.group(2).strip() if match.group(2) else student_last_name
                                             grade_info = match.group(3).strip() if match.group(3) else grade_info
                                             level_info = match.group(4).strip() if match.group(4) else level_info
-                                            if level_info.lower() == 'brak':
-                                                level_info = "Brak"
+                                            if level_info.lower() == 'brak': level_info = "Brak"
                                             logging.info(f"      Dane sparsowane z AI: Imię='{student_first_name}', Nazwisko='{student_last_name}', KlasaInfo='{grade_info}', Poziom='{level_info}'")
                                         else:
                                             logging.error("!!! BŁĄD: Nie udało się sparsować struktury ZEBRANE_DANE_UCZNIA z odpowiedzi AI! Używam danych z kontekstu jako fallback.")
                                             student_first_name = context_data_to_save.get('known_student_first_name', 'Brak (Fallback)')
                                             student_last_name = context_data_to_save.get('known_student_last_name', 'Brak (Fallback)')
-                                            grade_info = context_data_to_save.get('known_grade', 'Brak (Fallback)')
-                                            level_info = context_data_to_save.get('known_level', 'Brak (Fallback)')
+                                            grade_info = context_data_to_save.get('known_grade', 'Brak (Fallback)') # Może być nieaktualne
+                                            level_info = context_data_to_save.get('known_level', 'Brak (Fallback)') # Może być nieaktualne
                                         # -------------------------------------------
 
                                         try:
                                             # --- Przygotowanie danych do zapisu ---
-                                            proposed_iso = context_data_to_save.get('proposed_slot_iso')
-                                            dt_object = None
-                                            lesson_date_str = "Brak danych"
-                                            lesson_time_str = "Brak danych"
+                                            proposed_iso = context_data_to_save.get('proposed_slot_iso'); dt_object = None; lesson_date_str = "Brak danych"; lesson_time_str = "Brak danych"
                                             if proposed_iso:
                                                 try:
-                                                    dt_object = datetime.datetime.fromisoformat(proposed_iso)
-                                                    tz_sheet = _get_sheet_timezone()
-                                                    dt_object = dt_object.astimezone(tz_sheet) if dt_object.tzinfo else tz_sheet.localize(dt_object)
-                                                    lesson_date_str = dt_object.strftime('%Y-%m-%d')
-                                                    lesson_time_str = dt_object.strftime('%H:%M')
-                                                except Exception as dt_err:
-                                                    logging.error(f"Błąd formatowania daty {proposed_iso} do arkusza: {dt_err}")
-
-                                            parent_first_name = context_data_to_save.get('known_parent_first_name', 'Brak (API?)')
-                                            parent_last_name = context_data_to_save.get('known_parent_last_name', 'Brak (API?)')
-                                            school_type = extract_school_type(grade_info)
+                                                    dt_object = datetime.datetime.fromisoformat(proposed_iso); tz_sheet = _get_sheet_timezone(); dt_object = dt_object.astimezone(tz_sheet) if dt_object.tzinfo else tz_sheet.localize(dt_object); lesson_date_str = dt_object.strftime('%Y-%m-%d'); lesson_time_str = dt_object.strftime('%H:%M')
+                                                except Exception as dt_err: logging.error(f"Błąd formatowania daty {proposed_iso} do arkusza: {dt_err}")
+                                            parent_first_name = context_data_to_save.get('known_parent_first_name', 'Brak (API?)'); parent_last_name = context_data_to_save.get('known_parent_last_name', 'Brak (API?)')
+                                            class_desc, school_type = extract_school_type(grade_info) # Użyj nowej funkcji
 
                                             data_to_write = [
                                                 sender_id,           # 1. ID konta
                                                 parent_first_name,   # 2. Imie rodzica
                                                 parent_last_name,    # 3. Nazwisko rodzica
-                                                student_first_name,  # 4. Imie ucznia (ze sparsowanej odpowiedzi AI)
-                                                student_last_name,   # 5. Nazwisko ucznia (ze sparsowanej odpowiedzi AI)
+                                                student_first_name,  # 4. Imie ucznia
+                                                student_last_name,   # 5. Nazwisko ucznia
                                                 lesson_date_str,     # 6. Data
                                                 lesson_time_str,     # 7. Godzina
-                                                grade_info,          # 8. Klasa (pełna informacja ze sparsowanej odpowiedzi AI)
-                                                school_type,         # 9. Jaka szkoła (wyodrębniona)
-                                                level_info           # 10. Podstawa lub rozszerzenie (ze sparsowanej odpowiedzi AI)
+                                                class_desc,          # 8. Klasa (opis) <<< ZMIANA
+                                                school_type,         # 9. Jaka szkoła (typ) <<< ZMIANA
+                                                level_info           # 10. Podstawa lub rozszerzenie
                                             ]
                                             # --------------------------------------
 
@@ -1460,35 +1602,45 @@ def webhook_handle():
                                                 logging.info("      Zapis do Google Sheet zakończony sukcesem.")
                                                 msg_result = final_gathering_msg_for_user
                                                 model_resp_content = Content(role="model", parts=[Part.from_text(ai_full_response_before_marker)])
-                                                next_state = STATE_GENERAL
-                                                context_data_to_save = {}
+                                                next_state = STATE_GENERAL; context_data_to_save = {}
                                             else:
                                                 logging.error(f"!!! BŁĄD zapisu do Google Sheet: {write_error_msg}")
                                                 error_msg_user = f"Przepraszam, wystąpił problem podczas zapisywania danych ({write_error_msg}). Czy możemy spróbować ponownie uzupełnić informacje?"
-                                                msg_result = error_msg_user
-                                                model_resp_content = Content(role="model", parts=[Part.from_text(error_msg_user)])
-                                                next_state = STATE_GATHERING_INFO
+                                                msg_result = error_msg_user; model_resp_content = Content(role="model", parts=[Part.from_text(error_msg_user)]); next_state = STATE_GATHERING_INFO
                                         except Exception as sheet_write_err:
                                             logging.error(f"!!! KRYTYCZNY BŁĄD podczas przygotowania/zapisu do arkusza: {sheet_write_err}", exc_info=True)
-                                            msg_result = "Wystąpił krytyczny błąd podczas zapisywania danych. Proszę skontaktować się z nami bezpośrednio."
-                                            model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
-                                            next_state = STATE_GENERAL
-                                            context_data_to_save = {}
+                                            msg_result = "Wystąpił krytyczny błąd podczas zapisywania danych. Proszę skontaktować się z nami bezpośrednio."; model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)]); next_state = STATE_GENERAL; context_data_to_save = {}
                                     else:
+                                        # AI kontynuuje zbieranie informacji o uczniu
                                         logging.info("      AI Zbierające (Student Only) kontynuuje rozmowę.")
                                         msg_result = ai_response_text
                                         model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
                                         next_state = STATE_GATHERING_INFO
+                                        # Aktualizuj kontekst na podstawie sparsowanej odpowiedzi AI, jeśli to możliwe
+                                        # Prosta aktualizacja na podstawie ostatniej odpowiedzi AI (może nadpisać dobre dane, jeśli AI się pomyli)
+                                        # Lepsze byłoby bardziej inteligentne łączenie danych
+                                        temp_student_fn = "Brak"; temp_student_ln = "Brak"; temp_grade = "Brak"; temp_level = "Brak"
+                                        temp_data_regex = r"\[Imię:\s*(.*?),?\s*Nazwisko:\s*(.*?),?\s*KlasaInfo:\s*(.*?),?\s*Poziom:\s*(.*?)\]"
+                                        temp_match = re.search(temp_data_regex, ai_response_text, re.IGNORECASE | re.DOTALL)
+                                        if temp_match:
+                                            temp_student_fn = temp_match.group(1).strip() if temp_match.group(1) else temp_student_fn
+                                            temp_student_ln = temp_match.group(2).strip() if temp_match.group(2) else temp_student_ln
+                                            temp_grade = temp_match.group(3).strip() if temp_match.group(3) else temp_grade
+                                            temp_level = temp_match.group(4).strip() if temp_match.group(4) else temp_level
+                                            if temp_level.lower() == 'brak': temp_level = "Brak"
+                                            # Aktualizuj kontekst tylko jeśli AI podało jakąś wartość
+                                            if temp_student_fn != "Brak (Parse)": context_data_to_save['known_student_first_name'] = temp_student_fn
+                                            if temp_student_ln != "Brak (Parse)": context_data_to_save['known_student_last_name'] = temp_student_ln
+                                            if temp_grade != "Brak (Parse)": context_data_to_save['known_grade'] = temp_grade
+                                            if temp_level != "Brak (Parse)": context_data_to_save['known_level'] = temp_level
+                                            logging.debug(f"      Zaktualizowano kontekst na podstawie odpowiedzi AI: {context_data_to_save}")
+
                                 else:
-                                    # Obsługa błędu AI (w tym błędu SAFETY po retries)
                                     logging.error(f"!!! BŁĄD: AI Zbierające (Student Only) nie zwróciło poprawnej odpowiedzi. Odpowiedź: {ai_response_text}")
-                                    # Sprawdź, czy błąd to wiadomość o SAFETY zwrócona przez _call_gemini
-                                    if ai_response_text and "zasady bezpieczeństwa" in ai_response_text:
-                                        msg_result = ai_response_text # Przekaż wiadomość o błędzie bezpieczeństwa
-                                    else:
-                                        msg_result = "Przepraszam, wystąpił błąd systemowy podczas zbierania informacji. Spróbuj odpowiedzieć jeszcze raz."
+                                    if ai_response_text and "zasady bezpieczeństwa" in ai_response_text: msg_result = ai_response_text
+                                    else: msg_result = "Przepraszam, wystąpił błąd systemowy podczas zbierania informacji. Spróbuj odpowiedzieć jeszcze raz."
                                     model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
-                                    next_state = STATE_GATHERING_INFO # Pozostań w stanie, aby użytkownik mógł spróbować ponownie
+                                    next_state = STATE_GATHERING_INFO
                             except Exception as gather_err:
                                 logging.error(f"!!! KRYTYCZNY BŁĄD w bloku 'handle_gathering': {gather_err}", exc_info=True)
                                 msg_result = "Wystąpił nieoczekiwany błąd systemu podczas zbierania informacji. Przepraszam za problem."
@@ -1508,7 +1660,17 @@ def webhook_handle():
 
                     # --- WYSYŁANIE ODPOWIEDZI I ZAPIS STANU ---
                     final_context_to_save_dict = {'type': next_state, **context_data_to_save}
+                    # Zachowaj flagi powrotu, jeśli nadal jesteśmy w stanie generalnym tymczasowym
+                    if next_state == STATE_GENERAL and 'return_to_state' in context:
+                        final_context_to_save_dict['return_to_state'] = context['return_to_state']
+                        final_context_to_save_dict['return_to_context'] = context.get('return_to_context', {})
+                    # Usuń rolę przed porównaniem i zapisem
                     final_context_to_save_dict.pop('role', None)
+                    # Usuń klucze powrotu z porównywanego starego kontekstu, jeśli istniały
+                    context_for_comparison = context.copy()
+                    context_for_comparison.pop('return_to_state', None)
+                    context_for_comparison.pop('return_to_context', None)
+
 
                     if msg_result:
                         send_message(sender_id, msg_result)
@@ -1518,7 +1680,9 @@ def webhook_handle():
                     elif current_action:
                         logging.debug(f"    Akcja '{current_action}' zakończona bez wiadomości do wysłania użytkownikowi (może być OK).")
 
-                    should_save = bool(user_content) or bool(model_resp_content) or (context != final_context_to_save_dict) or slot_verification_failed
+                    # Porównaj stary kontekst (bez flag powrotu) z nowym finalnym kontekstem
+                    should_save = bool(user_content) or bool(model_resp_content) or (context_for_comparison != final_context_to_save_dict) or slot_verification_failed
+
                     if should_save:
                         history_to_save = list(history_for_gemini)
                         if user_content:
@@ -1563,7 +1727,7 @@ if __name__ == '__main__':
     logging.getLogger('urllib3.connectionpool').setLevel(logging.WARNING)
     logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
-    print("\n" + "="*60 + "\n--- START KONFIGURACJI BOTA (Odczyt Kalendarza + Weryfikacja + Info Ucznia (AI Parse) + Zapis Sheets + Parent API + Osobne Klucze + Kolejność Kolumn + Złagodzone Filtry Bezp.) ---")
+    print("\n" + "="*60 + "\n--- START KONFIGURACJI BOTA (Pełna Wersja z Przełączaniem Kontekstu) ---")
     print(f"  * Poziom logowania: {logging.getLevelName(log_level)}")
     print("-" * 60)
     print("  Konfiguracja Facebook:")
@@ -1588,7 +1752,7 @@ if __name__ == '__main__':
     print(f"    Projekt GCP: {PROJECT_ID}")
     print(f"    Lokalizacja GCP: {LOCATION}")
     print(f"    Model AI: {MODEL_ID}")
-    print(f"    Ustawienia bezpieczeństwa: {SAFETY_SETTINGS}") # Dodano logowanie ustawień bezpieczeństwa
+    print(f"    Ustawienia bezpieczeństwa: {SAFETY_SETTINGS}")
     if not gemini_model:
         print("!!! OSTRZEŻENIE: Model Gemini AI NIE załadowany poprawnie! Funkcjonalność AI niedostępna. !!!")
     else:
