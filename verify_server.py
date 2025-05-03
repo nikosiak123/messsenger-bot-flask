@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# verify_server.py (Wersja: Rozdzielone Osobowości + Pełne Przełączanie Kontekstu + Sprawdzanie Arkusza w get_free_time_ranges + Dwufazowy Zapis + Poprawki Stylu AI)
+# verify_server.py (Wersja: Rozdzielone Osobowości + Update/Append Arkusza + Dwufazowy Zapis + Poprawki)
 
 from flask import Flask, request, Response
 import os
@@ -80,8 +80,8 @@ SHEET_TIME_COLUMN_INDEX = 7      # G
 SHEET_GRADE_COLUMN_INDEX = 8     # H
 SHEET_SCHOOL_TYPE_COLUMN_INDEX = 9 # I
 SHEET_LEVEL_COLUMN_INDEX = 10    # J
-# Zakres do odczytu przy szukaniu wiersza (PSID, Data, Czas)
-SHEET_READ_RANGE_FOR_UPDATE = f"{SHEET_NAME}!A2:G" # Od A2 do G do końca
+# Zakres do odczytu przy szukaniu wiersza po PSID (tylko kolumna A)
+SHEET_READ_RANGE_FOR_PSID_SEARCH = f"{SHEET_NAME}!A2:A"
 
 # --- Znaczniki i Stany ---
 INTENT_SCHEDULE_MARKER = "[INTENT_SCHEDULE]"
@@ -427,7 +427,7 @@ def extract_school_type(grade_string):
             break
 
     # Jeśli typ szkoły nadal nieokreślony, ale jest numer klasy
-    if school_type == "Nieokreślona" and re.search(r'\d', grade_lower):
+    if school_type == "Nieokreślona" and re.search(r'\d', grade_lower): # Szukaj cyfry
          school_type = "Inna (z numerem klasy)"
 
     # Dodatkowe czyszczenie opisu klasy (np. usunięcie słowa "klasa")
@@ -743,8 +743,7 @@ def format_ranges_for_ai(ranges):
         "--- Dostępne Zakresy (Data YYYY-MM-DD, Dzień, Od Godziny HH:MM, Do Godziny HH:MM) ---"
     ]
     slots_added = 0
-    # Zmniejszamy limit, aby prompt był krótszy
-    max_slots_to_show = 15 # <<< ZMNIEJSZONO LIMIT
+    max_slots_to_show = 15 # Ograniczona liczba dla krótszego promptu
     sorted_ranges = sorted(ranges, key=lambda r: r['start'])
 
     for r in sorted_ranges:
@@ -760,7 +759,7 @@ def format_ranges_for_ai(ranges):
             formatted_lines.append(f"- {date_str}, {day_name}, od {start_time_str}, do {end_time_str}")
             slots_added += 1
             if slots_added >= max_slots_to_show:
-                formatted_lines.append("- ... (i potencjalnie więcej w dalszych dniach)") # Zmieniono tekst
+                formatted_lines.append("- ... (i potencjalnie więcej w dalszych dniach)")
                 break
 
     if slots_added == 0:
@@ -794,119 +793,123 @@ def get_sheets_service():
         logging.error(f"Błąd tworzenia usługi Google Sheets używając '{SHEETS_SERVICE_ACCOUNT_FILE}': {e}", exc_info=True)
         return None
 
-def write_to_sheet_phase1(psid, start_time):
-    """Zapisuje dane Fazy 1 (PSID, Data, Czas) do arkusza."""
+def find_row_by_psid(psid):
+    """Szuka wiersza w arkuszu na podstawie PSID i zwraca jego numer (zaczynając od 1)."""
     service = get_sheets_service()
     if not service:
-        return False, "Błąd połączenia z Google Sheets (Faza 1)."
+        logging.error("Błąd: Usługa arkuszy niedostępna do wyszukania PSID.")
+        return None
+
+    try:
+        read_range = SHEET_READ_RANGE_FOR_PSID_SEARCH # Czytaj tylko kolumnę A
+        logging.debug(f"Szukanie PSID {psid} w arkuszu '{SHEET_NAME}' w zakresie '{read_range}'")
+        result = service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID, range=read_range
+        ).execute()
+        values = result.get('values', [])
+
+        if not values:
+            logging.debug(f"Arkusz '{SHEET_NAME}' jest pusty lub nie zawiera PSID.")
+            return None
+
+        for i, row in enumerate(values):
+            if row and row[0].strip() == psid:
+                row_number = i + 2 # +2 bo indeksy API są 0-based, a dane zaczynają się od wiersza 2
+                logging.info(f"Znaleziono PSID {psid} w wierszu {row_number}.")
+                return row_number
+
+        logging.info(f"Nie znaleziono PSID {psid} w arkuszu.")
+        return None
+
+    except HttpError as error:
+        logging.error(f"Błąd HTTP API podczas szukania PSID: {error.resp.status} {error.resp.reason}", exc_info=True)
+        return None # Zwróć None w razie błędu
+    except Exception as e:
+        logging.error(f"Nieoczekiwany błąd podczas szukania PSID: {e}", exc_info=True)
+        return None
+
+def update_sheet_phase1(row_number, start_time):
+    """Aktualizuje tylko datę i godzinę w istniejącym wierszu."""
+    service = get_sheets_service()
+    if not service:
+        return False, "Błąd połączenia z Google Sheets (Aktualizacja Fazy 1)."
 
     tz = _get_sheet_timezone()
-    if start_time.tzinfo is None:
-        start_time = tz.localize(start_time)
-    else:
-        start_time = start_time.astimezone(tz)
+    if start_time.tzinfo is None: start_time = tz.localize(start_time)
+    else: start_time = start_time.astimezone(tz)
     date_str = start_time.strftime('%Y-%m-%d')
     time_str = start_time.strftime('%H:%M')
 
-    # Przygotuj wiersz z pustymi miejscami na przyszłe dane
-    # Kolejność zgodna z definicją kolumn
-    data_row = [
-        psid,          # 1. ID konta
-        "",            # 2. Imie rodzica (później)
-        "",            # 3. Nazwisko rodzica (później)
-        "",            # 4. Imie ucznia (później)
-        "",            # 5. Nazwisko ucznia (później)
-        date_str,      # 6. Data
-        time_str,      # 7. Godzina
-        "",            # 8. Klasa (później)
-        "",            # 9. Jaka szkoła (później)
-        ""             # 10. Poziom (później)
-    ]
+    # Przygotuj dane tylko dla kolumn Daty i Godziny
+    update_data = [date_str, time_str]
+
+    try:
+        # Określ zakres do aktualizacji (kolumny F i G w danym wierszu)
+        date_col_letter = chr(ord('A') + SHEET_DATE_COLUMN_INDEX - 1)
+        time_col_letter = chr(ord('A') + SHEET_TIME_COLUMN_INDEX - 1)
+        update_range = f"{SHEET_NAME}!{date_col_letter}{row_number}:{time_col_letter}{row_number}"
+        body = {'values': [update_data]}
+
+        logging.info(f"Próba aktualizacji Fazy 1 wiersza {row_number} w zakresie {update_range} danymi: {update_data}")
+        result = service.spreadsheets().values().update(
+            spreadsheetId=SPREADSHEET_ID, range=update_range,
+            valueInputOption='USER_ENTERED', body=body
+        ).execute()
+        logging.info(f"Zaktualizowano Faza 1 (data/czas) pomyślnie: {result.get('updatedCells')} komórek.")
+        return True, None
+
+    except HttpError as error:
+        error_details = f"Kod: {error.resp.status}, Powód: {error.resp.reason}"
+        logging.error(f"Błąd API Google Sheets podczas aktualizacji Fazy 1: {error}, Szczegóły: {error_details}", exc_info=True)
+        return False, f"Błąd aktualizacji Fazy 1 ({error_details})."
+    except Exception as e:
+        logging.error(f"Nieoczekiwany błąd Python podczas aktualizacji Fazy 1: {e}", exc_info=True)
+        return False, "Wewnętrzny błąd systemu podczas aktualizacji Fazy 1."
+
+
+def write_to_sheet_phase1(psid, start_time):
+    """Zapisuje dane Fazy 1 (PSID, Data, Czas) do arkusza (DOPISUJE NOWY WIERSZ)."""
+    service = get_sheets_service()
+    if not service:
+        return False, "Błąd połączenia z Google Sheets (Faza 1 - Append)."
+
+    tz = _get_sheet_timezone()
+    if start_time.tzinfo is None: start_time = tz.localize(start_time)
+    else: start_time = start_time.astimezone(tz)
+    date_str = start_time.strftime('%Y-%m-%d')
+    time_str = start_time.strftime('%H:%M')
+
+    data_row = [ psid, "", "", "", "", date_str, time_str, "", "", "" ]
 
     try:
         range_name = f"{SHEET_NAME}!A1" # Zakres do dopisywania
         body = {'values': [data_row]}
-        logging.info(f"Próba zapisu Fazy 1 do arkusza '{SPREADSHEET_ID}' -> '{SHEET_NAME}': {data_row}")
+        logging.info(f"Próba zapisu Fazy 1 (Append) do arkusza '{SPREADSHEET_ID}' -> '{SHEET_NAME}': {data_row}")
         result = service.spreadsheets().values().append(
             spreadsheetId=SPREADSHEET_ID, range=range_name,
             valueInputOption='USER_ENTERED', insertDataOption='INSERT_ROWS', body=body
         ).execute()
         updated_range = result.get('updates', {}).get('updatedRange', '')
-        logging.info(f"Zapisano Faza 1 pomyślnie w zakresie {updated_range}")
-        # Spróbuj wyciągnąć numer wiersza z zakresu (np. 'Arkusz1!A5:J5')
-        match = re.search(r'!A(\d+):', updated_range)
-        row_index = int(match.group(1)) if match else None
-        if row_index:
-            logging.info(f"Zapisano Faza 1 w wierszu: {row_index}")
-            return True, row_index # Zwróć sukces i numer wiersza
-        else:
-            logging.warning(f"Nie udało się wyodrębnić numeru wiersza z zakresu: {updated_range}")
-            return True, None # Sukces zapisu, ale brak numeru wiersza (mniej idealne)
-
+        logging.info(f"Zapisano Faza 1 (Append) pomyślnie w zakresie {updated_range}")
+        match = re.search(r'!A(\d+):', updated_range); row_index = int(match.group(1)) if match else None
+        if row_index: logging.info(f"Zapisano Faza 1 (Append) w wierszu: {row_index}"); return True, row_index
+        else: logging.warning(f"Nie udało się wyodrębnić numeru wiersza z zakresu: {updated_range}"); return True, None
     except HttpError as error:
-        error_details = f"Kod: {error.resp.status}, Powód: {error.resp.reason}"
-        logging.error(f"Błąd API Google Sheets podczas zapisu Fazy 1: {error}, Szczegóły: {error_details}", exc_info=True)
-        return False, f"Błąd zapisu Fazy 1 ({error_details})."
+        error_details = f"Kod: {error.resp.status}, Powód: {error.resp.reason}"; logging.error(f"Błąd API Google Sheets podczas zapisu Fazy 1 (Append): {error}, Szczegóły: {error_details}", exc_info=True); return False, f"Błąd zapisu Fazy 1 ({error_details})."
     except Exception as e:
-        logging.error(f"Nieoczekiwany błąd Python podczas zapisu Fazy 1: {e}", exc_info=True)
-        return False, "Wewnętrzny błąd systemu podczas zapisu Fazy 1."
+        logging.error(f"Nieoczekiwany błąd Python podczas zapisu Fazy 1 (Append): {e}", exc_info=True); return False, "Wewnętrzny błąd systemu podczas zapisu Fazy 1."
 
-def find_row_and_update_sheet(psid, start_time, student_data, sheet_row_index=None):
-    """Znajduje wiersz (używając indeksu jeśli dostępny, inaczej szuka) i aktualizuje go danymi Fazy 2."""
+def update_sheet_phase2(student_data, sheet_row_index):
+    """Aktualizuje wiersz danymi Fazy 2 (Rodzic, Uczeń, Klasa, Poziom)."""
     service = get_sheets_service()
     if not service:
         return False, "Błąd połączenia z Google Sheets (Faza 2)."
+    if sheet_row_index is None:
+        logging.error("Brak indeksu wiersza do aktualizacji Fazy 2.")
+        return False, "Brak informacji o wierszu do aktualizacji."
 
-    tz = _get_sheet_timezone()
-    if start_time.tzinfo is None:
-        start_time = tz.localize(start_time)
-    else:
-        start_time = start_time.astimezone(tz)
-    target_date_str = start_time.strftime('%Y-%m-%d')
-    target_time_str = start_time.strftime('%H:%M')
-
-    target_row_number = sheet_row_index # Użyj zapisanego indeksu, jeśli jest
-
-    # Jeśli nie mamy zapisanego indeksu wiersza, spróbuj go znaleźć
-    if target_row_number is None:
-        logging.warning(f"Brak zapisanego indeksu wiersza dla PSID {psid} i terminu {target_date_str} {target_time_str}. Próba znalezienia...")
-        try:
-            read_range = SHEET_READ_RANGE_FOR_UPDATE
-            result = service.spreadsheets().values().get(
-                spreadsheetId=SPREADSHEET_ID, range=read_range
-            ).execute()
-            values = result.get('values', [])
-            found_row_index = -1
-            # Pamiętaj, że indeksy API są 0-based, a numery wierszy w arkuszu od 1
-            # Dane zaczynają się od wiersza 2, więc pierwszy wiersz danych ma indeks 0 w `values`
-            # i odpowiada wierszowi 2 w arkuszu.
-            for i, row in enumerate(values):
-                # Sprawdź, czy wiersz ma wystarczającą liczbę kolumn do porównania
-                if len(row) >= max(SHEET_PSID_COLUMN_INDEX, SHEET_DATE_COLUMN_INDEX, SHEET_TIME_COLUMN_INDEX):
-                    row_psid = row[SHEET_PSID_COLUMN_INDEX - 1].strip()
-                    row_date = row[SHEET_DATE_COLUMN_INDEX - 1].strip()
-                    row_time = row[SHEET_TIME_COLUMN_INDEX - 1].strip()
-
-                    if row_psid == psid and row_date == target_date_str and row_time == target_time_str:
-                        target_row_number = i + 2 # +2 bo indeksy API są 0-based, a dane zaczynają się od wiersza 2
-                        logging.info(f"Znaleziono pasujący wiersz Fazy 1 w arkuszu: {target_row_number}")
-                        break
-                else:
-                    logging.warning(f"Pominięto zbyt krótki wiersz ({len(row)} kolumn) podczas szukania wiersza Fazy 1.")
-
-            if target_row_number is None: # Jeśli nadal nie znaleziono
-                 logging.error(f"Nie znaleziono wiersza Fazy 1 dla PSID {psid} i terminu {target_date_str} {target_time_str}. Nie można zaktualizować.")
-                 return False, "Nie znaleziono pierwotnego zapisu terminu."
-        except HttpError as error:
-            logging.error(f"Błąd API Google Sheets podczas szukania wiersza Fazy 1: {error}", exc_info=True)
-            return False, "Błąd odczytu arkusza przy szukaniu wiersza."
-        except Exception as e:
-            logging.error(f"Nieoczekiwany błąd Python podczas szukania wiersza Fazy 1: {e}", exc_info=True)
-            return False, "Wewnętrzny błąd systemu podczas szukania wiersza."
-
-    # Mamy numer wiersza (target_row_number), przygotuj aktualizację
     try:
-        parent_fn = student_data.get('parent_first_name', '') # Pobierz z danych przekazanych
+        parent_fn = student_data.get('parent_first_name', '')
         parent_ln = student_data.get('parent_last_name', '')
         student_fn = student_data.get('student_first_name', '')
         student_ln = student_data.get('student_last_name', '')
@@ -914,27 +917,31 @@ def find_row_and_update_sheet(psid, start_time, student_data, sheet_row_index=No
         level_info = student_data.get('level_info', '')
         class_desc, school_type = extract_school_type(grade_info)
 
-        # Przygotuj dane do aktualizacji - tylko kolumny od Rodzica do Poziomu
-        # Kolejność musi odpowiadać kolumnom od B do J
-        update_data = [
-            parent_fn, parent_ln, student_fn, student_ln,
-            # Nie aktualizujemy daty i czasu tutaj, tylko dane ucznia/rodzica
-            # Puste stringi dla kolumn F i G, aby nie nadpisać przypadkowo
-            # Jeśli chcesz nadpisać, wstaw tu target_date_str, target_time_str
-            "", "",
-            class_desc, school_type, level_info
-        ]
+        # Przygotuj dane do aktualizacji - kolumny B-E i H-J
+        update_data_row_part1 = [parent_fn, parent_ln, student_fn, student_ln] # Kolumny B-E
+        update_data_row_part2 = [class_desc, school_type, level_info] # Kolumny H-J
 
-        # Określ zakres do aktualizacji (od kolumny B do J w znalezionym wierszu)
-        update_range = f"{SHEET_NAME}!B{target_row_number}:J{target_row_number}"
-        body = {'values': [update_data]}
+        # Zakresy aktualizacji
+        update_range_part1 = f"{SHEET_NAME}!B{sheet_row_index}:E{sheet_row_index}"
+        update_range_part2 = f"{SHEET_NAME}!H{sheet_row_index}:J{sheet_row_index}"
 
-        logging.info(f"Próba aktualizacji Fazy 2 wiersza {target_row_number} w zakresie {update_range} danymi: {update_data}")
-        update_result = service.spreadsheets().values().update(
-            spreadsheetId=SPREADSHEET_ID, range=update_range,
-            valueInputOption='USER_ENTERED', body=body
+        body1 = {'values': [update_data_row_part1]}
+        body2 = {'values': [update_data_row_part2]}
+
+        logging.info(f"Próba aktualizacji Fazy 2 (cz. 1) wiersza {sheet_row_index} w zakresie {update_range_part1} danymi: {update_data_row_part1}")
+        result1 = service.spreadsheets().values().update(
+            spreadsheetId=SPREADSHEET_ID, range=update_range_part1,
+            valueInputOption='USER_ENTERED', body=body1
         ).execute()
-        logging.info(f"Zaktualizowano Faza 2 pomyślnie: {update_result.get('updatedCells')} komórek.")
+        logging.info(f"Zaktualizowano Faza 2 (cz. 1) pomyślnie: {result1.get('updatedCells')} komórek.")
+
+        logging.info(f"Próba aktualizacji Fazy 2 (cz. 2) wiersza {sheet_row_index} w zakresie {update_range_part2} danymi: {update_data_row_part2}")
+        result2 = service.spreadsheets().values().update(
+            spreadsheetId=SPREADSHEET_ID, range=update_range_part2,
+            valueInputOption='USER_ENTERED', body=body2
+        ).execute()
+        logging.info(f"Zaktualizowano Faza 2 (cz. 2) pomyślnie: {result2.get('updatedCells')} komórek.")
+
         return True, None
 
     except HttpError as error:
@@ -944,6 +951,7 @@ def find_row_and_update_sheet(psid, start_time, student_data, sheet_row_index=No
     except Exception as e:
         logging.error(f"Nieoczekiwany błąd Python podczas aktualizacji Fazy 2: {e}", exc_info=True)
         return False, "Wewnętrzny błąd systemu podczas aktualizacji Fazy 2."
+
 
 # =====================================================================
 # === FUNKCJE KOMUNIKACJI FB ==========================================
@@ -1259,8 +1267,7 @@ SYSTEM_INSTRUCTION_GATHERING = """Rozmawiasz z klientem. Twoim zadaniem jest zeb
 4.  **Prowadź rozmowę:** Zadawaj pytania dotyczące ucznia pojedynczo lub połącz kilka, jeśli brakuje więcej danych. Bądź miły i konwersacyjny. Potwierdzaj zrozumienie odpowiedzi użytkownika.
 5.  **Zakończ po zebraniu danych UCZNIA:** Kiedy uznasz, że masz już **wszystkie wymagane informacje o UCZNIU** (Imię, Nazwisko, Klasa+Szkoła, ewentualnie Poziom), Twoja ostatnia odpowiedź **MUSI** mieć następującą strukturę:
     a)  **DOKŁADNIE** linijka w formacie: `ZEBRANE_DANE_UCZNIA: [Imię: <imię>, Nazwisko: <nazwisko>, KlasaInfo: <pełna informacja o klasie i szkole np. 3 klasa liceum>, Poziom: <Podstawowy/Rozszerzony/brak>]` (Zastąp <...> zebranymi danymi. Jeśli poziom nie dotyczy lub nie został podany, wpisz "brak").
-    b)  **PO TEJ LINIJCE**, w nowej linii, standardowa wiadomość dla użytkownika: "Dobrze, dziękujemy za wszystkie informacje. Aby lekcja się odbyła prosimy jeszcze o potwierdzenie zajęć wysyłając wiadomość "POTWIERDZAM" na podany profil. Jest to profil także to dalszego kontaktu w sprawie zajęć: https://www.facebook.com/profile.php?id=61576135251276
-"
+    b)  **PO TEJ LINIJCE**, w nowej linii, standardowa wiadomość dla użytkownika: "Dobrze, dziękujemy za wszystkie informacje. Aby lekcja się odbyła prosimy jeszcze o potwierdzenie zajęć wysyłając wiadomość "POTWIERDZAM" na podany profil. Jest to profil także to dalszego kontaktu w sprawie zajęć: https://www.facebook.com/profile.php?id=61576135251276"
     c)  **NA SAMYM KOŃCU** całej odpowiedzi dodaj **DOKŁADNIE** znacznik: `{info_gathered_marker}`.
 6.  **NIE dodawaj znacznika ani struktury `ZEBRANE_DANE_UCZNIA:`**, jeśli nadal brakuje którejś z wymaganych informacji o uczniu. Kontynuuj zadawanie pytań.
 7.  **Pytania poza tematem:** Jeśli użytkownik zada pytanie **niezwiązane bezpośrednio ze zbieraniem danych ucznia** (np. o cenę, metodykę), **NIE ODPOWIADAJ na nie**. Zamiast tego, Twoja odpowiedź musi zawierać **TYLKO I WYŁĄCZNIE** znacznik: `{switch_marker}`. System przełączy się wtedy do trybu ogólnych odpowiedzi.
@@ -1268,7 +1275,7 @@ SYSTEM_INSTRUCTION_GATHERING = """Rozmawiasz z klientem. Twoim zadaniem jest zeb
 **Przykład poprawnej odpowiedzi końcowej:**
 ```
 ZEBRANE_DANE_UCZNIA: [Imię: Jan, Nazwisko: Kowalski, KlasaInfo: 2 klasa liceum, Poziom: Rozszerzony]
-Dobrze, dziękujemy za wszystkie informacje. Aby lekcja się odbyła prosimy jeszcze o potwierdzenie zajęć wysyłając wiadomość "POTWIERDZAM" na podany profil. Jest to profil także to dalszego kontaktu w sprawie zajęć: https://www.facebook.com/profile.php?id=61576135251276
+Dobrze, dziękujemy za wszystkie informacje. Aby lekcja się odbyła prosimy jeszcze o potwierdzenie zajęć wysyłając wiadomość "POTWIERDZAM" na podany profil. Jest to profil także to dalszego kontaktu w sprawie zajęć: https://www.facebook.com/profile.php?id=61576135251276[INFO_GATHERED]
 ```
 
 **Pamiętaj:** Kluczowe jest dokładne przestrzeganie formatu `ZEBRANE_DANE_UCZNIA: [...]` w przedostatniej linijce odpowiedzi końcowej. Znacznik `{switch_marker}` służy do przekazania obsługi pytania ogólnego.
@@ -1316,7 +1323,7 @@ SYSTEM_INSTRUCTION_GENERAL = """Jesteś przyjaznym, proaktywnym i profesjonalnym
 
 3.  **Prezentacja Ceny i Formatu:**
     *   Na podstawie zebranych informacji (klasa, typ szkoły, poziom), **ustal właściwą cenę** z cennika.
-    *   **Poinformuj klienta o cenie** za 60 minut lekcji dla danego poziomu, np. "Dla ucznia w [klasa] [typ szkoły] na poziomie [poziom] koszt zajęć wynosi [cena] zł za 60 minut."
+    *   **Poinformuj klienta o cenie** za 60 minut lekcji dla danego poziomu, np. "Dla ucznia w [klasa] [typ szkoły] na poziomie [poziom] koszt zajęć wynosi [cena] zł za 60 minut.".
     *   **Dodaj informację o formacie:** "Wszystkie zajęcia odbywają się wygodnie online przez platformę Microsoft Teams - wystarczy kliknąć w link, nie trzeba nic instalować."
 
 4.  **Zachęta do Umówienia Lekcji:**
@@ -1791,7 +1798,7 @@ def webhook_handle():
                                             if end_of_data_line != -1: final_gathering_msg_for_user = ai_full_response_before_marker[end_of_data_line:].strip()
                                             else: logging.warning("      Format odpowiedzi AI (Gathering) nie zawierał nowej linii po ZEBRANE_DANE_UCZNIA."); final_gathering_msg_for_user = ""
                                         if not final_gathering_msg_for_user:
-                                            final_gathering_msg_for_user = "Dziękuję za wszystkie informacje. Dane zostały zapisane. Wkrótce skontaktujemy się w celu potwierdzenia szczegółów. Proszę również oczekiwać na wiadomość dotyczącą płatności i dostępu do materiałów na profilu dedykowanym do komunikacji: https://www.facebook.com/profile.php?id=61576135251276"
+                                            final_gathering_msg_for_user = "Dobrze, dziękujemy za wszystkie informacje. Aby lekcja się odbyła prosimy jeszcze o potwierdzenie zajęć wysyłając wiadomość \"POTWIERDZAM\" na podany profil. Jest to profil także to dalszego kontaktu w sprawie zajęć: https://www.facebook.com/profile.php?id=61576135251276"
                                             logging.warning("      Użyto domyślnej wiadomości końcowej dla użytkownika (Gathering).")
 
                                         # --- Parsowanie struktury ZEBRANE_DANE_UCZNIA ---
