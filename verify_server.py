@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# verify_server.py (Wersja: Rozdzielone Osobowości + Sprawdzanie Arkusza w get_free_time_ranges + Dwufazowy Zapis + Uproszczony Scheduling)
+# verify_server.py (Wersja: Rozdzielone Osobowości + Sprawdzanie Arkusza w get_free_time_ranges + Dwufazowy Zapis + Poprawki - Bez Przełączania Kontekstu)
 
 from flask import Flask, request, Response
 import os
@@ -311,9 +311,12 @@ def save_history(user_psid, history, context_to_save=None):
              else:
                 logging.warning(f"Ostrz. [{user_psid}]: Pomijanie nieprawidłowego obiektu historii podczas zapisu: {type(msg)}")
         current_state_to_save = context_to_save.get('type', STATE_GENERAL) if context_to_save else STATE_GENERAL
-        # Zapisujemy kontekst tylko jeśli stan jest inny niż general lub zawiera informacje o powrocie (usunięto logikę powrotu)
+        # Zapisujemy kontekst tylko jeśli stan jest inny niż general (logika powrotu usunięta)
         if context_to_save and isinstance(context_to_save, dict) and current_state_to_save != STATE_GENERAL:
              context_copy = context_to_save.copy()
+             # Usuń klucze powrotu przed zapisem, jeśli przypadkiem zostały
+             context_copy.pop('return_to_state', None)
+             context_copy.pop('return_to_context', None)
              context_copy['role'] = 'system' # Dodaj rolę systemową do zapisu
              history_data.append(context_copy)
              logging.debug(f"[{user_psid}] Dodano kontekst {current_state_to_save} do zapisu: {context_copy}")
@@ -1313,8 +1316,7 @@ def get_gemini_scheduling_response(user_psid, history_for_scheduling_ai, current
             response_text = response_text.replace(INTENT_SCHEDULE_MARKER, "").strip()
         if INFO_GATHERED_MARKER in response_text:
             response_text = response_text.replace(INFO_GATHERED_MARKER, "").strip()
-        if SWITCH_TO_GENERAL in response_text: # Na wszelki wypadek, gdyby AI dodało
-            response_text = response_text.replace(SWITCH_TO_GENERAL, "").strip()
+        # Usunięto sprawdzanie SWITCH_TO_GENERAL
         return response_text
     else:
         logging.error(f"!!! [{user_psid}] Nie uzyskano odpowiedzi Gemini (Scheduling).")
@@ -1362,15 +1364,13 @@ def get_gemini_gathering_response(user_psid, history_for_gathering_ai, current_u
             response_text = response_text.replace(INTENT_SCHEDULE_MARKER, "").strip()
         if SLOT_ISO_MARKER_PREFIX in response_text:
             response_text = re.sub(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}.*?{re.escape(SLOT_ISO_MARKER_SUFFIX)}", "", response_text).strip()
-        if SWITCH_TO_GENERAL in response_text: # Na wszelki wypadek
-             response_text = response_text.replace(SWITCH_TO_GENERAL, "").strip()
+        # Usunięto sprawdzanie SWITCH_TO_GENERAL
         return response_text
     else:
         logging.error(f"!!! [{user_psid}] Nie uzyskano odpowiedzi Gemini (Gathering Info - Student Only).")
         # Zwróć wiadomość o błędzie, jeśli AI nie odpowiedziało
         return "Przepraszam, wystąpił błąd systemowy."
 
-# --- Funkcja AI: Ogólna rozmowa ---
 # --- Funkcja AI: Ogólna rozmowa ---
 def get_gemini_general_response(user_psid, current_user_message_text, history_for_general_ai):
     """Prowadzi ogólną rozmowę z AI."""
@@ -1394,15 +1394,12 @@ def get_gemini_general_response(user_psid, current_user_message_text, history_fo
             full_prompt.pop(2)
     response_text = _call_gemini(user_psid, full_prompt, GENERATION_CONFIG_DEFAULT, "General Conversation")
     if response_text:
-        # Nie sprawdzamy RETURN_TO_PREVIOUS, bo ta logika została usunięta
+        # Usunięto sprawdzanie RETURN_TO_PREVIOUS
         if SLOT_ISO_MARKER_PREFIX in response_text:
             response_text = re.sub(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}.*?{re.escape(SLOT_ISO_MARKER_SUFFIX)}", "", response_text).strip()
         if INFO_GATHERED_MARKER in response_text:
             response_text = response_text.replace(INFO_GATHERED_MARKER, "").strip()
-        # --- USUNIĘTO SPRAWDZANIE SWITCH_TO_GENERAL ---
-        # if SWITCH_TO_GENERAL in response_text:
-        #     response_text = response_text.replace(SWITCH_TO_GENERAL, "").strip()
-        # ---------------------------------------------
+        # Usunięto sprawdzanie SWITCH_TO_GENERAL
         # Sprawdzamy tylko INTENT_SCHEDULE_MARKER (który jest nadal potrzebny w tym stanie)
         # Znacznik INTENT_SCHEDULE jest obsługiwany w webhook_handle, więc go tu nie usuwamy.
         return response_text
@@ -1462,10 +1459,7 @@ def webhook_handle():
                     user_content = None
                     # Kopiujemy kontekst
                     context_data_to_save = context.copy()
-                    # Usuwamy flagi powrotu, bo logika została usunięta
-                    context_data_to_save.pop('return_to_state', None)
-                    context_data_to_save.pop('return_to_context', None)
-
+                    # Usunięto usuwanie flag powrotu
 
                     trigger_gathering_ai_immediately = False
                     slot_verification_failed = False
@@ -1530,7 +1524,7 @@ def webhook_handle():
 
                     # --- Pętla przetwarzania akcji (teraz prostsza) ---
                     loop_guard = 0
-                    while action and loop_guard < 2: # Zwykle wystarczy 1 iteracja, 2 dla bezpieczeństwa
+                    while action and loop_guard < 2: # Zwykle wystarczy 1 iteracja
                         loop_guard += 1
                         logging.debug(f"  >> Pętla akcji {loop_guard}/2 | Akcja: {action} | Stan wejściowy: {current_state} | Kontekst wej.: {context_data_to_save}")
                         current_action = action
@@ -1683,7 +1677,7 @@ def webhook_handle():
                                 logging.debug(f"    Kontekst przekazywany do AI (Gathering): {known_info_for_ai}")
                                 current_input_text = user_content.parts[0].text if user_content and user_content.parts else None
                                 if trigger_gathering_ai_immediately:
-                                    logging.info("      Pierwsze wywołanie AI zbierającego (po ustaleniu terminu lub powrocie).")
+                                    logging.info("      Pierwsze wywołanie AI zbierającego (po ustaleniu terminu).")
                                     current_input_text = None
                                     trigger_gathering_ai_immediately = False
                                 ai_response_text = get_gemini_gathering_response(sender_id, history_for_gemini, current_input_text, known_info_for_ai)
@@ -1795,6 +1789,7 @@ def webhook_handle():
                     elif current_action:
                         logging.debug(f"    Akcja '{current_action}' zakończona bez wiadomości do wysłania użytkownikowi (może być OK).")
 
+                    # Porównaj stary kontekst (bez flag powrotu) z nowym finalnym kontekstem
                     should_save = bool(user_content) or bool(model_resp_content) or (context_for_comparison != final_context_to_save_dict) or slot_verification_failed
 
                     if should_save:
