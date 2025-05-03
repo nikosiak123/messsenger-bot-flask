@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# verify_server.py (Wersja: Autonomiczne AI + Odczyt Kalendarza + Weryfikacja + Info Ucznia + Zapis Sheets + Parent API + Osobne Klucze API + Kolejność Kolumn + Typ Szkoły - PEP8 Style)
+# verify_server.py (Wersja: Autonomiczne AI + Odczyt Kalendarza + Weryfikacja + Info Ucznia (AI Parse) + Zapis Sheets + Parent API + Osobne Klucze + Kolejność Kolumn - PEP8 Style)
 
 from flask import Flask, request, Response
 import os
@@ -943,7 +943,7 @@ SYSTEM_INSTRUCTION_GENERAL = """Jesteś przyjaznym i pomocnym asystentem klienta
 """.format(intent_marker=INTENT_SCHEDULE_MARKER)
 
 
-# --- ZMODYFIKOWANA INSTRUKCJA GATHERING (AI ignoruje dane rodzica) ---
+# --- ZMODYFIKOWANA INSTRUKCJA GATHERING (AI potwierdza dane w strukturze) ---
 SYSTEM_INSTRUCTION_GATHERING = """Twoim zadaniem jest zebranie informacji wyłącznie o UCZNIU, potrzebnych do zapisu na korepetycje, po tym jak wstępnie ustalono termin. Dane rodzica zostaną pobrane automatycznie przez system.
 
 **Kontekst:**
@@ -952,25 +952,30 @@ SYSTEM_INSTRUCTION_GATHERING = """Twoim zadaniem jest zebranie informacji wyłą
 *   Informacje o UCZNIU już znane (mogą być puste):
     *   Imię ucznia: {known_student_first_name}
     *   Nazwisko ucznia: {known_student_last_name}
-    *   Klasa/Szkoła: {known_grade}
-    *   Poziom (dla liceum/technikum): {known_level}
+    *   Klasa/Szkoła: {known_grade} # Pełna informacja, np. "3 klasa liceum"
+    *   Poziom (dla liceum/technikum): {known_level} # Np. "Podstawowy", "Rozszerzony" lub "Brak"
 
 **Twoje zadania:**
 1.  **Przeanalizuj znane informacje o UCZNIU:** Sprawdź powyższe "Informacje o UCZNIU już znane" oraz historię rozmowy.
 2.  **Zapytaj o BRAKUJĄCE informacje dotyczące WYŁĄCZNIE UCZNIA:** Uprzejmie poproś użytkownika o podanie **tylko tych informacji o uczniu, których jeszcze brakuje**. Wymagane informacje to:
     *   **Pełne Imię i Nazwisko UCZNIA**.
-    *   **Klasa**, do której uczęszcza uczeń (np. "7 klasa podstawówki", "1 klasa liceum", "3 klasa technikum").
-    *   **Poziom nauczania** (podstawowy czy rozszerzony) - **zapytaj o to TYLKO jeśli z podanej klasy wynika, że jest to liceum lub technikum**.
+    *   **Klasa**, do której uczęszcza uczeń ORAZ **typ szkoły** (np. "7 klasa podstawówki", "1 klasa liceum", "3 klasa technikum"). Poproś o podanie obu informacji, jeśli brakuje.
+    *   **Poziom nauczania** (podstawowy czy rozszerzony) - **zapytaj o to TYLKO jeśli z podanej klasy/szkoły wynika, że jest to liceum lub technikum**.
 3.  **IGNORUJ i NIE PYTAJ o dane rodzica.** System zajmie się tym automatycznie.
-4.  **Prowadź rozmowę:** Zadawaj pytania dotyczące ucznia pojedynczo lub połącz kilka, jeśli brakuje więcej danych (np. "Poproszę jeszcze o imię i nazwisko ucznia oraz klasę."). Bądź miły i konwersacyjny.
-5.  **Zakończ po zebraniu danych UCZNIA:** Kiedy uznasz, że masz już **wszystkie wymagane informacje o UCZNIU** (Imię/Nazwisko Ucznia, Klasa i ewentualnie Poziom dla szkół średnich), Twoja ostatnia odpowiedź **MUSI** zawierać **DOKŁADNIE** następujący tekst (bez żadnych dodatków przed lub po, oprócz znacznika na końcu):
-    "Dziękuję za wszystkie informacje. Dane zostały zapisane. Wkrótce skontaktujemy się w celu potwierdzenia szczegółów. Proszę również oczekiwać na wiadomość dotyczącą płatności i dostępu do materiałów na profilu dedykowanym do komunikacji: https://www.facebook.com/profile.php?id=61576135251276"
-    Na samym końcu tej wiadomości dodaj **DOKŁADNIE** znacznik: `{info_gathered_marker}`.
-6.  **NIE dodawaj znacznika**, jeśli nadal brakuje którejś z wymaganych informacji o uczniu. Kontynuuj zadawanie pytań.
+4.  **Prowadź rozmowę:** Zadawaj pytania dotyczące ucznia pojedynczo lub połącz kilka, jeśli brakuje więcej danych. Bądź miły i konwersacyjny. Potwierdzaj zrozumienie odpowiedzi użytkownika.
+5.  **Zakończ po zebraniu danych UCZNIA:** Kiedy uznasz, że masz już **wszystkie wymagane informacje o UCZNIU** (Imię, Nazwisko, Klasa+Szkoła, ewentualnie Poziom), Twoja ostatnia odpowiedź **MUSI** mieć następującą strukturę:
+    a)  **DOKŁADNIE** linijka w formacie: `ZEBRANE_DANE_UCZNIA: [Imię: <imię>, Nazwisko: <nazwisko>, KlasaInfo: <pełna informacja o klasie i szkole np. 3 klasa liceum>, Poziom: <Podstawowy/Rozszerzony/brak>]` (Zastąp <...> zebranymi danymi. Jeśli poziom nie dotyczy lub nie został podany, wpisz "brak").
+    b)  **PO TEJ LINIJCE**, w nowej linii, standardowa wiadomość dla użytkownika: "Dziękuję za wszystkie informacje. Dane zostały zapisane. Wkrótce skontaktujemy się w celu potwierdzenia szczegółów. Proszę również oczekiwać na wiadomość dotyczącą płatności i dostępu do materiałów na profilu dedykowanym do komunikacji: https://www.facebook.com/profile.php?id=61576135251276"
+    c)  **NA SAMYM KOŃCU** całej odpowiedzi dodaj **DOKŁADNIE** znacznik: `{info_gathered_marker}`.
+6.  **NIE dodawaj znacznika ani struktury `ZEBRANE_DANE_UCZNIA:`**, jeśli nadal brakuje którejś z wymaganych informacji o uczniu. Kontynuuj zadawanie pytań.
 
-**Przykład:** Jeśli brak danych ucznia, zapytaj o imię, nazwisko i klasę ucznia. Jeśli użytkownik odpowie "Uczeń Jan Kowalski, 2 liceum", zapytaj następnie o poziom (podstawowy/rozszerzony). Dopiero po uzyskaniu tej informacji, wyślij **dokładnie** tekst z punktu 5 i dodaj na końcu znacznik `{info_gathered_marker}`.
+**Przykład poprawnej odpowiedzi końcowej:**
+```
+ZEBRANE_DANE_UCZNIA: [Imię: Jan, Nazwisko: Kowalski, KlasaInfo: 2 klasa liceum, Poziom: Rozszerzony]
+Dziękuję za wszystkie informacje. Dane zostały zapisane. Wkrótce skontaktujemy się w celu potwierdzenia szczegółów. Proszę również oczekiwać na wiadomość dotyczącą płatności i dostępu do materiałów na profilu dedykowanym do komunikacji: https://www.facebook.com/profile.php?id=61576135251276[INFO_GATHERED]
+```
 
-**Pamiętaj:** Skup się wyłącznie na zebraniu danych **ucznia**. Znacznik `{info_gathered_marker}` oznacza, że zebrałeś komplet danych ucznia i wysłałeś finalną informację o zapisie.
+**Pamiętaj:** Kluczowe jest dokładne przestrzeganie formatu `ZEBRANE_DANE_UCZNIA: [...]` w przedostatniej linijce odpowiedzi końcowej.
 """.format(
     proposed_slot_formatted="{proposed_slot_formatted}",
     known_student_first_name="{known_student_first_name}",
@@ -1161,29 +1166,7 @@ def webhook_handle():
                                 action = 'handle_scheduling'
                             elif current_state == STATE_GATHERING_INFO:
                                 action = 'handle_gathering'
-                                try: # Heurystyka dla danych ucznia
-                                    if not context_data_to_save.get('known_student_first_name') and not context_data_to_save.get('known_student_last_name'):
-                                        name_match = re.findall(r'\b[A-ZĄĆĘŁŃÓŚŹŻ][a-ząćęłńóśźż]+\s+[A-ZĄĆĘŁŃÓŚŹŻ][a-ząćęłńóśźż]+\b', user_input_text)
-                                        if name_match:
-                                            potential_name = name_match[0].split()
-                                            context_data_to_save['known_student_first_name'] = potential_name[0]
-                                            context_data_to_save['known_student_last_name'] = potential_name[1]
-                                            logging.debug(f"      Heurystyka: Potencjalne imię studenta z inputu: {potential_name[0]} {potential_name[1]}")
-                                    if not context_data_to_save.get('known_grade'):
-                                        grade_match = re.search(r'(?:klasa\s+(\d+)|(\d+)\s+klasa|(\d+)\s*(?:lo|liceum|tech|technikum))', user_input_text, re.IGNORECASE)
-                                        if grade_match:
-                                            num = grade_match.group(1) or grade_match.group(2) or grade_match.group(3)
-                                            context_data_to_save['known_grade'] = f"{num} klasa"
-                                            logging.debug(f"      Heurystyka: Potencjalna klasa z inputu: {context_data_to_save['known_grade']}")
-                                    if not context_data_to_save.get('known_level') and ('liceum' in context_data_to_save.get('known_grade','').lower() or 'technikum' in context_data_to_save.get('known_grade','').lower()):
-                                         if re.search(r'\b(rozszerzon[ya]|rozszerzenie)\b', user_input_text, re.IGNORECASE):
-                                             context_data_to_save['known_level'] = 'Rozszerzony'
-                                             logging.debug(f"      Heurystyka: Potencjalny poziom z inputu: Rozszerzony")
-                                         elif re.search(r'\b(podstawow[ya]|podstawa)\b', user_input_text, re.IGNORECASE):
-                                             context_data_to_save['known_level'] = 'Podstawowy'
-                                             logging.debug(f"      Heurystyka: Potencjalny poziom z inputu: Podstawowy")
-                                except Exception as parse_ex:
-                                    logging.warning(f"      Błąd podczas heurystycznego parsowania inputu w stanie GATHERING: {parse_ex}")
+                                # Już nie używamy heurystyki tutaj
                             else: # Stan GENERAL
                                 action = 'handle_general'
                         elif attachments := message_data.get("attachments"):
@@ -1387,14 +1370,55 @@ def webhook_handle():
                                     current_input_text = None
                                     trigger_gathering_ai_immediately = False
                                 ai_response_text = get_gemini_gathering_response(sender_id, history_for_gemini, current_input_text, known_info_for_ai)
+
                                 if ai_response_text:
                                     if INFO_GATHERED_MARKER in ai_response_text:
-                                        logging.info(f"      AI Zbierające (Student Only) zasygnalizowało koniec [{INFO_GATHERED_MARKER}]. Próba zapisu do arkusza.")
-                                        final_gathering_msg = ai_response_text.split(INFO_GATHERED_MARKER, 1)[0].strip()
-                                        if not final_gathering_msg:
-                                            final_gathering_msg = "Dziękuję za informacje. Dane zapisane."
+                                        logging.info(f"      AI Zbierające (Student Only) zasygnalizowało koniec [{INFO_GATHERED_MARKER}]. Próba parsowania danych i zapisu do arkusza.")
+
+                                        response_parts = ai_response_text.split(INFO_GATHERED_MARKER, 1)
+                                        ai_full_response_before_marker = response_parts[0].strip()
+
+                                        final_gathering_msg_for_user = ""
+                                        data_line_index = ai_full_response_before_marker.find("ZEBRANE_DANE_UCZNIA:")
+                                        if data_line_index != -1:
+                                            end_of_data_line = ai_full_response_before_marker.find('\n', data_line_index)
+                                            if end_of_data_line != -1:
+                                                final_gathering_msg_for_user = ai_full_response_before_marker[end_of_data_line:].strip()
+                                            else:
+                                                logging.warning("      Format odpowiedzi AI (Gathering) nie zawierał nowej linii po ZEBRANE_DANE_UCZNIA.")
+                                                final_gathering_msg_for_user = ""
+
+                                        if not final_gathering_msg_for_user:
+                                            final_gathering_msg_for_user = "Dziękuję za wszystkie informacje. Dane zostały zapisane. Wkrótce skontaktujemy się w celu potwierdzenia szczegółów. Proszę również oczekiwać na wiadomość dotyczącą płatności i dostępu do materiałów na profilu dedykowanym do komunikacji: https://www.facebook.com/profile.php?id=61576135251276"
+                                            logging.warning("      Użyto domyślnej wiadomości końcowej dla użytkownika (Gathering).")
+
+                                        # --- Parsowanie struktury ZEBRANE_DANE_UCZNIA ---
+                                        student_first_name = "Brak (Parse)"
+                                        student_last_name = "Brak (Parse)"
+                                        grade_info = "Brak (Parse)"
+                                        level_info = "Brak (Parse)"
+                                        data_regex = r"ZEBRANE_DANE_UCZNIA:\s*\[Imię:\s*(.*?),?\s*Nazwisko:\s*(.*?),?\s*KlasaInfo:\s*(.*?),?\s*Poziom:\s*(.*?)\]"
+                                        match = re.search(data_regex, ai_full_response_before_marker, re.IGNORECASE | re.DOTALL)
+
+                                        if match:
+                                            logging.debug("      Znaleziono dopasowanie regex dla ZEBRANE_DANE_UCZNIA.")
+                                            student_first_name = match.group(1).strip() if match.group(1) else student_first_name
+                                            student_last_name = match.group(2).strip() if match.group(2) else student_last_name
+                                            grade_info = match.group(3).strip() if match.group(3) else grade_info
+                                            level_info = match.group(4).strip() if match.group(4) else level_info
+                                            if level_info.lower() == 'brak':
+                                                level_info = "Brak"
+                                            logging.info(f"      Dane sparsowane z AI: Imię='{student_first_name}', Nazwisko='{student_last_name}', KlasaInfo='{grade_info}', Poziom='{level_info}'")
+                                        else:
+                                            logging.error("!!! BŁĄD: Nie udało się sparsować struktury ZEBRANE_DANE_UCZNIA z odpowiedzi AI! Używam danych z kontekstu jako fallback.")
+                                            student_first_name = context_data_to_save.get('known_student_first_name', 'Brak (Fallback)')
+                                            student_last_name = context_data_to_save.get('known_student_last_name', 'Brak (Fallback)')
+                                            grade_info = context_data_to_save.get('known_grade', 'Brak (Fallback)')
+                                            level_info = context_data_to_save.get('known_level', 'Brak (Fallback)')
+                                        # -------------------------------------------
+
                                         try:
-                                            # --- Przygotowanie danych do zapisu w NOWEJ KOLEJNOŚCI ---
+                                            # --- Przygotowanie danych do zapisu ---
                                             proposed_iso = context_data_to_save.get('proposed_slot_iso')
                                             dt_object = None
                                             lesson_date_str = "Brak danych"
@@ -1403,10 +1427,7 @@ def webhook_handle():
                                                 try:
                                                     dt_object = datetime.datetime.fromisoformat(proposed_iso)
                                                     tz_sheet = _get_sheet_timezone()
-                                                    if dt_object.tzinfo is None:
-                                                        dt_object = tz_sheet.localize(dt_object)
-                                                    else:
-                                                        dt_object = dt_object.astimezone(tz_sheet)
+                                                    dt_object = dt_object.astimezone(tz_sheet) if dt_object.tzinfo else tz_sheet.localize(dt_object)
                                                     lesson_date_str = dt_object.strftime('%Y-%m-%d')
                                                     lesson_time_str = dt_object.strftime('%H:%M')
                                                 except Exception as dt_err:
@@ -1414,31 +1435,27 @@ def webhook_handle():
 
                                             parent_first_name = context_data_to_save.get('known_parent_first_name', 'Brak (API?)')
                                             parent_last_name = context_data_to_save.get('known_parent_last_name', 'Brak (API?)')
-                                            student_first_name = context_data_to_save.get('known_student_first_name', 'Brak')
-                                            student_last_name = context_data_to_save.get('known_student_last_name', 'Brak')
-                                            grade_info = context_data_to_save.get('known_grade', 'Brak')
-                                            level_info = context_data_to_save.get('known_level', 'Brak')
                                             school_type = extract_school_type(grade_info)
 
                                             data_to_write = [
                                                 sender_id,           # 1. ID konta
                                                 parent_first_name,   # 2. Imie rodzica
                                                 parent_last_name,    # 3. Nazwisko rodzica
-                                                student_first_name,  # 4. Imie ucznia
-                                                student_last_name,   # 5. Nazwisko ucznia
+                                                student_first_name,  # 4. Imie ucznia (ze sparsowanej odpowiedzi AI)
+                                                student_last_name,   # 5. Nazwisko ucznia (ze sparsowanej odpowiedzi AI)
                                                 lesson_date_str,     # 6. Data
                                                 lesson_time_str,     # 7. Godzina
-                                                grade_info,          # 8. Klasa (pełna informacja)
+                                                grade_info,          # 8. Klasa (pełna informacja ze sparsowanej odpowiedzi AI)
                                                 school_type,         # 9. Jaka szkoła (wyodrębniona)
-                                                level_info           # 10. Podstawa lub rozszerzenie
+                                                level_info           # 10. Podstawa lub rozszerzenie (ze sparsowanej odpowiedzi AI)
                                             ]
-                                            # --------------------------------------------------------
+                                            # --------------------------------------
 
                                             write_ok, write_error_msg = write_to_sheet(SPREADSHEET_ID, SHEET_NAME, data_to_write)
                                             if write_ok:
                                                 logging.info("      Zapis do Google Sheet zakończony sukcesem.")
-                                                msg_result = final_gathering_msg
-                                                model_resp_content = Content(role="model", parts=[Part.from_text(final_gathering_msg)])
+                                                msg_result = final_gathering_msg_for_user
+                                                model_resp_content = Content(role="model", parts=[Part.from_text(ai_full_response_before_marker)]) # Zapisz pełną odp AI do historii
                                                 next_state = STATE_GENERAL
                                                 context_data_to_save = {}
                                             else:
@@ -1537,7 +1554,7 @@ if __name__ == '__main__':
     logging.getLogger('urllib3.connectionpool').setLevel(logging.WARNING)
     logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
-    print("\n" + "="*60 + "\n--- START KONFIGURACJI BOTA (Odczyt Kalendarza + Weryfikacja + Info Ucznia + Zapis Sheets + Parent API + Osobne Klucze + Kolejność Kolumn) ---")
+    print("\n" + "="*60 + "\n--- START KONFIGURACJI BOTA (Odczyt Kalendarza + Weryfikacja + Info Ucznia (AI Parse) + Zapis Sheets + Parent API + Osobne Klucze + Kolejność Kolumn) ---")
     print(f"  * Poziom logowania: {logging.getLevelName(log_level)}")
     print("-" * 60)
     print("  Konfiguracja Facebook:")
