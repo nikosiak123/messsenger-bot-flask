@@ -1,6 +1,8 @@
+
+```python
 # -*- coding: utf-8 -*-
 
-# verify_server.py (Wersja: Rozdzielone Osobowości + Sprawdzanie Arkusza w get_free_time_ranges + Dwufazowy Zapis + Poprawki - Bez Przełączania Kontekstu)
+# verify_server.py (Wersja: Rozdzielone Osobowości + Sprawdzanie Arkusza w get_free_time_ranges + Dwufazowy Zapis + Poprawki + Poprawka Powrotu Scheduling + Poprawka Pustej Odp.)
 
 from flask import Flask, request, Response
 import os
@@ -88,9 +90,8 @@ INTENT_SCHEDULE_MARKER = "[INTENT_SCHEDULE]"
 SLOT_ISO_MARKER_PREFIX = "[SLOT_ISO:"
 SLOT_ISO_MARKER_SUFFIX = "]"
 INFO_GATHERED_MARKER = "[INFO_GATHERED]"
-# Usunięto znaczniki przełączania
-# SWITCH_TO_GENERAL = "[SWITCH_TO_GENERAL]"
-# RETURN_TO_PREVIOUS = "[RETURN_TO_PREVIOUS]"
+SWITCH_TO_GENERAL = "[SWITCH_TO_GENERAL]" # Potrzebny do instrukcji AI
+RETURN_TO_PREVIOUS = "[RETURN_TO_PREVIOUS]" # Potrzebny do instrukcji AI
 
 STATE_GENERAL = "general"
 STATE_SCHEDULING_ACTIVE = "scheduling_active"
