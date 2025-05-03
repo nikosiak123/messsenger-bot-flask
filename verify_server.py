@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# verify_server.py (Wersja: Autonomiczne AI + Odczyt Kalendarza + Weryfikacja + Info Ucznia (AI Parse) + Zapis Sheets + Parent API + Osobne Klucze + Kolejność Kolumn - PEP8 Style)
+# verify_server.py (Wersja: Autonomiczne AI + Odczyt Kalendarza + Weryfikacja + Info Ucznia (AI Parse) + Zapis Sheets + Parent API + Osobne Klucze + Kolejność Kolumn + Złagodzone Filtry Bezp. - PEP8 Style)
 
 from flask import Flask, request, Response
 import os
@@ -90,12 +90,12 @@ GENERATION_CONFIG_DEFAULT = GenerationConfig(
     temperature=0.7, top_p=0.95, top_k=40, max_output_tokens=1024,
 )
 
-# --- Bezpieczeństwo AI ---
+# --- Bezpieczeństwo AI (Złagodzone dla Info Gathering) ---
 SAFETY_SETTINGS = [
-    SafetySetting(category=HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE),
-    SafetySetting(category=HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE),
-    SafetySetting(category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE),
-    SafetySetting(category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE),
+    SafetySetting(category=HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH), # Zmieniono z MEDIUM_AND_ABOVE
+    SafetySetting(category=HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE), # Bez zmian
+    SafetySetting(category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH), # Zmieniono z MEDIUM_AND_ABOVE
+    SafetySetting(category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE), # Na razie bez zmian
 ]
 
 # --- Inicjalizacja Zmiennych Globalnych ---
@@ -829,23 +829,23 @@ def _call_gemini(user_psid, prompt_history, generation_config, task_name, max_re
         logging.debug(f"    Próba {attempt}/{max_retries} wywołania Gemini ({task_name})...")
         try:
             _simulate_typing(user_psid, MIN_TYPING_DELAY_SECONDS * 0.8)
-            response = gemini_model.generate_content(prompt_history, generation_config=generation_config, safety_settings=SAFETY_SETTINGS)
+            response = gemini_model.generate_content(prompt_history, generation_config=generation_config, safety_settings=SAFETY_SETTINGS) # Używa globalnych SAFETY_SETTINGS
             if response and response.candidates:
                 candidate = response.candidates[0]
                 finish_reason = candidate.finish_reason
                 if finish_reason != 1:
                     safety_ratings = candidate.safety_ratings
                     logging.warning(f"[{user_psid}] Gemini ({task_name}) ZAKOŃCZONE NIEPRAWIDŁOWO! Powód: {finish_reason.name} ({finish_reason.value}). Safety Ratings: {safety_ratings}")
-                    if finish_reason in [3, 4] and attempt < max_retries:
+                    if finish_reason in [3, 4] and attempt < max_retries: # SAFETY lub RECITATION
                         logging.warning(f"    Ponawianie ({attempt}/{max_retries}) z powodu blokady...")
                         time.sleep(1.5 * attempt)
                         continue
                     else:
                         logging.error(f"!!! [{user_psid}] Gemini ({task_name}) nieudane po blokadzie lub innym błędzie.")
                         if finish_reason == 3:
-                            return "Przepraszam, nie mogę przetworzyć tej prośby ze względu na zasady bezpieczeństwa."
+                            return "Przepraszam, nie mogę przetworzyć tej prośby ze względu na zasady bezpieczeństwa." # Zwróć generyczną wiadomość o błędzie bezpieczeństwa
                         else:
-                            return "Wystąpił problem z generowaniem odpowiedzi."
+                            return "Wystąpił problem z generowaniem odpowiedzi." # Inny błąd
                 if candidate.content and candidate.content.parts:
                     generated_text = "".join(part.text for part in candidate.content.parts if hasattr(part, 'text')).strip()
                     if generated_text:
@@ -880,7 +880,11 @@ def _call_gemini(user_psid, prompt_history, generation_config, task_name, max_re
             logging.warning(f"    Problem z odpowiedzią Gemini ({task_name}). Oczekiwanie przed ponowieniem ({attempt+1}/{max_retries})...")
             time.sleep(1.5 * attempt)
     logging.error(f"!!! KRYTYCZNY BŁĄD [{user_psid}] Gemini ({task_name}) - Nie udało się uzyskać poprawnej odpowiedzi po {max_retries} próbach.")
-    return None
+    # Zwróć None lub specyficzną wiadomość błędu, jeśli wszystkie próby zawiodły
+    # W przypadku błędu SAFETY po wszystkich próbach, zwracamy wiadomość z kroku 5
+    if finish_reason == 3:
+        return "Przepraszam, nie mogę przetworzyć tej prośby ze względu na zasady bezpieczeństwa."
+    return None # Ogólny błąd po wszystkich próbach
 
 # =====================================================================
 # === INSTRUKCJE SYSTEMOWE I GŁÓWNE FUNKCJE AI ========================
@@ -1455,7 +1459,7 @@ def webhook_handle():
                                             if write_ok:
                                                 logging.info("      Zapis do Google Sheet zakończony sukcesem.")
                                                 msg_result = final_gathering_msg_for_user
-                                                model_resp_content = Content(role="model", parts=[Part.from_text(ai_full_response_before_marker)]) # Zapisz pełną odp AI do historii
+                                                model_resp_content = Content(role="model", parts=[Part.from_text(ai_full_response_before_marker)])
                                                 next_state = STATE_GENERAL
                                                 context_data_to_save = {}
                                             else:
@@ -1476,10 +1480,15 @@ def webhook_handle():
                                         model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
                                         next_state = STATE_GATHERING_INFO
                                 else:
-                                    logging.error("!!! BŁĄD: AI Zbierające (Student Only) nie zwróciło odpowiedzi.")
-                                    msg_result = "Przepraszam, wystąpił błąd systemowy. Spróbuj odpowiedzieć jeszcze raz."
+                                    # Obsługa błędu AI (w tym błędu SAFETY po retries)
+                                    logging.error(f"!!! BŁĄD: AI Zbierające (Student Only) nie zwróciło poprawnej odpowiedzi. Odpowiedź: {ai_response_text}")
+                                    # Sprawdź, czy błąd to wiadomość o SAFETY zwrócona przez _call_gemini
+                                    if ai_response_text and "zasady bezpieczeństwa" in ai_response_text:
+                                        msg_result = ai_response_text # Przekaż wiadomość o błędzie bezpieczeństwa
+                                    else:
+                                        msg_result = "Przepraszam, wystąpił błąd systemowy podczas zbierania informacji. Spróbuj odpowiedzieć jeszcze raz."
                                     model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
-                                    next_state = STATE_GATHERING_INFO
+                                    next_state = STATE_GATHERING_INFO # Pozostań w stanie, aby użytkownik mógł spróbować ponownie
                             except Exception as gather_err:
                                 logging.error(f"!!! KRYTYCZNY BŁĄD w bloku 'handle_gathering': {gather_err}", exc_info=True)
                                 msg_result = "Wystąpił nieoczekiwany błąd systemu podczas zbierania informacji. Przepraszam za problem."
@@ -1554,7 +1563,7 @@ if __name__ == '__main__':
     logging.getLogger('urllib3.connectionpool').setLevel(logging.WARNING)
     logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
-    print("\n" + "="*60 + "\n--- START KONFIGURACJI BOTA (Odczyt Kalendarza + Weryfikacja + Info Ucznia (AI Parse) + Zapis Sheets + Parent API + Osobne Klucze + Kolejność Kolumn) ---")
+    print("\n" + "="*60 + "\n--- START KONFIGURACJI BOTA (Odczyt Kalendarza + Weryfikacja + Info Ucznia (AI Parse) + Zapis Sheets + Parent API + Osobne Klucze + Kolejność Kolumn + Złagodzone Filtry Bezp.) ---")
     print(f"  * Poziom logowania: {logging.getLevelName(log_level)}")
     print("-" * 60)
     print("  Konfiguracja Facebook:")
@@ -1579,6 +1588,7 @@ if __name__ == '__main__':
     print(f"    Projekt GCP: {PROJECT_ID}")
     print(f"    Lokalizacja GCP: {LOCATION}")
     print(f"    Model AI: {MODEL_ID}")
+    print(f"    Ustawienia bezpieczeństwa: {SAFETY_SETTINGS}") # Dodano logowanie ustawień bezpieczeństwa
     if not gemini_model:
         print("!!! OSTRZEŻENIE: Model Gemini AI NIE załadowany poprawnie! Funkcjonalność AI niedostępna. !!!")
     else:
