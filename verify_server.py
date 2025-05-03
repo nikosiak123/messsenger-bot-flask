@@ -1,5 +1,3 @@
-
-```python
 # -*- coding: utf-8 -*-
 
 # verify_server.py (Wersja: Rozdzielone Osobowości + Sprawdzanie Arkusza w get_free_time_ranges + Dwufazowy Zapis + Poprawki + Poprawka Powrotu Scheduling + Poprawka Pustej Odp.)
