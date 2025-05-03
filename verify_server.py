@@ -1,6 +1,3 @@
-Jasne, oto pełny kod ostatniej wersji, która wykorzystuje rozdzielone osobowości AI, logikę przełączania kontekstu, osobne klucze API, uwzględnia zajętość z Arkusza Google już na etapie generowania wolnych terminów, realizuje dwufazowy zapis do arkusza i ma poprawioną składnię:
-
-```python
 # -*- coding: utf-8 -*-
 
 # verify_server.py (Wersja: Rozdzielone Osobowości + Przełączanie Kontekstu + Sprawdzanie Arkusza w get_free_time_ranges + Dwufazowy Zapis + Poprawki)
