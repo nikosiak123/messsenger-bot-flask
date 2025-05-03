@@ -491,65 +491,84 @@ def parse_event_time(event_time_data, default_tz):
         return None
 
 def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
-    """Pobiera listę wolnych zakresów czasowych z kalendarza, filtrując je wg 24h wyprzedzenia."""
-    service = get_calendar_service()
+    """Pobiera listę wolnych zakresów czasowych z kalendarza ORAZ arkusza, filtrując je."""
+    service_cal = get_calendar_service() # Usługa kalendarza
     tz = _get_calendar_timezone()
-    if not service:
+    if not service_cal:
         logging.error("Błąd: Usługa kalendarza niedostępna do pobrania wolnych terminów.")
-        return []
-    if start_datetime.tzinfo is None:
-        start_datetime = tz.localize(start_datetime)
-    else:
-        start_datetime = start_datetime.astimezone(tz)
-    if end_datetime.tzinfo is None:
-        end_datetime = tz.localize(end_datetime)
-    else:
-        end_datetime = end_datetime.astimezone(tz)
+        return [] # Nie możemy kontynuować bez kalendarza
+
+    # Upewnij się, że daty są świadome strefy czasowej kalendarza
+    if start_datetime.tzinfo is None: start_datetime = tz.localize(start_datetime)
+    else: start_datetime = start_datetime.astimezone(tz)
+    if end_datetime.tzinfo is None: end_datetime = tz.localize(end_datetime)
+    else: end_datetime = end_datetime.astimezone(tz)
+
     now = datetime.datetime.now(tz)
     start_datetime = max(start_datetime, now)
     if start_datetime >= end_datetime:
         logging.info(f"Zakres wyszukiwania [{start_datetime:%Y-%m-%d %H:%M} - {end_datetime:%Y-%m-%d %H:%M}] jest nieprawidłowy lub całkowicie w przeszłości.")
         return []
-    logging.info(f"Szukanie wolnych zakresów w '{calendar_id}' od {start_datetime:%Y-%m-%d %H:%M %Z} do {end_datetime:%Y-%m-%d %H:%M %Z}")
+
+    logging.info(f"Szukanie wolnych zakresów w '{calendar_id}' ORAZ arkuszu od {start_datetime:%Y-%m-%d %H:%M %Z} do {end_datetime:%Y-%m-%d %H:%M %Z}")
+
+    # --- Krok 1: Pobierz zajęte sloty z Kalendarza Google ---
+    busy_times_calendar = []
     try:
         body = {"timeMin": start_datetime.isoformat(), "timeMax": end_datetime.isoformat(), "timeZone": CALENDAR_TIMEZONE, "items": [{"id": calendar_id}]}
-        freebusy_result = service.freebusy().query(body=body).execute()
+        freebusy_result = service_cal.freebusy().query(body=body).execute()
         calendar_data = freebusy_result.get('calendars', {}).get(calendar_id, {})
         if 'errors' in calendar_data:
-             for error in calendar_data['errors']:
-                 logging.error(f"Błąd API Freebusy dla kalendarza {calendar_id}: {error.get('reason')} - {error.get('message')}")
-             if any(e.get('reason') == 'notFound' or e.get('reason') == 'forbidden' for e in calendar_data['errors']):
-                 return []
+             for error in calendar_data['errors']: logging.error(f"Błąd API Freebusy dla kalendarza {calendar_id}: {error.get('reason')} - {error.get('message')}")
+             if any(e.get('reason') == 'notFound' or e.get('reason') == 'forbidden' for e in calendar_data['errors']): return [] # Krytyczny błąd kalendarza
         busy_times_raw = calendar_data.get('busy', [])
-        busy_times = []
         for busy_slot in busy_times_raw:
-            start_str = busy_slot.get('start')
-            end_str = busy_slot.get('end')
+            start_str = busy_slot.get('start'); end_str = busy_slot.get('end')
             if isinstance(start_str, str) and isinstance(end_str, str):
-                busy_start = parse_event_time({'dateTime': start_str}, tz)
-                busy_end = parse_event_time({'dateTime': end_str}, tz)
+                busy_start = parse_event_time({'dateTime': start_str}, tz); busy_end = parse_event_time({'dateTime': end_str}, tz)
                 if busy_start and busy_end and busy_start < busy_end:
-                    busy_start_clipped = max(busy_start, start_datetime)
-                    busy_end_clipped = min(busy_end, end_datetime)
-                    if busy_start_clipped < busy_end_clipped:
-                        busy_times.append({'start': busy_start_clipped, 'end': busy_end_clipped})
-                else:
-                    logging.warning(f"Ostrz.: Pominięto nieprawidłowy lub niesparsowany zajęty czas: start={start_str}, end={end_str}")
-            else:
-                 logging.warning(f"Ostrz.: Pominięto zajęty slot o nieoczekiwanej strukturze danych: {busy_slot}")
-    except HttpError as error:
-        logging.error(f'Błąd HTTP API Freebusy: {error.resp.status} {error.resp.reason}', exc_info=True)
-        return []
-    except Exception as e:
-        logging.error(f"Nieoczekiwany błąd podczas zapytania Freebusy: {e}", exc_info=True)
-        return []
-    busy_times.sort(key=lambda x: x['start'])
+                    busy_start_clipped = max(busy_start, start_datetime); busy_end_clipped = min(busy_end, end_datetime)
+                    if busy_start_clipped < busy_end_clipped: busy_times_calendar.append({'start': busy_start_clipped, 'end': busy_end_clipped})
+                else: logging.warning(f"Ostrz.: Pominięto nieprawidłowy lub niesparsowany zajęty czas z kalendarza: start={start_str}, end={end_str}")
+            else: logging.warning(f"Ostrz.: Pominięto zajęty slot z kalendarza o nieoczekiwanej strukturze danych: {busy_slot}")
+    except HttpError as error: logging.error(f'Błąd HTTP API Freebusy: {error.resp.status} {error.resp.reason}', exc_info=True); return []
+    except Exception as e: logging.error(f"Nieoczekiwany błąd podczas zapytania Freebusy: {e}", exc_info=True); return []
+    logging.info(f"Znaleziono {len(busy_times_calendar)} zajętych slotów w Kalendarzu Google.")
+
+    # --- Krok 2: Pobierz zajęte sloty z Arkusza Google ---
+    busy_times_sheet = get_sheet_booked_slots(SPREADSHEET_ID, SHEET_NAME, start_datetime, end_datetime)
+    # Upewnij się, że sloty z arkusza są w tej samej strefie czasowej co kalendarzowe (na potrzeby sortowania/łączenia)
+    busy_times_sheet_cal_tz = []
+    for slot in busy_times_sheet:
+        try:
+            start_cal_tz = slot['start'].astimezone(tz)
+            end_cal_tz = slot['end'].astimezone(tz)
+            busy_times_sheet_cal_tz.append({'start': start_cal_tz, 'end': end_cal_tz})
+        except Exception as tz_err:
+            logging.warning(f"Błąd konwersji strefy czasowej dla slotu z arkusza {slot}: {tz_err}")
+
+
+    # --- Krok 3: Połącz, posortuj i złącz wszystkie zajęte sloty ---
+    all_busy_times = busy_times_calendar + busy_times_sheet_cal_tz
+    if not all_busy_times:
+        logging.info("Brak zajętych slotów w kalendarzu i arkuszu. Cały zakres jest potencjalnie wolny (z uwzględnieniem filtrów).")
+    else:
+        all_busy_times.sort(key=lambda x: x['start'])
+        logging.debug(f"Łączna liczba zajętych slotów (Kalendarz + Arkusz) przed złączeniem: {len(all_busy_times)}")
+
     merged_busy_times = []
-    for busy in busy_times:
+    for busy in all_busy_times:
+        # Sprawdź poprawność typu przed dostępem do kluczy
+        if not isinstance(busy, dict) or 'start' not in busy or 'end' not in busy:
+            logging.warning(f"Pominięto nieprawidłowy wpis w all_busy_times: {busy}")
+            continue
         if not merged_busy_times or busy['start'] > merged_busy_times[-1]['end']:
             merged_busy_times.append(busy)
         else:
             merged_busy_times[-1]['end'] = max(merged_busy_times[-1]['end'], busy['end'])
+    logging.info(f"Liczba zajętych slotów po złączeniu: {len(merged_busy_times)}")
+
+    # --- Krok 4: Oblicz wolne zakresy (odwrócenie zajętych) ---
     free_ranges = []
     current_time = start_datetime
     for busy_slot in merged_busy_times:
@@ -558,44 +577,39 @@ def get_free_time_ranges(calendar_id, start_datetime, end_datetime):
         current_time = max(current_time, busy_slot['end'])
     if current_time < end_datetime:
         free_ranges.append({'start': current_time, 'end': end_datetime})
+
+    # --- Krok 5 i 6: Filtruj wg godzin pracy i wyprzedzenia (bez zmian) ---
     intermediate_free_slots = []
     min_duration_delta = datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
     for free_range in free_ranges:
-        range_start = free_range['start']
-        range_end = free_range['end']
-        current_segment_start = range_start
+        range_start = free_range['start']; range_end = free_range['end']; current_segment_start = range_start
         while current_segment_start < range_end:
             day_date = current_segment_start.date()
             work_day_start = tz.localize(datetime.datetime.combine(day_date, datetime.time(WORK_START_HOUR, 0)))
             work_day_end = tz.localize(datetime.datetime.combine(day_date, datetime.time(WORK_END_HOUR, 0)))
-            effective_start = max(current_segment_start, work_day_start)
-            effective_end = min(range_end, work_day_end)
+            effective_start = max(current_segment_start, work_day_start); effective_end = min(range_end, work_day_end)
             if effective_start < effective_end and (effective_end - effective_start) >= min_duration_delta:
                 rounded_start = effective_start
-                if rounded_start < effective_end and (effective_end - rounded_start) >= min_duration_delta:
-                    intermediate_free_slots.append({'start': rounded_start, 'end': effective_end})
+                if rounded_start < effective_end and (effective_end - rounded_start) >= min_duration_delta: intermediate_free_slots.append({'start': rounded_start, 'end': effective_end})
             next_day_start = tz.localize(datetime.datetime.combine(day_date + datetime.timedelta(days=1), datetime.time(0,0)))
-            current_segment_start = max(work_day_end, next_day_start)
-            current_segment_start = max(current_segment_start, range_start)
-    final_filtered_slots = []
-    min_start_time = now + datetime.timedelta(hours=MIN_BOOKING_LEAD_HOURS)
+            current_segment_start = max(work_day_end, next_day_start); current_segment_start = max(current_segment_start, range_start)
+
+    final_filtered_slots = []; min_start_time = now + datetime.timedelta(hours=MIN_BOOKING_LEAD_HOURS)
     logging.debug(f"Minimalny czas startu po filtrze {MIN_BOOKING_LEAD_HOURS}h: {min_start_time:%Y-%m-%d %H:%M %Z}")
     for slot in intermediate_free_slots:
-        original_start = slot['start']
-        original_end = slot['end']
+        original_start = slot['start']; original_end = slot['end']
         if original_start >= min_start_time:
-            if (original_end - original_start) >= min_duration_delta:
-                final_filtered_slots.append(slot)
+            if (original_end - original_start) >= min_duration_delta: final_filtered_slots.append(slot)
         elif original_end > min_start_time:
             adjusted_start = min_start_time
             if (original_end - adjusted_start) >= min_duration_delta:
                 final_filtered_slots.append({'start': adjusted_start, 'end': original_end})
                 logging.debug(f"Zmodyfikowano slot {original_start:%H:%M}-{original_end:%H:%M} na {adjusted_start:%H:%M}-{original_end:%H:%M} z powodu reguły {MIN_BOOKING_LEAD_HOURS}h.")
-    logging.info(f"Znaleziono {len(final_filtered_slots)} wolnych zakresów po filtrze godzin pracy i {MIN_BOOKING_LEAD_HOURS}h wyprzedzenia.")
-    for i, slot in enumerate(final_filtered_slots[:5]):
-        logging.debug(f"  Finalny Slot {i+1}: {slot['start']:%Y-%m-%d %H:%M %Z} - {slot['end']:%Y-%m-%d %H:%M %Z}")
-    if len(final_filtered_slots) > 5:
-        logging.debug("  ...")
+
+    logging.info(f"Znaleziono {len(final_filtered_slots)} wolnych zakresów (po filtrach Kalendarza, Arkusza, godzin pracy i {MIN_BOOKING_LEAD_HOURS}h wyprzedzenia).")
+    for i, slot in enumerate(final_filtered_slots[:5]): logging.debug(f"  Finalny Slot {i+1}: {slot['start']:%Y-%m-%d %H:%M %Z} - {slot['end']:%Y-%m-%d %H:%M %Z}")
+    if len(final_filtered_slots) > 5: logging.debug("  ...")
+
     return final_filtered_slots
 
 def is_slot_actually_free(start_time, calendar_id):
