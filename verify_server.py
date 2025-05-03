@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# verify_server.py (Wersja: AI-Driven State + Two-Phase Sheet Write - EKSPERYMENTALNA - PEP8 Style)
+# verify_server.py (Wersja: AI-Driven State + Two-Phase Sheet Write - EKSPERYMENTALNA - PEP8 Style + Poprawka Składni)
 
 from flask import Flask, request, Response
 import os
@@ -70,7 +70,7 @@ SHEET_SCOPES = ['https://www.googleapis.com/auth/spreadsheets'] # Pełny dostęp
 SPREADSHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "1vpsIAEkqtY3ZJ5Mr67Dda45aZ55V1O-Ux9ODjwk13qw")
 SHEET_NAME = os.environ.get("GOOGLE_SHEET_NAME", 'Arkusz1')
 SHEET_TIMEZONE = 'Europe/Warsaw'
-# Definicja kolumn (zaczynając od 1), które zawierają datę i godzinę do sprawdzenia
+# Definicja kolumn (zaczynając od 1)
 SHEET_PSID_COLUMN_INDEX = 1      # A
 SHEET_PARENT_FN_COLUMN_INDEX = 2 # B
 SHEET_PARENT_LN_COLUMN_INDEX = 3 # C
@@ -747,14 +747,23 @@ def find_row_and_update_sheet(psid, start_time, student_data, sheet_row_index=No
             ).execute()
             values = result.get('values', [])
             found_row_index = -1
+            # Pamiętaj, że indeksy API są 0-based, a numery wierszy w arkuszu od 1
+            # Dane zaczynają się od wiersza 2, więc pierwszy wiersz danych ma indeks 0 w `values`
+            # i odpowiada wierszowi 2 w arkuszu.
             for i, row in enumerate(values):
-                row_psid = row[SHEET_PSID_COLUMN_INDEX - 1].strip() if len(row) >= SHEET_PSID_COLUMN_INDEX else None
-                row_date = row[SHEET_DATE_COLUMN_INDEX - 1].strip() if len(row) >= SHEET_DATE_COLUMN_INDEX else None
-                row_time = row[SHEET_TIME_COLUMN_INDEX - 1].strip() if len(row) >= SHEET_TIME_COLUMN_INDEX else None
-                if row_psid == psid and row_date == target_date_str and row_time == target_time_str:
-                    target_row_number = i + 2 # +2 bo indeksy API są 0-based, a dane zaczynają się od wiersza 2
-                    logging.info(f"Znaleziono pasujący wiersz Fazy 1 w arkuszu: {target_row_number}")
-                    break
+                # Sprawdź, czy wiersz ma wystarczającą liczbę kolumn do porównania
+                if len(row) >= max(SHEET_PSID_COLUMN_INDEX, SHEET_DATE_COLUMN_INDEX, SHEET_TIME_COLUMN_INDEX):
+                    row_psid = row[SHEET_PSID_COLUMN_INDEX - 1].strip()
+                    row_date = row[SHEET_DATE_COLUMN_INDEX - 1].strip()
+                    row_time = row[SHEET_TIME_COLUMN_INDEX - 1].strip()
+
+                    if row_psid == psid and row_date == target_date_str and row_time == target_time_str:
+                        target_row_number = i + 2 # +2 bo indeksy API są 0-based, a dane zaczynają się od wiersza 2
+                        logging.info(f"Znaleziono pasujący wiersz Fazy 1 w arkuszu: {target_row_number}")
+                        break
+                else:
+                    logging.warning(f"Pominięto zbyt krótki wiersz ({len(row)} kolumn) podczas szukania wiersza Fazy 1.")
+
             if target_row_number is None: # Jeśli nadal nie znaleziono
                  logging.error(f"Nie znaleziono wiersza Fazy 1 dla PSID {psid} i terminu {target_date_str} {target_time_str}. Nie można zaktualizować.")
                  return False, "Nie znaleziono pierwotnego zapisu terminu."
@@ -779,7 +788,10 @@ def find_row_and_update_sheet(psid, start_time, student_data, sheet_row_index=No
         # Kolejność musi odpowiadać kolumnom od B do J
         update_data = [
             parent_fn, parent_ln, student_fn, student_ln,
-            target_date_str, target_time_str, # Data i czas są już w arkuszu, ale dla pewności je nadpisujemy
+            # Nie aktualizujemy daty i czasu tutaj, tylko dane ucznia/rodzica
+            # Puste stringi dla kolumn F i G, aby nie nadpisać przypadkowo
+            # Jeśli chcesz nadpisać, wstaw tu target_date_str, target_time_str
+            "", "",
             class_desc, school_type, level_info
         ]
 
@@ -867,104 +879,207 @@ def is_slot_in_sheet(start_time):
 # =====================================================================
 # === FUNKCJE KOMUNIKACJI FB ==========================================
 # =====================================================================
-# ... (_send_typing_on, _send_single_message, send_message, _simulate_typing) ...
-# --- Bez zmian ---
 def _send_typing_on(recipient_id):
-    if not PAGE_ACCESS_TOKEN or len(PAGE_ACCESS_TOKEN) < 50 or not ENABLE_TYPING_DELAY: return
+    """Wysyła wskaźnik 'pisania' do użytkownika."""
+    if not PAGE_ACCESS_TOKEN or len(PAGE_ACCESS_TOKEN) < 50 or not ENABLE_TYPING_DELAY:
+        return
     logging.debug(f"[{recipient_id}] Wysyłanie 'typing_on'")
-    params = {"access_token": PAGE_ACCESS_TOKEN}; payload = {"recipient": {"id": recipient_id}, "sender_action": "typing_on"}
-    try: requests.post(FACEBOOK_GRAPH_API_URL, params=params, json=payload, timeout=3)
-    except requests.exceptions.RequestException as e: logging.warning(f"[{recipient_id}] Błąd wysyłania 'typing_on': {e}")
+    params = {"access_token": PAGE_ACCESS_TOKEN}
+    payload = {"recipient": {"id": recipient_id}, "sender_action": "typing_on"}
+    try:
+        requests.post(FACEBOOK_GRAPH_API_URL, params=params, json=payload, timeout=3)
+    except requests.exceptions.RequestException as e:
+        logging.warning(f"[{recipient_id}] Błąd wysyłania 'typing_on': {e}")
 
 def _send_single_message(recipient_id, message_text):
+    """Wysyła pojedynczy fragment wiadomości przez Facebook Graph API."""
     logging.info(f"--- Wysyłanie fragmentu do {recipient_id} (dł: {len(message_text)}) ---")
-    if not PAGE_ACCESS_TOKEN or len(PAGE_ACCESS_TOKEN) < 50: logging.error(f"!!! [{recipient_id}] Brak tokena dostępu strony. NIE WYSŁANO wiadomości."); return False
-    params = {"access_token": PAGE_ACCESS_TOKEN}; payload = {"recipient": {"id": recipient_id}, "message": {"text": message_text}, "messaging_type": "RESPONSE"}
+    if not PAGE_ACCESS_TOKEN or len(PAGE_ACCESS_TOKEN) < 50:
+        logging.error(f"!!! [{recipient_id}] Brak tokena dostępu strony. NIE WYSŁANO wiadomości.")
+        return False
+    params = {"access_token": PAGE_ACCESS_TOKEN}
+    payload = {"recipient": {"id": recipient_id}, "message": {"text": message_text}, "messaging_type": "RESPONSE"}
     try:
-        r = requests.post(FACEBOOK_GRAPH_API_URL, params=params, json=payload, timeout=30); r.raise_for_status(); response_json = r.json()
-        if response_json.get('error'): fb_error = response_json['error']; logging.error(f"!!! BŁĄD FB API podczas wysyłania wiadomości: {fb_error} !!!"); if fb_error.get('code') == 190: logging.error("!!! Wygląda na to, że FB_PAGE_ACCESS_TOKEN jest nieprawidłowy lub wygasł !!!"); return False
-        logging.debug(f"[{recipient_id}] Fragment wiadomości wysłany pomyślnie (Message ID: {response_json.get('message_id')})."); return True
-    except requests.exceptions.Timeout: logging.error(f"!!! BŁĄD TIMEOUT podczas wysyłania wiadomości do {recipient_id} !!!"); return False
+        r = requests.post(FACEBOOK_GRAPH_API_URL, params=params, json=payload, timeout=30)
+        r.raise_for_status()
+        response_json = r.json()
+        # Poprawiona obsługa błędu API
+        if fb_error := response_json.get('error'): # Użycie "walrus operator" (:=) dla zwięzłości
+            logging.error(f"!!! BŁĄD FB API podczas wysyłania wiadomości: {fb_error} !!!")
+            # Sprawdź kod błędu w osobnym if
+            if fb_error.get('code') == 190:
+                logging.error("!!! Wygląda na to, że FB_PAGE_ACCESS_TOKEN jest nieprawidłowy lub wygasł !!!")
+            return False # Zwróć False w przypadku jakiegokolwiek błędu API
+        # Koniec poprawionej obsługi błędu
+        logging.debug(f"[{recipient_id}] Fragment wiadomości wysłany pomyślnie (Message ID: {response_json.get('message_id')}).")
+        return True
+    except requests.exceptions.Timeout:
+        logging.error(f"!!! BŁĄD TIMEOUT podczas wysyłania wiadomości do {recipient_id} !!!")
+        return False
     except requests.exceptions.HTTPError as http_err:
          logging.error(f"!!! BŁĄD HTTP {http_err.response.status_code} podczas wysyłania wiadomości do {recipient_id}: {http_err} !!!")
          if http_err.response is not None:
-            try: logging.error(f"Odpowiedź FB (błąd HTTP): {http_err.response.json()}")
-            except json.JSONDecodeError: logging.error(f"Odpowiedź FB (błąd HTTP, nie JSON): {http_err.response.text}")
+            try:
+                logging.error(f"Odpowiedź FB (błąd HTTP): {http_err.response.json()}")
+            except json.JSONDecodeError:
+                logging.error(f"Odpowiedź FB (błąd HTTP, nie JSON): {http_err.response.text}")
          return False
-    except requests.exceptions.RequestException as req_err: logging.error(f"!!! BŁĄD RequestException podczas wysyłania wiadomości do {recipient_id}: {req_err} !!!"); return False
-    except Exception as e: logging.error(f"!!! Nieoczekiwany BŁĄD podczas wysyłania wiadomości do {recipient_id}: {e} !!!", exc_info=True); return False
+    except requests.exceptions.RequestException as req_err:
+        logging.error(f"!!! BŁĄD RequestException podczas wysyłania wiadomości do {recipient_id}: {req_err} !!!")
+        return False
+    except Exception as e:
+        logging.error(f"!!! Nieoczekiwany BŁĄD podczas wysyłania wiadomości do {recipient_id}: {e} !!!", exc_info=True)
+        return False
+
 
 def send_message(recipient_id, full_message_text):
-    if not full_message_text or not isinstance(full_message_text, str) or not full_message_text.strip(): logging.warning(f"[{recipient_id}] Pominięto wysłanie pustej lub nieprawidłowej wiadomości."); return
-    message_len = len(full_message_text); logging.info(f"[{recipient_id}] Przygotowanie wiadomości do wysłania (długość: {message_len}).")
-    if ENABLE_TYPING_DELAY: est_typing_duration = min(MAX_TYPING_DELAY_SECONDS, max(MIN_TYPING_DELAY_SECONDS, message_len / TYPING_CHARS_PER_SECOND)); logging.debug(f"[{recipient_id}] Szacowany czas pisania: {est_typing_duration:.2f}s"); _send_typing_on(recipient_id); time.sleep(est_typing_duration)
+    """Wysyła wiadomość do użytkownika, dzieląc ją na fragmenty, jeśli jest za długa."""
+    if not full_message_text or not isinstance(full_message_text, str) or not full_message_text.strip():
+        logging.warning(f"[{recipient_id}] Pominięto wysłanie pustej lub nieprawidłowej wiadomości.")
+        return
+    message_len = len(full_message_text)
+    logging.info(f"[{recipient_id}] Przygotowanie wiadomości do wysłania (długość: {message_len}).")
+    if ENABLE_TYPING_DELAY:
+        est_typing_duration = min(MAX_TYPING_DELAY_SECONDS, max(MIN_TYPING_DELAY_SECONDS, message_len / TYPING_CHARS_PER_SECOND))
+        logging.debug(f"[{recipient_id}] Szacowany czas pisania: {est_typing_duration:.2f}s")
+        _send_typing_on(recipient_id)
+        time.sleep(est_typing_duration)
     chunks = []
-    if message_len <= MESSAGE_CHAR_LIMIT: chunks.append(full_message_text)
+    if message_len <= MESSAGE_CHAR_LIMIT:
+        chunks.append(full_message_text)
     else:
-        logging.info(f"[{recipient_id}] Wiadomość za długa ({message_len} > {MESSAGE_CHAR_LIMIT}). Dzielenie na fragmenty..."); remaining_text = full_message_text
+        logging.info(f"[{recipient_id}] Wiadomość za długa ({message_len} > {MESSAGE_CHAR_LIMIT}). Dzielenie na fragmenty...")
+        remaining_text = full_message_text
         while remaining_text:
-            if len(remaining_text) <= MESSAGE_CHAR_LIMIT: chunks.append(remaining_text.strip()); break
-            split_index = -1; delimiters = ['\n\n', '\n', '. ', '! ', '? ', ' ']
-            for delimiter in delimiters: search_limit = MESSAGE_CHAR_LIMIT - len(delimiter) + 1; temp_index = remaining_text.rfind(delimiter, 0, search_limit); if temp_index != -1: split_index = temp_index + len(delimiter); break
-            if split_index == -1: split_index = MESSAGE_CHAR_LIMIT
-            chunk = remaining_text[:split_index].strip(); if chunk: chunks.append(chunk); remaining_text = remaining_text[split_index:].strip()
+            if len(remaining_text) <= MESSAGE_CHAR_LIMIT:
+                chunks.append(remaining_text.strip())
+                break
+            split_index = -1
+            delimiters = ['\n\n', '\n', '. ', '! ', '? ', ' ']
+            for delimiter in delimiters:
+                search_limit = MESSAGE_CHAR_LIMIT - len(delimiter) + 1
+                temp_index = remaining_text.rfind(delimiter, 0, search_limit)
+                if temp_index != -1:
+                    split_index = temp_index + len(delimiter)
+                    break
+            if split_index == -1:
+                split_index = MESSAGE_CHAR_LIMIT
+            chunk = remaining_text[:split_index].strip()
+            if chunk:
+                chunks.append(chunk)
+            remaining_text = remaining_text[split_index:].strip()
         logging.info(f"[{recipient_id}] Podzielono wiadomość na {len(chunks)} fragmentów.")
-    num_chunks = len(chunks); send_success_count = 0
+    num_chunks = len(chunks)
+    send_success_count = 0
     for i, chunk in enumerate(chunks):
         logging.debug(f"[{recipient_id}] Wysyłanie fragmentu {i+1}/{num_chunks}...")
-        if not _send_single_message(recipient_id, chunk): logging.error(f"!!! [{recipient_id}] Błąd wysyłania fragmentu {i+1}. Anulowano wysyłanie reszty."); break
+        if not _send_single_message(recipient_id, chunk):
+            logging.error(f"!!! [{recipient_id}] Błąd wysyłania fragmentu {i+1}. Anulowano wysyłanie reszty.")
+            break
         send_success_count += 1
         if num_chunks > 1 and i < num_chunks - 1:
             logging.debug(f"[{recipient_id}] Oczekiwanie {MESSAGE_DELAY_SECONDS}s przed kolejnym fragmentem...")
             if ENABLE_TYPING_DELAY:
-                next_chunk_len = len(chunks[i+1]); est_next_typing_duration = min(MAX_TYPING_DELAY_SECONDS * 0.7, max(MIN_TYPING_DELAY_SECONDS * 0.5, next_chunk_len / TYPING_CHARS_PER_SECOND)); _send_typing_on(recipient_id); time.sleep(min(est_next_typing_duration, MESSAGE_DELAY_SECONDS * 0.8)); remaining_delay = max(0, MESSAGE_DELAY_SECONDS - est_next_typing_duration);
-                if remaining_delay > 0: time.sleep(remaining_delay)
-            else: time.sleep(MESSAGE_DELAY_SECONDS)
+                next_chunk_len = len(chunks[i+1])
+                est_next_typing_duration = min(MAX_TYPING_DELAY_SECONDS * 0.7, max(MIN_TYPING_DELAY_SECONDS * 0.5, next_chunk_len / TYPING_CHARS_PER_SECOND))
+                _send_typing_on(recipient_id)
+                time.sleep(min(est_next_typing_duration, MESSAGE_DELAY_SECONDS * 0.8))
+                remaining_delay = max(0, MESSAGE_DELAY_SECONDS - est_next_typing_duration)
+                if remaining_delay > 0:
+                    time.sleep(remaining_delay)
+            else:
+                time.sleep(MESSAGE_DELAY_SECONDS)
     logging.info(f"--- [{recipient_id}] Zakończono proces wysyłania. Wysłano {send_success_count}/{num_chunks} fragmentów. ---")
 
 def _simulate_typing(recipient_id, duration_seconds):
-    if ENABLE_TYPING_DELAY and duration_seconds > 0: _send_typing_on(recipient_id); time.sleep(min(duration_seconds, MAX_TYPING_DELAY_SECONDS * 1.1))
+    """Wysyła 'typing_on' i czeka przez określony czas."""
+    if ENABLE_TYPING_DELAY and duration_seconds > 0:
+        _send_typing_on(recipient_id)
+        time.sleep(min(duration_seconds, MAX_TYPING_DELAY_SECONDS * 1.1))
 
 # =====================================================================
 # === FUNKCJE WYWOŁANIA AI ============================================
 # =====================================================================
 def _call_gemini(user_psid, prompt_history, generation_config, task_name, max_retries=3):
     """Wywołuje API Gemini z obsługą błędów, logowaniem i ponowieniami."""
-    if not gemini_model: logging.error(f"!!! [{user_psid}] KRYTYCZNY BŁĄD: Model Gemini ({task_name}) jest niedostępny (None)!"); return None
-    if not isinstance(prompt_history, list) or not all(isinstance(item, Content) for item in prompt_history): logging.error(f"!!! [{user_psid}] Nieprawidłowy format promptu ({task_name})."); return None
+    if not gemini_model:
+        logging.error(f"!!! [{user_psid}] KRYTYCZNY BŁĄD: Model Gemini ({task_name}) jest niedostępny (None)!")
+        return None
+    if not isinstance(prompt_history, list) or not all(isinstance(item, Content) for item in prompt_history):
+        logging.error(f"!!! [{user_psid}] Nieprawidłowy format promptu ({task_name}).")
+        return None
     logging.info(f"[{user_psid}] Wywołanie Gemini: {task_name} (Prompt: {len(prompt_history)} wiadomości)")
     last_user_msg = next((msg.parts[0].text for msg in reversed(prompt_history) if msg.role == 'user' and msg.parts), None)
-    if last_user_msg: logging.debug(f"    Ostatnia wiadomość usera ({task_name}): '{last_user_msg[:200]}{'...' if len(last_user_msg)>200 else ''}'")
-    else: logging.debug(f"    Brak wiadomości użytkownika w bezpośrednim prompcie ({task_name}).")
-    attempt = 0; finish_reason = None
+    if last_user_msg:
+        logging.debug(f"    Ostatnia wiadomość usera ({task_name}): '{last_user_msg[:200]}{'...' if len(last_user_msg)>200 else ''}'")
+    else:
+        logging.debug(f"    Brak wiadomości użytkownika w bezpośrednim prompcie ({task_name}).")
+    attempt = 0
+    finish_reason = None # Zmienna do przechowywania ostatniego powodu zakończenia
     while attempt < max_retries:
-        attempt += 1; logging.debug(f"    Próba {attempt}/{max_retries} wywołania Gemini ({task_name})...")
+        attempt += 1
+        logging.debug(f"    Próba {attempt}/{max_retries} wywołania Gemini ({task_name})...")
         try:
             _simulate_typing(user_psid, MIN_TYPING_DELAY_SECONDS * 0.8)
-            response = gemini_model.generate_content(prompt_history, generation_config=generation_config, safety_settings=SAFETY_SETTINGS)
+            response = gemini_model.generate_content(prompt_history, generation_config=generation_config, safety_settings=SAFETY_SETTINGS) # Używa globalnych SAFETY_SETTINGS
             if response and response.candidates:
-                candidate = response.candidates[0]; finish_reason = candidate.finish_reason
+                candidate = response.candidates[0]
+                finish_reason = candidate.finish_reason # Zapisz ostatni powód
                 if finish_reason != 1:
-                    safety_ratings = candidate.safety_ratings; logging.warning(f"[{user_psid}] Gemini ({task_name}) ZAKOŃCZONE NIEPRAWIDŁOWO! Powód: {finish_reason.name} ({finish_reason.value}). Safety Ratings: {safety_ratings}")
-                    if finish_reason in [3, 4] and attempt < max_retries: logging.warning(f"    Ponawianie ({attempt}/{max_retries}) z powodu blokady..."); time.sleep(1.5 * attempt); continue
-                    else: logging.error(f"!!! [{user_psid}] Gemini ({task_name}) nieudane po blokadzie lub innym błędzie."); return "Przepraszam, nie mogę przetworzyć tej prośby ze względu na zasady bezpieczeństwa." if finish_reason == 3 else "Wystąpił problem z generowaniem odpowiedzi."
+                    safety_ratings = candidate.safety_ratings
+                    logging.warning(f"[{user_psid}] Gemini ({task_name}) ZAKOŃCZONE NIEPRAWIDŁOWO! Powód: {finish_reason.name} ({finish_reason.value}). Safety Ratings: {safety_ratings}")
+                    if finish_reason in [3, 4] and attempt < max_retries: # SAFETY lub RECITATION
+                        logging.warning(f"    Ponawianie ({attempt}/{max_retries}) z powodu blokady...")
+                        time.sleep(1.5 * attempt)
+                        continue
+                    else:
+                        logging.error(f"!!! [{user_psid}] Gemini ({task_name}) nieudane po blokadzie lub innym błędzie.")
+                        # Zwróć specyficzną wiadomość tylko w przypadku błędu SAFETY
+                        if finish_reason == 3:
+                            return "Przepraszam, nie mogę przetworzyć tej prośby ze względu na zasady bezpieczeństwa."
+                        else:
+                            return "Wystąpił problem z generowaniem odpowiedzi." # Inny błąd
                 if candidate.content and candidate.content.parts:
                     generated_text = "".join(part.text for part in candidate.content.parts if hasattr(part, 'text')).strip()
-                    if generated_text: logging.info(f"[{user_psid}] Gemini ({task_name}) zwróciło odpowiedź (długość: {len(generated_text)})."); logging.debug(f"    Pełna odpowiedź Gemini ({task_name}): '{generated_text}'"); return generated_text
-                    else: logging.warning(f"[{user_psid}] Gemini ({task_name}) zwróciło kandydata z pustą treścią.")
-                else: logging.warning(f"[{user_psid}] Gemini ({task_name}) zwróciło kandydata bez treści (content/parts).")
-            else: prompt_feedback = response.prompt_feedback if hasattr(response, 'prompt_feedback') else 'Brak informacji zwrotnej'; logging.error(f"!!! BŁĄD [{user_psid}] Gemini ({task_name}) - Brak kandydatów w odpowiedzi. Feedback: {prompt_feedback}.")
+                    if generated_text:
+                        logging.info(f"[{user_psid}] Gemini ({task_name}) zwróciło odpowiedź (długość: {len(generated_text)}).")
+                        logging.debug(f"    Pełna odpowiedź Gemini ({task_name}): '{generated_text}'")
+                        return generated_text # Sukces
+                    else:
+                        logging.warning(f"[{user_psid}] Gemini ({task_name}) zwróciło kandydata z pustą treścią.")
+                else:
+                    logging.warning(f"[{user_psid}] Gemini ({task_name}) zwróciło kandydata bez treści (content/parts).")
+            else:
+                prompt_feedback = response.prompt_feedback if hasattr(response, 'prompt_feedback') else 'Brak informacji zwrotnej'
+                logging.error(f"!!! BŁĄD [{user_psid}] Gemini ({task_name}) - Brak kandydatów w odpowiedzi. Feedback: {prompt_feedback}.")
         except HttpError as http_err:
-             status_code = http_err.resp.status if http_err.resp else 'Nieznany'; reason = http_err.resp.reason if http_err.resp else 'Nieznany'; logging.error(f"!!! BŁĄD HTTP ({status_code}) [{user_psid}] Gemini ({task_name}) - Próba {attempt}/{max_retries}: {reason}")
-             if status_code in [429, 500, 503] and attempt < max_retries: sleep_time = (2 ** attempt) + (random.random() * 0.5); logging.warning(f"    Oczekiwanie {sleep_time:.2f}s przed ponowieniem..."); time.sleep(sleep_time); continue
-             else: break
+             status_code = http_err.resp.status if http_err.resp else 'Nieznany'
+             reason = http_err.resp.reason if http_err.resp else 'Nieznany'
+             logging.error(f"!!! BŁĄD HTTP ({status_code}) [{user_psid}] Gemini ({task_name}) - Próba {attempt}/{max_retries}: {reason}")
+             if status_code in [429, 500, 503] and attempt < max_retries:
+                 sleep_time = (2 ** attempt) + (random.random() * 0.5)
+                 logging.warning(f"    Oczekiwanie {sleep_time:.2f}s przed ponowieniem...")
+                 time.sleep(sleep_time)
+                 continue
+             else:
+                 break
         except Exception as e:
-             if isinstance(e, NameError) and 'gemini_model' in str(e): logging.critical(f"!!! KRYTYCZNY NameError [{user_psid}] w _call_gemini: {e}. gemini_model jest None!", exc_info=True); return None
-             else: logging.error(f"!!! BŁĄD [{user_psid}] Gemini ({task_name}) - Nieoczekiwany błąd Python (Próba {attempt}/{max_retries}): {e}", exc_info=True)
-        if attempt < max_retries: logging.warning(f"    Problem z odpowiedzią Gemini ({task_name}). Oczekiwanie przed ponowieniem ({attempt+1}/{max_retries})..."); time.sleep(1.5 * attempt)
+             if isinstance(e, NameError) and 'gemini_model' in str(e):
+                 logging.critical(f"!!! KRYTYCZNY NameError [{user_psid}] w _call_gemini: {e}. gemini_model jest None!", exc_info=True)
+                 return None
+             else:
+                 logging.error(f"!!! BŁĄD [{user_psid}] Gemini ({task_name}) - Nieoczekiwany błąd Python (Próba {attempt}/{max_retries}): {e}", exc_info=True)
+        # Jeśli doszło tutaj, oznacza to błąd inny niż HTTP lub brak poprawnej odpowiedzi
+        if attempt < max_retries:
+            logging.warning(f"    Problem z odpowiedzią Gemini ({task_name}). Oczekiwanie przed ponowieniem ({attempt+1}/{max_retries})...")
+            time.sleep(1.5 * attempt)
+
+    # Po wszystkich próbach
     logging.error(f"!!! KRYTYCZNY BŁĄD [{user_psid}] Gemini ({task_name}) - Nie udało się uzyskać poprawnej odpowiedzi po {max_retries} próbach.")
-    if finish_reason == 3: return "Przepraszam, nie mogę przetworzyć tej prośby ze względu na zasady bezpieczeństwa."
-    return None
+    # Zwróć None lub specyficzną wiadomość błędu, jeśli ostatni błąd to SAFETY
+    if finish_reason == 3:
+        return "Przepraszam, nie mogę przetworzyć tej prośby ze względu na zasady bezpieczeństwa."
+    return None # Ogólny błąd po wszystkich próbach
 
 # =====================================================================
 # === INSTRUKCJE SYSTEMOWE I GŁÓWNE FUNKCJE AI ========================
@@ -1138,8 +1253,8 @@ def webhook_handle():
                     user_content = None
                     current_user_message_text = None
                     ai_response_text = None
-                    system_message_for_ai = None
-                    available_ranges_for_ai = None
+                    system_message_for_ai = None # Do przekazywania wyników akcji
+                    available_ranges_for_ai = None # Do przekazania zakresów
                     context_data_to_save = context.copy() # Pracujemy na kopii kontekstu
 
                     # === Obsługa wiadomości / postbacków ===
@@ -1154,7 +1269,7 @@ def webhook_handle():
                              att_type = attachments[0].get('type','nieznany')
                              logging.info(f"      Otrzymano załącznik typu: {att_type}.")
                              user_content = Content(role="user", parts=[Part.from_text(f"[Użytkownik wysłał załącznik typu: {att_type}]")])
-                             current_user_message_text = f"[Użytkownik wysłał załącznik typu: {att_type}]"
+                             current_user_message_text = f"[Użytkownik wysłał załącznik typu: {att_type}]" # Przekaż info do AI
                         else: continue # Ignoruj puste wiadomości
                     elif postback := event.get("postback"):
                         payload = postback.get("payload"); title = postback.get("title", "")
@@ -1162,10 +1277,10 @@ def webhook_handle():
                         user_input_text = f"Użytkownik kliknął przycisk: '{title}' (Payload: {payload})"
                         user_content = Content(role="user", parts=[Part.from_text(user_input_text)])
                         current_user_message_text = user_input_text
-                    elif event.get("read") or event.get("delivery"): continue
+                    elif event.get("read") or event.get("delivery"): continue # Ignoruj
                     else: logging.warning(f"    Otrzymano nieobsługiwany typ zdarzenia: {json.dumps(event)}"); continue
 
-                    # --- Główna logika sterowana przez AI ---
+                    # --- Główna pętla sterowana przez AI ---
                     max_ai_calls = 3 # Ogranicznik pętli AI -> Akcja -> AI
                     ai_call_count = 0
                     last_ai_response = None # Do zapisania w historii, jeśli nie ma nowej odpowiedzi
@@ -1181,6 +1296,7 @@ def webhook_handle():
                         current_user_message_text = None # Wiadomość użytkownika przetworzona w tym wywołaniu
 
                         if not ai_response_text:
+                            # Obsługa błędu AI
                             logging.error(f"Błąd krytyczny: Unified AI nie zwróciło odpowiedzi (Cykl {ai_call_count}).")
                             send_message(sender_id, "Przepraszam, wystąpił wewnętrzny błąd. Spróbuj ponownie później.")
                             last_ai_response = Content(role="model", parts=[Part.from_text("[Błąd wewnętrzny AI]")]) # Zapisz błąd do historii
@@ -1193,22 +1309,25 @@ def webhook_handle():
                         text_to_send_user = ai_response_text # Domyślnie cała odpowiedź
                         system_message_for_ai = None # Resetuj wiadomość systemową
                         available_ranges_for_ai = None # Resetuj zakresy
-                        should_break_loop = False # Czy zakończyć pętlę AI w tym cyklu?
+                        should_break_loop = True # Domyślnie zakończ pętlę po tym cyklu, chyba że akcja wymaga kolejnego wywołania AI
+                        action_tag_found = False # Czy znaleziono jakikolwiek znacznik akcji?
 
                         # --- Sprawdzanie znaczników akcji ---
-                        action_tag_found = False
 
                         # Akcja: Sprawdź dostępność
                         if ACTION_CHECK_AVAILABILITY in ai_response_text:
                             logging.info(f"      AI zażądało sprawdzenia dostępności [{ACTION_CHECK_AVAILABILITY}]")
                             action_tag_found = True
+                            should_break_loop = False # Potrzebne kolejne wywołanie AI
                             text_to_send_user = ai_response_text.replace(ACTION_CHECK_AVAILABILITY, "").strip()
                             tz = _get_calendar_timezone(); now = datetime.datetime.now(tz); search_start = now; search_end_date = (search_start + datetime.timedelta(days=MAX_SEARCH_DAYS)).date(); search_end = tz.localize(datetime.datetime.combine(search_end_date, datetime.time(WORK_END_HOUR, 0)))
                             _simulate_typing(sender_id, MAX_TYPING_DELAY_SECONDS * 0.6)
                             free_ranges = get_free_time_ranges(TARGET_CALENDAR_ID, search_start, search_end)
                             context_data_to_save['available_ranges'] = free_ranges # Zapisz zakresy w kontekście
-                            if free_ranges: system_message_for_ai = f"[SYSTEM_INFO: Dostępne zakresy zostały pobrane i zapisane w kontekście. Zaproponuj termin.]"
-                            else: system_message_for_ai = f"[SYSTEM_INFO: Brak dostępnych zakresów w kalendarzu w ciągu najbliższych {MAX_SEARCH_DAYS} dni z wymaganym wyprzedzeniem {MIN_BOOKING_LEAD_HOURS}h. Poinformuj użytkownika.]"
+                            if free_ranges:
+                                system_message_for_ai = f"[SYSTEM_INFO: Dostępne zakresy zostały pobrane i zapisane w kontekście. Są one teraz dostępne w Twoim kontekście. Zaproponuj termin.]"
+                            else:
+                                system_message_for_ai = f"[SYSTEM_INFO: Brak dostępnych zakresów w kalendarzu w ciągu najbliższych {MAX_SEARCH_DAYS} dni z wymaganym wyprzedzeniem {MIN_BOOKING_LEAD_HOURS}h. Poinformuj użytkownika.]"
 
                         # Akcja: Weryfikuj Slot (Kalendarz + Arkusz)
                         verify_match = re.search(rf"{re.escape(ACTION_VERIFY_SLOT)}(.*?)]", ai_response_text)
@@ -1216,7 +1335,8 @@ def webhook_handle():
                             iso_to_verify = verify_match.group(1).strip()
                             logging.info(f"      AI zażądało weryfikacji slotu [{ACTION_VERIFY_SLOT}{iso_to_verify}]")
                             action_tag_found = True
-                            text_to_send_user = re.sub(rf"{re.escape(ACTION_VERIFY_SLOT)}.*?]", "", ai_response_text).strip()
+                            should_break_loop = False # Potrzebne kolejne wywołanie AI
+                            text_to_send_user = re.sub(rf"{re.escape(ACTION_VERIFY_SLOT)}.*?]", "", ai_response_text).strip() # Usuń znacznik z odpowiedzi
                             try:
                                 proposed_start = datetime.datetime.fromisoformat(iso_to_verify)
                                 tz_cal = _get_calendar_timezone()
@@ -1224,13 +1344,13 @@ def webhook_handle():
                                 else: proposed_start = proposed_start.astimezone(tz_cal)
                                 context_data_to_save['proposed_slot_iso'] = proposed_start.isoformat() # Zapisz proponowany slot
                                 context_data_to_save['proposed_slot_formatted'] = format_slot_for_user(proposed_start)
-                                _simulate_typing(sender_id, MIN_TYPING_DELAY_SECONDS * 1.5)
+                                _simulate_typing(sender_id, MIN_TYPING_DELAY_SECONDS * 1.5) # Symulacja weryfikacji
                                 calendar_free = is_slot_actually_free(proposed_start, TARGET_CALENDAR_ID)
                                 sheet_free = False
                                 if calendar_free: sheet_free = not is_slot_in_sheet(proposed_start)
                                 if calendar_free and sheet_free: system_message_for_ai = f"[SYSTEM_INFO: Slot {iso_to_verify} jest DOSTĘPNY. Wygeneruj akcję zapisu Fazy 1: {ACTION_WRITE_PHASE1}{iso_to_verify}]"
                                 else: reason = "Kalendarz" if not calendar_free else "Arkusz"; system_message_for_ai = f"[SYSTEM_INFO: Slot {iso_to_verify} jest ZAJĘTY ({reason}). Poinformuj użytkownika i zaproponuj inny termin z dostępnych zakresów.]"; context_data_to_save.pop('proposed_slot_iso', None); context_data_to_save.pop('proposed_slot_formatted', None)
-                            except Exception as e: logging.error(f"Błąd podczas weryfikacji slotu {iso_to_verify}: {e}", exc_info=True); system_message_for_ai = "[SYSTEM_INFO: Błąd wewnętrzny podczas weryfikacji terminu. Poinformuj użytkownika.]"
+                            except Exception as e: logging.error(f"Błąd podczas weryfikacji slotu {iso_to_verify}: {e}", exc_info=True); system_message_for_ai = "[SYSTEM_INFO: Błąd wewnętrzny podczas weryfikacji terminu. Poinformuj użytkownika o problemie technicznym.]"
 
                         # Akcja: Zapisz Fazę 1
                         write1_match = re.search(rf"{re.escape(ACTION_WRITE_PHASE1)}(.*?)]", ai_response_text)
@@ -1238,6 +1358,7 @@ def webhook_handle():
                             iso_to_write = write1_match.group(1).strip()
                             logging.info(f"      AI zażądało zapisu Fazy 1 dla slotu [{ACTION_WRITE_PHASE1}{iso_to_write}]")
                             action_tag_found = True
+                            should_break_loop = False # Potrzebne kolejne wywołanie AI
                             text_to_send_user = re.sub(rf"{re.escape(ACTION_WRITE_PHASE1)}.*?]", "", ai_response_text).strip()
                             try:
                                 start_time_obj = datetime.datetime.fromisoformat(iso_to_write)
@@ -1246,13 +1367,14 @@ def webhook_handle():
                                 if write_ok:
                                     system_message_for_ai = f"[SYSTEM_INFO: Zapis Fazy 1 dla {iso_to_write} zakończony pomyślnie. Przejdź do zbierania danych ucznia generując akcję {ACTION_GATHER_INFO}.]"
                                     if isinstance(write_msg_or_row, int): context_data_to_save['sheet_row_index'] = write_msg_or_row # Zapisz indeks wiersza
-                                else: system_message_for_ai = f"[SYSTEM_INFO: Błąd zapisu Fazy 1 dla {iso_to_write}: {write_msg_or_row}. Poinformuj użytkownika o problemie technicznym.]"; context_data_to_save.pop('proposed_slot_iso', None); context_data_to_save.pop('proposed_slot_formatted', None)
+                                else: system_message_for_ai = f"[SYSTEM_INFO: Błąd zapisu Fazy 1 dla {iso_to_write}: {write_msg_or_row}. Poinformuj użytkownika o problemie technicznym.]"; context_data_to_save.pop('proposed_slot_iso', None); context_data_to_save.pop('proposed_slot_formatted', None); context_data_to_save.pop('sheet_row_index', None)
                             except Exception as e: logging.error(f"Błąd podczas zapisu Fazy 1 dla {iso_to_write}: {e}", exc_info=True); system_message_for_ai = "[SYSTEM_INFO: Błąd wewnętrzny podczas zapisu Fazy 1. Poinformuj użytkownika.]"
 
                         # Akcja: Rozpocznij Zbieranie Danych
                         if ACTION_GATHER_INFO in ai_response_text:
                             logging.info(f"      AI zażądało rozpoczęcia zbierania danych [{ACTION_GATHER_INFO}]")
                             action_tag_found = True
+                            should_break_loop = False # Potrzebne kolejne wywołanie AI
                             text_to_send_user = ai_response_text.replace(ACTION_GATHER_INFO, "").strip()
                             if 'known_parent_first_name' not in context_data_to_save: # Pobierz tylko jeśli brakuje
                                 parent_profile = get_user_profile(sender_id)
@@ -1266,6 +1388,7 @@ def webhook_handle():
                             student_data_str = finalize_match.group(1).strip()
                             logging.info(f"      AI zażądało finalizacji i aktualizacji arkusza [{ACTION_FINALIZE}{student_data_str}]")
                             action_tag_found = True
+                            should_break_loop = False # Potrzebne kolejne wywołanie AI
                             text_to_send_user = re.sub(rf"{re.escape(ACTION_FINALIZE)}.*?]", "", ai_response_text).strip()
                             parsed_student_data = {}
                             try:
@@ -1295,9 +1418,10 @@ def webhook_handle():
                         # 3. Jeśli wykonano akcję, przygotuj następne wywołanie AI
                         if system_message_for_ai:
                             logging.debug(f"      Przygotowano system_message_for_ai: {system_message_for_ai}")
-                            # Dodaj wiadomość użytkownika (jeśli była) i odpowiedź AI (bez znacznika akcji) do historii
+                            # Dodaj wiadomość użytkownika (jeśli była w tym cyklu) i odpowiedź AI (bez znacznika akcji) do historii
                             if user_content:
                                 history_for_gemini.append(user_content)
+                                user_content = None # Zresetuj, bo dodane
                             if text_to_send_user: # Jeśli AI coś odpowiedziało oprócz znacznika akcji
                                  history_for_gemini.append(Content(role="model", parts=[Part.from_text(text_to_send_user)]))
                                  # Wyślij tę część odpowiedzi do użytkownika od razu
@@ -1305,7 +1429,7 @@ def webhook_handle():
 
                             # Dodaj wiadomość systemową jako input dla następnego kroku AI
                             current_user_message_text = system_message_for_ai # To będzie input dla kolejnego wywołania
-                            user_content = Content(role="user", parts=[Part.from_text(system_message_for_ai)]) # Zapisz do historii jako user
+                            history_for_gemini.append(Content(role="user", parts=[Part.from_text(system_message_for_ai)])) # Zapisz do historii jako user
                             # Kontynuuj pętlę, aby wywołać AI z wiadomością systemową
                             continue
                         else:
@@ -1317,15 +1441,8 @@ def webhook_handle():
                             if text_to_send_user:
                                 send_message(sender_id, text_to_send_user)
                             else:
-                                # Jeśli AI zwróciło tylko znacznik akcji, który został obsłużony,
-                                # ale nie wygenerowało wiadomości systemowej (np. błąd)
-                                # lub jeśli AI nie zwróciło ani tekstu ani akcji.
-                                if action_tag_found:
-                                     logging.debug("Akcja wykonana, ale brak finalnej odpowiedzi tekstowej AI dla użytkownika.")
-                                else:
-                                     logging.error("AI nie zwróciło ani tekstu, ani znacznika akcji w finalnym kroku!")
-                                     # Można wysłać generyczny błąd
-                                     # send_message(sender_id, "Przepraszam, wystąpił nieoczekiwany błąd.")
+                                if action_tag_found: logging.debug("Akcja wykonana, ale brak finalnej odpowiedzi tekstowej AI dla użytkownika.")
+                                elif not action_tag_found: logging.error("AI nie zwróciło ani tekstu, ani znacznika akcji w finalnym kroku!")
                             break # Zakończ pętlę while
 
                     # --- Koniec pętli AI ---
@@ -1383,7 +1500,7 @@ if __name__ == '__main__':
     if not PAGE_ACCESS_TOKEN or len(PAGE_ACCESS_TOKEN) < 50:
         print("!!! KRYTYCZNE: FB_PAGE_ACCESS_TOKEN PUSTY lub ZBYT KRÓTKI !!!")
     elif PAGE_ACCESS_TOKEN == "EACNAHFzEhkUBO5sicIUMoIwuZCZC1ZAduL8gb5sZAjWX2oErT4esklQALmstq2bkZAnWq3CVNF0IO3gZB44ip3XCXG40revvmpFKOLlC9jBStCNAwbIXZBWfawg0z0YH6GLGZCE1gFfgEF5A6DEIKbu5FYZB6XKXHECTeW6PNZAUQrPiKxrPCjbz7QFiBtGROvZCPR4rAZDZD":
-        print("    FB_PAGE_ACCESS_TOKEN: Ustawiony (OK - Nowy)") # Zaktualizowano info
+        print("    FB_PAGE_ACCESS_TOKEN: Ustawiony (OK - Nowy)")
     else:
         print("    FB_PAGE_ACCESS_TOKEN: Ustawiony (OK - Inny niż domyślny)")
     print("-" * 60)
