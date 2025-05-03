@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# verify_server.py (Wersja: AI-Driven State + Two-Phase Sheet Write - EKSPERYMENTALNA - PEP8 Style + Poprawka Składni)
+# verify_server.py (Wersja: AI-Driven State + Two-Phase Sheet Write - EKSPERYMENTALNA - Poprawka JSON + PEP8)
 
 from flask import Flask, request, Response
 import os
@@ -931,7 +931,6 @@ def _send_single_message(recipient_id, message_text):
         logging.error(f"!!! Nieoczekiwany BŁĄD podczas wysyłania wiadomości do {recipient_id}: {e} !!!", exc_info=True)
         return False
 
-
 def send_message(recipient_id, full_message_text):
     """Wysyła wiadomość do użytkownika, dzieląc ją na fragmenty, jeśli jest za długa."""
     if not full_message_text or not isinstance(full_message_text, str) or not full_message_text.strip():
@@ -1176,32 +1175,26 @@ def get_unified_ai_response(user_psid, history, current_user_message_text, conte
         return "Błąd wewnętrzny konfiguracji AI."
 
 
-    # Zbuduj pełny prompt
+    # Zbuduj pełny prompt - JUŻ BEZ DODAWANIA KONTEKSTU JAKO OSOBNEJ WIADOMOŚCI
     initial_prompt = [
         Content(role="user", parts=[Part.from_text(system_instruction)]),
         Content(role="model", parts=[Part.from_text("Rozumiem. Będę postępować zgodnie z przepływem pracy, analizując historię i generując odpowiednie znaczniki akcji dla systemu lub odpowiedzi dla użytkownika.")])
     ]
-    # Dodaj kontekst jako wiadomość systemową (jeśli niepusty)
-    if context:
-        context_text = f"[AKTUALNY KONTEKST SYSTEMOWY: {json.dumps(context, ensure_ascii=False)}]"
-        # Dodaj przed historią, ale po instrukcji
-        full_prompt = initial_prompt[:1] + [Content(role="user", parts=[Part.from_text(context_text)])] + initial_prompt[1:] + history
-    else:
-        full_prompt = initial_prompt + history
+    full_prompt = initial_prompt + history # Łączymy instrukcję i historię
 
     if current_user_message_text:
         full_prompt.append(Content(role="user", parts=[Part.from_text(current_user_message_text)]))
 
     # Ogranicz historię
-    max_prompt_messages = (MAX_HISTORY_TURNS * 2) + 2 + (1 if context else 0) # +1 dla kontekstu
+    max_prompt_messages = (MAX_HISTORY_TURNS * 2) + 2 # +2 dla initial_prompt
     while len(full_prompt) > max_prompt_messages:
-        # Usuwaj najstarszą parę user/model (pomijając instrukcję i kontekst)
-        start_index_to_remove = 2 + (1 if context else 0)
+        # Usuwaj najstarszą parę user/model (pomijając instrukcję)
+        start_index_to_remove = 2
         if len(full_prompt) > start_index_to_remove + 1:
             full_prompt.pop(start_index_to_remove + 1) # model
             full_prompt.pop(start_index_to_remove)     # user
         else:
-            break # Nie usuwaj instrukcji/kontekstu
+            break # Nie usuwaj instrukcji
 
     # Wywołaj Gemini
     response_text = _call_gemini(user_psid, full_prompt, GENERATION_CONFIG_UNIFIED, "Unified Conversation")
@@ -1325,7 +1318,7 @@ def webhook_handle():
                             free_ranges = get_free_time_ranges(TARGET_CALENDAR_ID, search_start, search_end)
                             context_data_to_save['available_ranges'] = free_ranges # Zapisz zakresy w kontekście
                             if free_ranges:
-                                system_message_for_ai = f"[SYSTEM_INFO: Dostępne zakresy zostały pobrane i zapisane w kontekście. Są one teraz dostępne w Twoim kontekście. Zaproponuj termin.]"
+                                system_message_for_ai = f"[SYSTEM_INFO: Dostępne zakresy zostały pobrane i zapisane w kontekście. Są one teraz dostępne w Twoim prompcie systemowym. Zaproponuj termin.]"
                             else:
                                 system_message_for_ai = f"[SYSTEM_INFO: Brak dostępnych zakresów w kalendarzu w ciągu najbliższych {MAX_SEARCH_DAYS} dni z wymaganym wyprzedzeniem {MIN_BOOKING_LEAD_HOURS}h. Poinformuj użytkownika.]"
 
