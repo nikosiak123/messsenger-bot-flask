@@ -1545,9 +1545,8 @@ SYSTEM_INSTRUCTION_GENERAL = """Jesteś przyjaznym, proaktywnym i profesjonalnym
 *   Szkoła Podstawowa: 60 zł
 *   Liceum/Technikum (Poziom Podstawowy, klasa 1-2): 60 zł
 *   Liceum/Technikum (Poziom Podstawowy, klasa 3-4/5): 70 zł
-*   Liceum/Technikum (Poziom Rozszerzony, klasa 1): 60 zł
-*   Liceum/Technikum (Poziom Rozszerzony, klasa 2): 70 zł
-*   Liceum/Technikum (Poziom Rozszerzony, klasa 3-4/5): 70 zł
+*   Liceum/Technikum (Poziom Rozszerzony, klasa 1-2): 70 zł
+*   Liceum/Technikum (Poziom Rozszerzony, klasa 3-4/5): 80 zł
 
 **Format Lekcji:** Online, przez platformę Microsoft Teams (bez konieczności instalacji, wystarczy link).
 
