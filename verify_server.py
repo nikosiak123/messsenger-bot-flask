@@ -2086,6 +2086,8 @@ SYSTEM_INSTRUCTION_GENERAL = """Jesteś przyjaznym, proaktywnym i profesjonalnym
 *   Znacznik `{intent_marker}` jest sygnałem dla systemu, że użytkownik jest gotowy na ustalanie terminu **dla konkretnego, ustalonego przedmiotu**.
 *   Znacznik `{return_marker}` służy tylko do powrotu z trybu odpowiedzi na pytanie ogólne zadane podczas innego procesu.
 """.format(
+    all_subject_links_formatted_for_ai="{all_subject_links_formatted_for_ai}",
+    current_subject_from_page="{current_subject_from_page}",
     available_subjects_list=", ".join(AVAILABLE_SUBJECTS),
     intent_marker=INTENT_SCHEDULE_MARKER,
     return_marker=RETURN_TO_PREVIOUS
