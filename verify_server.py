@@ -1746,15 +1746,138 @@ def _simulate_typing(recipient_id, duration_seconds, page_access_token): # Dodan
 # === FUNKCJE WYWOŁANIA AI ============================================
 # =====================================================================
 
-final_prompt_for_api = list(prompt_history)
-if user_message:
-    if not isinstance(user_message, str):
-        logging.warning(f"[{user_psid}] _call_gemini otrzymało user_message, które nie jest stringiem: {type(user_message)}. Konwertuję na string.")
-        user_message = str(user_message)
-    if user_message.strip(): # Dodaj tylko jeśli nie jest pusty
-        final_prompt_for_api.append(Content(role="user", parts=[Part.from_text(user_message.strip())]))
+def _call_gemini(user_psid, prompt_history, generation_config, task_name, page_access_token, max_retries=3, user_message=None):
+    """Wywołuje API Gemini z obsługą błędów i ponowień."""
+    if not gemini_model:
+        logging.error(f"!!! [{user_psid}] KRYTYCZNY BŁĄD: Model Gemini ({task_name}) niedostępny (gemini_model is None)!")
+        return "Przepraszam, wystąpił wewnętrzny błąd systemu. Spróbuj ponownie później."
+
+    if not isinstance(prompt_history, list) or not all(isinstance(item, Content) for item in prompt_history):
+        logging.error(f"!!! [{user_psid}] Nieprawidłowy format historii promptu przekazany do _call_gemini ({task_name}). Typ: {type(prompt_history)}")
+        return "Przepraszam, wystąpił błąd przetwarzania wewnętrznego."
+
+    # Przygotuj finalny prompt dla API
+    # prompt_history tutaj powinno już zawierać instrukcję systemową jako pierwsze elementy
+    final_prompt_for_api = list(prompt_history) # Skopiuj historię
+    if user_message: # Jeśli jest nowa wiadomość użytkownika, dodaj ją
+        if not isinstance(user_message, str):
+            logging.warning(f"[{user_psid}] _call_gemini otrzymało user_message, które nie jest stringiem: {type(user_message)}. Konwertuję na string.")
+            user_message = str(user_message)
+        # Dodaj tylko jeśli user_message nie jest pustym stringiem po konwersji i strip()
+        if user_message.strip():
+            final_prompt_for_api.append(Content(role="user", parts=[Part.from_text(user_message.strip())]))
+        else:
+            logging.debug(f"[{user_psid}] _call_gemini otrzymało pusty user_message po strip(). Nie dodaję do promptu.")
+
+
+    logging.info(f"[{user_psid}] Wywołanie Gemini: {task_name} (Prompt: {len(final_prompt_for_api)} wiadomości)")
+
+    # Logowanie ostatniej wiadomości użytkownika dla kontekstu (tej, która została właśnie dodana, jeśli była)
+    last_user_msg_to_log = None
+    if final_prompt_for_api and final_prompt_for_api[-1].role == 'user':
+        last_user_msg_to_log = final_prompt_for_api[-1].parts[0].text if final_prompt_for_api[-1].parts else "[Brak treści w ostatniej wiadomości użytkownika]"
+
+    if last_user_msg_to_log:
+        log_msg_content = f"'{last_user_msg_to_log[:200]}{'...' if len(last_user_msg_to_log)>200 else ''}'"
+        logging.debug(f"    Ostatnia wiad. usera przekazana do AI ({task_name}): {log_msg_content}")
     else:
-        logging.debug(f"[{user_psid}] _call_gemini otrzymało pusty user_message po strip(). Nie dodaję do promptu.")
+        logging.debug(f"    Brak wiadomości użytkownika na końcu promptu przekazanego do AI ({task_name}).")
+
+
+    attempt = 0
+    while attempt < max_retries:
+        attempt += 1
+        logging.debug(f"    Próba wywołania Gemini {attempt}/{max_retries} ({task_name})...")
+        try:
+            _simulate_typing(user_psid, MIN_TYPING_DELAY_SECONDS * 0.8, page_access_token)
+
+            response = gemini_model.generate_content(
+                final_prompt_for_api, # Użyj final_prompt_for_api
+                generation_config=generation_config,
+                safety_settings=SAFETY_SETTINGS,
+                stream=False
+            )
+
+            if not response:
+                 logging.warning(f"[{user_psid}] Gemini ({task_name}) zwróciło pustą odpowiedź (None).")
+                 if attempt < max_retries:
+                     time.sleep(1 + random.random())
+                     continue
+                 else:
+                     return "Przepraszam, nie udało się uzyskać odpowiedzi od AI."
+
+            if not response.candidates:
+                prompt_feedback = response.prompt_feedback if hasattr(response, 'prompt_feedback') else None
+                if prompt_feedback and hasattr(prompt_feedback, 'block_reason') and prompt_feedback.block_reason != 0:
+                     block_reason_name = prompt_feedback.block_reason.name if hasattr(prompt_feedback.block_reason, 'name') else str(prompt_feedback.block_reason)
+                     logging.error(f"!!! BŁĄD [{user_psid}] Gemini ({task_name}) - PROMPT ZABLOKOWANY! Powód: {block_reason_name}. Feedback: {prompt_feedback}")
+                     return "Przepraszam, Twoja wiadomość nie mogła zostać przetworzona ze względu na zasady bezpieczeństwa."
+                else:
+                    logging.warning(f"[{user_psid}] Gemini ({task_name}) brak kandydatów w odpowiedzi. Feedback promptu: {prompt_feedback}")
+                    if attempt < max_retries: time.sleep(1.5 * attempt * random.uniform(0.8, 1.2)); continue
+                    else: return "Przepraszam, problem z generowaniem odpowiedzi (brak kandydatów)."
+
+            candidate = response.candidates[0]
+            finish_reason = candidate.finish_reason if hasattr(candidate, 'finish_reason') else None
+            finish_reason_val = finish_reason.value if finish_reason else 0
+
+            if finish_reason_val != 1: # STOP
+                finish_reason_name = finish_reason.name if hasattr(finish_reason, 'name') else str(finish_reason_val or 'UNKNOWN')
+                safety_ratings = candidate.safety_ratings if hasattr(candidate, 'safety_ratings') else "Brak danych safety"
+                logging.warning(f"[{user_psid}] Gemini ({task_name}) ZAKOŃCZONE NIEPRAWIDŁOWO! Powód: {finish_reason_name}. Safety: {safety_ratings}")
+                if finish_reason_val in [3, 4]: # SAFETY or RECITATION
+                    if attempt < max_retries: time.sleep(1.5 * attempt * random.uniform(0.8, 1.2)); continue
+                    else:
+                        if finish_reason_val == 3: return "Przepraszam, nie mogę wygenerować odpowiedzi ze względu na zasady bezpieczeństwa."
+                        if finish_reason_val == 4: return "Przepraszam, nie mogę wygenerować odpowiedzi, ponieważ naruszałaby zasady cytowania."
+                elif finish_reason_val == 2: # MAX_TOKENS
+                     partial_text = "".join(part.text for part in candidate.content.parts if hasattr(candidate.content, 'parts') and hasattr(part, 'text')).strip()
+                     if partial_text: return partial_text + "..."
+                     else:
+                         if attempt < max_retries: time.sleep(1.5 * attempt * random.uniform(0.8, 1.2)); continue
+                         else: return "Przepraszam, wygenerowana odpowiedź była zbyt długa."
+                else: # OTHER
+                    if attempt < max_retries: time.sleep(1.5 * attempt * random.uniform(0.8, 1.2)); continue
+                    else: return f"Przepraszam, problem z generowaniem odpowiedzi (kod: {finish_reason_name})."
+
+            if hasattr(candidate, 'content') and candidate.content and hasattr(candidate.content, 'parts') and candidate.content.parts:
+                generated_text = "".join(part.text for part in candidate.content.parts if hasattr(part, 'text')).strip()
+                if generated_text:
+                    logging.info(f"[{user_psid}] Gemini ({task_name}) zwróciło poprawną odpowiedź (długość: {len(generated_text)}).")
+                    logging.debug(f"    Odpowiedź Gemini ({task_name}): '{generated_text[:300]}{'...' if len(generated_text)>300 else ''}'")
+                    return generated_text
+                else:
+                    logging.warning(f"[{user_psid}] Gemini ({task_name}) zwróciło pustą treść mimo FinishReason=STOP.")
+                    if attempt < max_retries: time.sleep(1 + random.random()); continue
+                    else: return "Przepraszam, problem z wygenerowaniem odpowiedzi (pusta treść)."
+            else:
+                logging.warning(f"[{user_psid}] Gemini ({task_name}) zwróciło kandydata bez treści mimo FinishReason=STOP.")
+                if attempt < max_retries: time.sleep(1 + random.random()); continue
+                else: return "Przepraszam, problem z wygenerowaniem odpowiedzi (brak struktury treści)."
+
+        except HttpError as http_err:
+            status_code = http_err.resp.status if hasattr(http_err, 'resp') and hasattr(http_err.resp, 'status') else 'Nieznany'
+            reason = http_err.resp.reason if hasattr(http_err, 'resp') and hasattr(http_err.resp, 'reason') else 'Nieznany'
+            logging.error(f"!!! BŁĄD HTTP ({status_code} {reason}) [{user_psid}] Gemini ({task_name}) - Próba {attempt}/{max_retries}.")
+            if status_code in [429, 500, 503] and attempt < max_retries:
+                sleep_time = (2 ** attempt) + random.uniform(0, 1)
+                logging.warning(f"    Oczekiwanie {sleep_time:.2f}s przed ponowieniem z powodu błędu {status_code}...")
+                time.sleep(sleep_time); continue
+            else: return f"Przepraszam, błąd komunikacji z AI (HTTP {status_code})."
+        except Exception as e:
+            if isinstance(e, NameError) and 'gemini_model' in str(e):
+                 logging.critical(f"!!! KRYTYCZNY NameError [{user_psid}]: {e}. 'gemini_model' nie jest zdefiniowany!", exc_info=True)
+                 return "Przepraszam, krytyczny błąd wewnętrzny systemu AI."
+            else:
+                 logging.error(f"!!! BŁĄD Python [{user_psid}] podczas wywołania Gemini ({task_name}) - Próba {attempt}/{max_retries}: {e}", exc_info=True)
+                 if attempt < max_retries:
+                     sleep_time = (2 ** attempt) + random.uniform(0, 1)
+                     logging.warning(f"    Nieoczekiwany błąd Python. Oczekiwanie {sleep_time:.2f}s przed ponowieniem...")
+                     time.sleep(sleep_time); continue
+                 else: return "Przepraszam, wystąpił nieoczekiwany błąd przetwarzania."
+
+    logging.error(f"!!! KRYTYCZNY BŁĄD [{user_psid}] Gemini ({task_name}) - Nie udało się uzyskać poprawnej odpowiedzi po {max_retries} próbach.")
+    return "Przepraszam, nie udało się przetworzyć Twojej wiadomości po kilku próbach. Spróbuj ponownie później."
 
 
 # =====================================================================
