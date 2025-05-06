@@ -2050,7 +2050,7 @@ SYSTEM_INSTRUCTION_GENERAL = """Jesteś przyjaznym, proaktywnym i profesjonalnym
     *   **Jeśli ZNASZ już przedmiot (np. z kontekstu strony):** Przywitaj się uprzejmie, potwierdź przedmiot (np. "Dzień dobry! Widzę, że kontaktują się Państwo w sprawie korepetycji z przedmiotu [Przedmiot].") i przejdź od razu do kroku 2.
 
 2.  **Zbieranie Informacji o Uczniu:**
-    *   Zapytaj o **klasę** ucznia oraz **typ szkoły** (podstawowa czy średnia - liceum/technikum). Staraj się uzyskać obie informacje.
+    *   Zapytaj o **klasę** ucznia oraz **typ szkoły** (podstawowa czy średnia - liceum/technikum). Staraj się uzyskać obie informacje. Jeśli jest to poziom szkoły podstawowej poniżej 4 klasy poinformuj, że nie udzielamy korepetycji dla takiego poziomu.
     *   **Tylko jeśli** szkoła to liceum lub technikum, zapytaj o **poziom nauczania** (podstawowy czy rozszerzony).
 
 3.  **Prezentacja Ceny i Formatu:**
