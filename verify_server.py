@@ -2326,7 +2326,6 @@ def find_row_and_update_sheet(psid, start_time, student_data, sheet_row_index=No
 
     return update_sheet_phase2(student_data, sheet_row_index)
 
-
 @app.route('/webhook', methods=['POST'])
 def webhook_handle():
     """Główny handler dla przychodzących zdarzeń z Messengera."""
@@ -2338,29 +2337,31 @@ def webhook_handle():
         decoded_data = raw_data.decode('utf-8')
         data = json.loads(decoded_data)
         if data and data.get("object") == "page":
-            for entry in data.get("entry", []):
-                page_id = entry.get("id") # ID strony, która otrzymała zdarzenie
-                for event in entry.get("messaging", []):
+            for entry in data.get("entry", []): # Pętla po entries
+                page_id_from_entry = entry.get("id") # ID strony z samego entry
+
+                for event in entry.get("messaging", []): # Pętla po zdarzeniach w entry
                     sender_id = event.get("sender", {}).get("id")
                     recipient_id = event.get("recipient", {}).get("id") # ID strony, która otrzymała wiadomość
 
                     if not sender_id:
-                        logging.warning("Pominięto zdarzenie bez sender.id.")
+                        logging.warning(f"Pominięto zdarzenie bez sender.id w entry dla page_id: {page_id_from_entry}.")
                         continue
                     if not recipient_id:
-                        logging.warning(f"Pominięto zdarzenie dla sender {sender_id} bez recipient.id.")
+                        logging.warning(f"Pominięto zdarzenie dla sender {sender_id} bez recipient.id w entry dla page_id: {page_id_from_entry}.")
                         continue
 
                     # --- Pobierz konfigurację strony ---
                     page_info = PAGE_CONFIG.get(recipient_id)
                     if not page_info:
                         logging.error(f"!!! Otrzymano wiadomość dla nieznanej/nieskonfigurowanej strony ID: {recipient_id} (Sender: {sender_id}). Pomijam.")
-                        continue # Ignoruj wiadomości do stron, których nie ma w konfiguracji
+                        continue # Przejdź do następnego eventu
 
+                    # Jeśli doszliśmy tutaj, strona jest skonfigurowana
                     current_page_token = page_info['token']
-                    current_subject = page_info['subject']
+                    current_subject = page_info['subject'] # Główny przedmiot tej strony
                     current_page_name = page_info['name']
-                    logging.info(f"--- Przetwarzanie zdarzenia dla Strony: '{current_page_name}' ({recipient_id}) | Przedmiot: {current_subject} | Sender PSID: {sender_id} ---")
+                    logging.info(f"--- Przetwarzanie zdarzenia dla Strony: '{current_page_name}' ({recipient_id}) | Przedmiot Główny: {current_subject} | Sender PSID: {sender_id} ---")
 
                     # Sprawdź poprawność tokenu dla strony
                     if not current_page_token or len(current_page_token) < 50:
@@ -2378,369 +2379,310 @@ def webhook_handle():
                         log_statistic("new_contact")
 
                     logging.info(f"    Aktualny stan: {current_state}")
-                    # Loguj tylko klucze kontekstu dla zwięzłości
                     logging.debug(f"    Kontekst wejściowy (klucze): {list(context.keys())}")
-
 
                     action = None
                     msg_result = None
                     ai_response_text_raw = None
                     next_state = current_state
-                    model_resp_content = None # Odpowiedź AI jako obiekt Content
-                    user_content = None       # Wiadomość użytkownika jako obiekt Content
-                    # Zawsze zaczynaj od kopii aktualnego kontekstu
+                    model_resp_content = None
+                    user_content = None
                     context_data_to_save = context.copy()
-                    # Usuń potencjalne tymczasowe flagi powrotu na początku przetwarzania
                     context_data_to_save.pop('return_to_state', None)
                     context_data_to_save.pop('return_to_context', None)
 
-                    # Zapisz aktualny przedmiot w kontekście, jeśli go tam nie ma lub się różni
-                    # (na wypadek zmiany kontekstu lub gdy stan jest General)
-                    if context_data_to_save.get('required_subject') != current_subject:
-                         context_data_to_save['required_subject'] = current_subject
-                         logging.debug(f"    Zaktualizowano/ustawiono 'required_subject' w kontekście na: {current_subject}")
+                    # Upewnij się, że 'required_subject' w kontekście odzwierciedla przedmiot bieżącej strony,
+                    # zwłaszcza jeśli kontekst jest świeży lub stan to General.
+                    # W stanach Scheduling/Gathering, 'required_subject' powinien być już poprawnie ustawiony.
+                    if context_data_to_save.get('required_subject') != current_subject or 'required_subject' not in context_data_to_save:
+                        context_data_to_save['required_subject'] = current_subject
+                        logging.debug(f"    Ustawiono/zaktualizowano 'required_subject' w kontekście na: {current_subject} (na podstawie strony)")
 
 
                     trigger_gathering_ai_immediately = False
-                    slot_verification_failed = False # Flaga do obsługi zajętych slotów
-                    is_temporary_general_state = 'return_to_state' in context # Sprawdź ORYGINALNY kontekst
+                    slot_verification_failed = False
+                    is_temporary_general_state = 'return_to_state' in context
 
-                    # === Obsługa wiadomości / postbacków ===
                     if message_data := event.get("message"):
                         if message_data.get("is_echo"):
                             logging.debug(f"    Pominięto echo wiadomości (PSID: {sender_id}, Strona: {current_page_name}).")
-                            continue # Ignoruj echa wysłane przez bota
+                            continue
                         user_input_text = message_data.get("text", "").strip()
                         if user_input_text:
                             user_content = Content(role="user", parts=[Part.from_text(user_input_text)])
                             log_msg = f"'{user_input_text[:100]}{'...' if len(user_input_text)>100 else ''}'"
                             logging.info(f"    Odebrano wiadomość tekstową (stan={current_state}): {log_msg}")
-                            # Krótka pauza symulująca czytanie
                             if ENABLE_TYPING_DELAY:
                                 time.sleep(MIN_TYPING_DELAY_SECONDS * 0.3)
-
-                            # Przypisz akcję na podstawie bieżącego stanu
-                            if current_state == STATE_SCHEDULING_ACTIVE:
-                                action = 'handle_scheduling'
-                            elif current_state == STATE_GATHERING_INFO:
-                                action = 'handle_gathering'
-                            else: # Domyślnie stan GENERAL
-                                action = 'handle_general'
+                            if current_state == STATE_SCHEDULING_ACTIVE: action = 'handle_scheduling'
+                            elif current_state == STATE_GATHERING_INFO: action = 'handle_gathering'
+                            else: action = 'handle_general'
                         elif attachments := message_data.get("attachments"):
                             att_type = attachments[0].get('type', 'nieznany')
                             logging.info(f"      Otrzymano załącznik typu: {att_type}.")
-                            # Traktuj załącznik jako wiadomość użytkownika dla historii
                             user_content = Content(role="user", parts=[Part.from_text(f"[Użytkownik wysłał załącznik typu: {att_type}]")])
-                            # Prosta odpowiedź informacyjna
                             msg_result = "Dziękuję za przesłanie, ale obecnie mogę przetwarzać tylko wiadomości tekstowe."
-                            action = 'send_info' # Wyślij tylko informację
-                            next_state = current_state # Pozostań w bieżącym stanie
+                            action = 'send_info'
+                            next_state = current_state
                         else:
-                            logging.info("      Odebrano pustą wiadomość lub nieobsługiwany typ (np. udostępnienie lokalizacji).")
-                            action = None # Ignoruj
-
+                            logging.info("      Odebrano pustą wiadomość lub nieobsługiwany typ.")
+                            action = None
                     elif postback := event.get("postback"):
                         payload = postback.get("payload")
-                        title = postback.get("title", "") # Tytuł przycisku
+                        title = postback.get("title", "")
                         logging.info(f"    Odebrano postback: Payload='{payload}', Tytuł='{title}' (stan={current_state})")
-                        # Traktuj postback jako wiadomość użytkownika dla historii
                         user_input_text = f"Użytkownik kliknął przycisk: '{title}' (Payload: {payload})"
                         user_content = Content(role="user", parts=[Part.from_text(user_input_text)])
-
-                        # Specjalna obsługa payloadów sterujących
                         if payload == "CANCEL_SCHEDULING":
                              msg_result = "Rozumiem, proces umawiania został anulowany. Czy mogę pomóc w czymś innym?"
                              action = 'send_info'
-                             next_state = STATE_GENERAL # Wróć do stanu ogólnego
-                             context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject} # Resetuj kontekst, zachowaj przedmiot
-                        # Można dodać inne payloady np. "CHANGE_SUBJECT" itp.
-                        # Domyślnie przekaż do obsługi stanu
-                        elif current_state == STATE_SCHEDULING_ACTIVE:
-                            action = 'handle_scheduling'
-                        elif current_state == STATE_GATHERING_INFO:
-                            action = 'handle_gathering'
-                        else:
-                            action = 'handle_general'
-
+                             next_state = STATE_GENERAL
+                             context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
+                        elif current_state == STATE_SCHEDULING_ACTIVE: action = 'handle_scheduling'
+                        elif current_state == STATE_GATHERING_INFO: action = 'handle_gathering'
+                        else: action = 'handle_general'
                     elif event.get("read"):
                         logging.debug(f"    Otrzymano potwierdzenie odczytania przez użytkownika {sender_id} (Strona: {current_page_name}).")
-                        continue # Nic nie rób
+                        continue
                     elif event.get("delivery"):
                         logging.debug(f"    Otrzymano potwierdzenie dostarczenia wiadomości do {sender_id} (Strona: {current_page_name}).")
-                        continue # Nic nie rób
+                        continue
                     else:
                         logging.warning(f"    Otrzymano nieobsługiwany typ zdarzenia od {sender_id} dla strony {current_page_name}: {json.dumps(event)}")
-                        continue # Ignoruj nieznane zdarzenia
+                        continue
 
-                    # --- Pętla przetwarzania akcji (głównie do obsługi przejść między stanami bez odpowiedzi użytkownika) ---
                     loop_guard = 0
-                    max_loops = 3 # Zabezpieczenie przed nieskończoną pętlą stanów
+                    max_loops = 3
                     while action and loop_guard < max_loops:
                         loop_guard += 1
-                        logging.debug(f"  >> Pętla przetwarzania {loop_guard}/{max_loops} | Akcja: {action} | Stan wejściowy: {current_state} | Stan wyjściowy (oczekiwany): {next_state} | Przedmiot: {current_subject}")
+                        # Odczytaj 'required_subject' z context_data_to_save, który jest najbardziej aktualny
+                        # i powinien zawierać przedmiot strony, jeśli nie został nadpisany przez logikę AI
+                        effective_subject_for_action = context_data_to_save.get('required_subject', current_subject)
+                        logging.debug(f"  >> Pętla przetwarzania {loop_guard}/{max_loops} | Akcja: {action} | Stan wejściowy: {current_state} | Stan wyjściowy (oczekiwany): {next_state} | Efektywny Przedmiot: {effective_subject_for_action}")
                         current_action = action
-                        action = None # Resetuj akcję na początku każdej iteracji pętli
+                        action = None
 
-                        # --- Stan Generalny ---
                         if current_action == 'handle_general':
                             logging.debug("  >> Wykonanie: handle_general")
-                            # W tym stanie, przedmiot jest znany z kontekstu strony (current_subject)
-                            # Modyfikujemy logikę: nie wywołujemy AI od razu, jeśli to początek rozmowy w General
-                            # Wysyłamy wiadomość powitalną i czekamy na odpowiedź
+                            # `effective_subject_for_action` powinien być `current_subject` (przedmiot strony)
+                            # lub przedmiot, który AI zidentyfikowało w poprzedniej turze.
+                            # Dla celów powitania i informacji o innych stronach, używamy `current_subject` (przedmiot strony).
 
-                            # Czy to jest PIERWSZE wejście do stanu General dla tej rozmowy (lub powrót np. z anulowania)?
-                            # Sprawdzamy, czy stan się właśnie zmienił na General LUB czy historia jest pusta
                             is_initial_general_entry = (current_state != STATE_GENERAL) or (not history_for_gemini) or (context_data_to_save.get('_just_reset', False))
-                            context_data_to_save.pop('_just_reset', None) # Usuń flagę
+                            context_data_to_save.pop('_just_reset', None)
+                            user_message_text_for_ai = user_content.parts[0].text if user_content and user_content.parts else None
 
-                            # Czy użytkownik coś napisał TERAZ?
-                            user_message_text = user_content.parts[0].text if user_content and user_content.parts else None
+                            if is_initial_general_entry and not user_message_text_for_ai:
+                                logging.info(f"      Pierwsze wejście do General dla {current_subject} (bez wiadomości usera). Wysyłam powitanie z linkami.")
+                                # Przygotuj tekst o innych przedmiotach i linkach
+                                other_subjects_links_parts = []
+                                for subj_iter, link_iter in ALL_SUBJECT_LINKS.items():
+                                    if subj_iter.lower() != current_subject.lower():
+                                        other_subjects_links_parts.append(f"- {subj_iter}: {link_iter}")
+                                links_text_for_user = ""
+                                if other_subjects_links_parts:
+                                    links_text_for_user = "\n\nUdzielamy również korepetycji z następujących przedmiotów. Mogą Państwo skontaktować się z nami bezpośrednio przez odpowiednią stronę:\n" + "\n".join(other_subjects_links_parts)
 
-                            if is_initial_general_entry and not user_message_text:
-                                # Pierwsze wejście bez wiadomości od użytkownika (np. kliknięcie 'Get Started' lub reset stanu)
-                                logging.info(f"      Pierwsze wejście do General dla {current_subject} (bez wiadomości usera). Wysyłam powitanie.")
-                                # Wygeneruj linki do innych przedmiotów
-                                other_subjects_links = []
-                                for subj, link in ALL_SUBJECT_LINKS.items():
-                                    if subj != current_subject: # Nie linkuj do bieżącego
-                                        other_subjects_links.append(f"{subj}: {link}")
-                                links_text = "\n\nUdzielamy również korepetycji z innych przedmiotów:\n" + "\n".join(other_subjects_links) if other_subjects_links else ""
-
-                                msg_result = f"Dzień dobry! Dziękujemy za kontakt w sprawie korepetycji z przedmiotu **{current_subject}**. W czym mogę pomóc? Jeśli chcą Państwo umówić termin, proszę dać znać - zapytam wtedy o klasę ucznia i poziom nauczania." + links_text
+                                msg_result = f"Dzień dobry! Dziękujemy za kontakt w sprawie korepetycji z przedmiotu **{current_subject}**. W czym mogę pomóc? Jeśli chcą Państwo umówić termin, proszę dać znać - zapytam wtedy o klasę ucznia i poziom nauczania." + links_text_for_user
                                 model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
                                 next_state = STATE_GENERAL
                                 context_data_to_save['type'] = STATE_GENERAL
-                                action = 'send_info' # Ustaw akcję wysłania wiadomości
+                                context_data_to_save['required_subject'] = current_subject # Upewnij się
+                                action = 'send_info' # Wyślij wiadomość
                                 current_state = next_state
-                                continue # Kontynuuj pętlę, aby wykonać send_info
-                            elif user_message_text:
-                                # Użytkownik coś napisał w stanie General
-                                logging.info(f"      Obsługa wiadomości usera w stanie General dla {current_subject}.")
-                                was_temporary = 'return_to_state' in context # Sprawdź oryginalny kontekst
+                                continue
+                            elif user_message_text_for_ai:
+                                logging.info(f"      Obsługa wiadomości usera w stanie General dla {effective_subject_for_action}.")
+                                was_temporary = 'return_to_state' in context
 
-                                # Wywołaj AI ogólne (przekazując, że przedmiot jest już znany)
-                                ai_response_text_raw = get_gemini_general_response(
-                                     sender_id,
-                                     user_message_text,
-                                     history_for_gemini,
-                                     was_temporary,
-                                     current_page_token, # Przekaż token
-                                     current_subject # Przekaż znany przedmiot
+                                # Przygotuj sformatowaną listę wszystkich przedmiotów i linków dla AI
+                                formatted_links_for_ai_prompt = []
+                                for subj_iter, link_iter in ALL_SUBJECT_LINKS.items():
+                                    formatted_links_for_ai_prompt.append(f"{subj_iter}: {link_iter}")
+                                all_subject_links_text_for_ai_prompt = "\n".join(formatted_links_for_ai_prompt)
+
+                                final_system_instruction_general = SYSTEM_INSTRUCTION_GENERAL.format(
+                                    all_subject_links_formatted_for_ai=all_subject_links_text_for_ai_prompt,
+                                    current_subject_from_page=current_subject, # Zawsze przedmiot bieżącej strony
+                                    intent_marker=INTENT_SCHEDULE_MARKER,
+                                    return_marker=RETURN_TO_PREVIOUS
+                                )
+
+                                model_ack = f"Rozumiem. Aktualnie rozmawiamy o przedmiocie '{current_subject}'. W razie potrzeby poinformuję o innych przedmiotach i linkach ({all_subject_links_text_for_ai_prompt})."
+                                if was_temporary: model_ack += f" W trybie tymczasowym dodam {RETURN_TO_PREVIOUS}."
+
+                                initial_prompt_for_general = [
+                                    Content(role="user", parts=[Part.from_text(final_system_instruction_general)]),
+                                    Content(role="model", parts=[Part.from_text(model_ack)])
+                                ]
+                                history_for_this_gemini_call = initial_prompt_for_general + history_for_gemini
+
+                                ai_response_text_raw = _call_gemini(
+                                    user_psid,
+                                    history_for_this_gemini_call,
+                                    GENERATION_CONFIG_DEFAULT,
+                                    f"General Conversation (Strona: {current_page_name})",
+                                    current_page_token,
+                                    user_message=user_message_text_for_ai
                                 )
 
                                 if ai_response_text_raw:
-                                    # Zapisz pełną odpowiedź AI do historii
                                     model_resp_content = Content(role="model", parts=[Part.from_text(ai_response_text_raw)])
-
-                                    # --- Analiza odpowiedzi AI General ---
-                                    # Sprawdź, czy AI chce wrócić do poprzedniego stanu
                                     if RETURN_TO_PREVIOUS in ai_response_text_raw and was_temporary:
-                                        logging.info(f"      AI Ogólne (tymczasowe) -> Wykryto znacznik powrotu [{RETURN_TO_PREVIOUS}].")
                                         msg_result = ai_response_text_raw.split(RETURN_TO_PREVIOUS, 1)[0].strip()
                                         next_state = context.get('return_to_state', STATE_GENERAL)
                                         context_data_to_save = context.get('return_to_context', {}).copy()
-                                        context_data_to_save['type'] = next_state
-                                        logging.info(f"      Przywracam stan: {next_state}. Kontekst przywrócony (klucze): {list(context_data_to_save.keys())}")
-
-                                        # Ustaw kolejną akcję
-                                        user_content_for_next_action = None # Powrót nie ma wiadomości usera
-                                        if next_state == STATE_SCHEDULING_ACTIVE:
-                                             action = 'handle_scheduling'
+                                        context_data_to_save['type'] = next_state # Ważne: typ jest z powrotu
+                                        # 'required_subject' powinien być w return_to_context, jeśli był istotny
+                                        logging.info(f"      AI Ogólne (tymczasowe) -> Powrót do stanu: {next_state}. Kontekst przywrócony (klucze): {list(context_data_to_save.keys())}")
+                                        if next_state == STATE_SCHEDULING_ACTIVE: action = 'handle_scheduling'
                                         elif next_state == STATE_GATHERING_INFO:
-                                             action = 'handle_gathering'
-                                             trigger_gathering_ai_immediately = True
-                                        else:
-                                             next_state = STATE_GENERAL
-                                             context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject}
-                                             action = None
-                                        if action:
-                                             logging.debug(f"      Ustawiono kolejną akcję po powrocie: {action}")
-                                             current_state = next_state
-                                             continue
-
-                                    # Sprawdź, czy AI wykryło intencję umówienia wizyty
+                                            action = 'handle_gathering'
+                                            trigger_gathering_ai_immediately = True
+                                        else: # Powrót do General lub nieznany
+                                            action = 'handle_general' # Ponownie obsłuż general, może AI ma coś do powiedzenia
+                                            # lub action = None jeśli chcemy tylko wysłać i czekać
+                                        if action: current_state = next_state; continue
                                     elif INTENT_SCHEDULE_MARKER in ai_response_text_raw:
-                                        logging.info(f"      AI Ogólne -> Wykryto intencję planowania [{INTENT_SCHEDULE_MARKER}] dla przedmiotu {current_subject}.")
                                         msg_result = ai_response_text_raw.split(INTENT_SCHEDULE_MARKER, 1)[0].strip()
-
-                                        logging.info(f"      Przechodzę do planowania dla przedmiotu: {current_subject}.")
-                                        next_state = STATE_SCHEDULING_ACTIVE
-                                        action = 'handle_scheduling' # Ustaw kolejną akcję
-                                        # Przygotuj nowy kontekst dla stanu Scheduling
-                                        context_data_to_save = {'type': STATE_SCHEDULING_ACTIVE, 'required_subject': current_subject}
-                                        logging.debug(f"      Nowy kontekst dla Scheduling: {context_data_to_save}")
-                                        # Kontynuuj pętlę, aby wykonać handle_scheduling
-                                        current_state = next_state # Aktualizuj stan wejściowy
-                                        continue
-                                    else: # Normalna odpowiedź AI General (bez znaczników)
-                                        logging.info(f"      AI Ogólne -> Standardowa odpowiedź dla {current_subject}.")
-                                        msg_result = ai_response_text_raw
-                                        next_state = STATE_GENERAL # Pozostań w stanie General
-                                        # Jeśli byliśmy w stanie tymczasowym, zachowaj flagi powrotu
-                                        if was_temporary:
-                                             context_data_to_save['return_to_state'] = context['return_to_state']
-                                             context_data_to_save['return_to_context'] = context.get('return_to_context', {})
-                                             context_data_to_save['type'] = STATE_GENERAL # Ustaw typ na General
-                                             context_data_to_save['required_subject'] = current_subject # Upewnij się, że przedmiot jest
-                                             logging.debug("      Zachowuję flagi powrotu w stanie General (tymczasowym).")
+                                        # AI powinno było potwierdzić przedmiot w `msg_result` lub użyć `effective_subject_for_action`
+                                        # Spróbuj wyparować przedmiot z odpowiedzi AI, jeśli nie jest jasny
+                                        confirmed_subject_by_ai = effective_subject_for_action # Domyślnie
+                                        subject_match_in_ai_resp = re.search(r'\b(polski|matematyka|angielski)\b', msg_result, re.IGNORECASE)
+                                        if subject_match_in_ai_resp:
+                                            confirmed_subject_by_ai = subject_match_in_ai_resp.group(1).capitalize()
+                                            logging.info(f"      AI Ogólne -> Wykryto intencję planowania. Przedmiot z odpowiedzi AI: {confirmed_subject_by_ai}.")
                                         else:
-                                            # Zawsze zachowaj przedmiot w kontekście General
-                                            context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject}
+                                            logging.info(f"      AI Ogólne -> Wykryto intencję planowania. Używam efektywnego przedmiotu: {confirmed_subject_by_ai}.")
 
-                                        action = None # Zakończ pętlę, wyślij odpowiedź
-                                        # break # Przerwij pętlę while action
-                                else: # Błąd wywołania AI General
+                                        if confirmed_subject_by_ai and confirmed_subject_by_ai in AVAILABLE_SUBJECTS:
+                                            next_state = STATE_SCHEDULING_ACTIVE
+                                            context_data_to_save = {'type': STATE_SCHEDULING_ACTIVE, 'required_subject': confirmed_subject_by_ai}
+                                            action = 'handle_scheduling'
+                                            current_state = next_state; continue
+                                        else:
+                                            logging.warning(f"[{sender_id}] Wykryto intent_schedule, ale nie udało się ustalić poprawnego przedmiotu. Proszę użytkownika o podanie.")
+                                            clarification_msg = (msg_result + "\n\n" if msg_result else "") + f"Rozumiem, że chcą Państwo umówić lekcję. Proszę tylko sprecyzować, z którego przedmiotu ({', '.join(AVAILABLE_SUBJECTS)})?"
+                                            msg_result = clarification_msg
+                                            model_resp_content = Content(role="model", parts=[Part.from_text(clarification_msg)])
+                                            next_state = STATE_GENERAL
+                                            context_data_to_save['type'] = STATE_GENERAL
+                                            context_data_to_save['required_subject'] = current_subject # Wróć do przedmiotu strony
+                                            action = None
+                                    else: # Normalna odpowiedź AI General
+                                        msg_result = ai_response_text_raw
+                                        next_state = STATE_GENERAL
+                                        context_data_to_save['type'] = STATE_GENERAL
+                                        # Zachowaj `required_subject` z `effective_subject_for_action` jeśli AI go nie zmieniło,
+                                        # lub `current_subject` jeśli wracamy do "czystego" stanu general dla strony
+                                        context_data_to_save['required_subject'] = effective_subject_for_action # Domyślnie przedmiot z tej tury
+                                        if was_temporary: # Jeśli to był stan tymczasowy, przywróć flagi powrotu
+                                            context_data_to_save['return_to_state'] = context.get('return_to_state')
+                                            context_data_to_save['return_to_context'] = context.get('return_to_context', {})
+                                        action = None
+                                else: # Błąd AI General
                                     msg_result = "Przepraszam, mam chwilowy problem z przetworzeniem Twojej wiadomości. Spróbuj ponownie za moment."
-                                    model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)]) # Zapisz info o błędzie
-                                    next_state = STATE_GENERAL # Pozostań w General
-                                    context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject} # Zachowaj przedmiot
-                                    action = None # Zakończ pętlę
-                            else:
-                                # To się może zdarzyć, jeśli użytkownik np. tylko polubił wiadomość
-                                logging.debug("Wywołano 'handle_general' bez nowej treści wiadomości użytkownika (user_content). Pozostaję w stanie General.")
-                                action = None # Zakończ pętlę, nic nie rób
+                                    model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                    next_state = STATE_GENERAL
+                                    context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
+                                    action = None
+                            else: # Brak nowej wiadomości od użytkownika i nie jest to pierwsze wejście do General
+                                logging.debug("Wywołano 'handle_general' bez nowej treści wiadomości użytkownika i nie jest to pierwsze wejście. Nic nie robię.")
+                                action = None
 
-                        # --- Stan Planowania ---
+
                         elif current_action == 'handle_scheduling':
                             logging.debug("  >> Wykonanie: handle_scheduling")
-                            # Przedmiot powinien być już w `current_subject`
-                            if not current_subject:
-                                logging.error(f"!!! KRYTYCZNY BŁĄD: Wejście do stanu SCHEDULING bez 'current_subject'! PSID: {sender_id}, Strona: {current_page_name}")
-                                msg_result = f"Przepraszam, wystąpił błąd wewnętrzny. Proszę spróbować ponownie."
-                                model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
-                                next_state = STATE_GENERAL # Wróć do General
-                                context_data_to_save = {'type': STATE_GENERAL, 'required_subject': PAGE_CONFIG.get(recipient_id, {}).get('subject', 'Nieznany')} # Spróbuj odzyskać
-                                action = 'send_info'
-                                current_state = next_state
-                                continue
-
-                            # Pobierz listę konfiguracji kalendarzy DLA wymaganego przedmiotu
-                            subject_calendars_config = SUBJECT_TO_CALENDARS.get(current_subject.lower(), [])
-
-                            if not subject_calendars_config:
-                                logging.error(f"!!! BŁĄD KONFIGURACJI: Brak kalendarzy zdefiniowanych dla przedmiotu '{current_subject}'! PSID: {sender_id}, Strona: {current_page_name}")
-                                msg_result = f"Przepraszam, wygląda na to, że obecnie nie mamy dostępnych kalendarzy dla przedmiotu '{current_subject}'. Skontaktuj się z nami bezpośrednio, aby omówić możliwości."
+                            # `effective_subject_for_action` tutaj to przedmiot, dla którego planujemy
+                            if not effective_subject_for_action or effective_subject_for_action not in AVAILABLE_SUBJECTS:
+                                logging.error(f"!!! KRYTYCZNY BŁĄD: Wejście do stanu SCHEDULING bez poprawnego 'required_subject' w kontekście! PSID: {sender_id}, Strona: {current_page_name}. Kontekstowy przedmiot: {effective_subject_for_action}")
+                                msg_result = f"Przepraszam, wystąpił błąd. Nie wiem, dla jakiego przedmiotu szukamy terminu. Proszę, podaj przedmiot ({', '.join(AVAILABLE_SUBJECTS)})."
                                 model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
                                 next_state = STATE_GENERAL
-                                context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject}
+                                context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
                                 action = 'send_info'
-                                current_state = next_state
-                                continue
+                                current_state = next_state; continue
+
+                            subject_calendars_config = SUBJECT_TO_CALENDARS.get(effective_subject_for_action.lower(), [])
+                            if not subject_calendars_config:
+                                logging.error(f"!!! BŁĄD KONFIGURACJI: Brak kalendarzy zdefiniowanych dla przedmiotu '{effective_subject_for_action}'! PSID: {sender_id}, Strona: {current_page_name}")
+                                msg_result = f"Przepraszam, wygląda na to, że obecnie nie mamy dostępnych kalendarzy dla przedmiotu '{effective_subject_for_action}'. Skontaktuj się z nami bezpośrednio."
+                                model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                next_state = STATE_GENERAL
+                                context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
+                                action = 'send_info'
+                                current_state = next_state; continue
 
                             try:
                                 tz = _get_calendar_timezone()
-                                now = datetime.datetime.now(tz)
-                                search_start_base = now # Zawsze zaczynaj od teraz
+                                now_cal_tz = datetime.datetime.now(tz)
+                                search_start_base = now_cal_tz
                                 search_end_date = (search_start_base + datetime.timedelta(days=MAX_SEARCH_DAYS)).date()
-                                search_end = tz.localize(datetime.datetime.combine(search_end_date, datetime.time(WORK_END_HOUR, 0))) # Koniec ostatniego dnia roboczego
+                                search_end = tz.localize(datetime.datetime.combine(search_end_date, datetime.time(WORK_END_HOUR, 0)))
 
-                                # Informacja dla użytkownika, że szukamy
-                                logging.info(f"      Pobieranie wolnych zakresów dla przedmiotu '{current_subject}' (Kalendarze: {[c['name'] for c in subject_calendars_config]})")
-                                # Dłuższa symulacja pisania przy szukaniu w kalendarzu
+                                logging.info(f"      Pobieranie wolnych zakresów dla '{effective_subject_for_action}' (Kalendarze: {[c['name'] for c in subject_calendars_config]})")
                                 _simulate_typing(sender_id, random.uniform(MIN_TYPING_DELAY_SECONDS, MAX_TYPING_DELAY_SECONDS * 0.8), current_page_token)
-
-                                # Pobierz wolne zakresy TYLKO z kalendarzy dla danego przedmiotu
                                 free_ranges = get_free_time_ranges(subject_calendars_config, search_start_base, search_end)
 
                                 if free_ranges:
-                                    logging.info(f"      Znaleziono {len(free_ranges)} łącznych wolnych zakresów dla '{current_subject}'. Wywołanie AI Planującego...")
-
-                                    current_input_text = None
-                                    if user_content and user_content.parts: # Tylko jeśli user coś napisał w tej turze
-                                         current_input_text = user_content.parts[0].text
-
+                                    logging.info(f"      Znaleziono {len(free_ranges)} wolnych zakresów dla '{effective_subject_for_action}'. Wywołanie AI Planującego...")
+                                    user_message_text_for_ai = user_content.parts[0].text if user_content and user_content.parts else None
                                     if slot_verification_failed:
-                                        fail_info = f"\n[Informacja dla Ciebie: Poprzednio proponowany termin okazał się w międzyczasie zajęty. Zaproponuj proszę inny dostępny termin z listy dla {current_subject}.]"
-                                        current_input_text = (current_input_text + fail_info) if current_input_text else fail_info
-                                        slot_verification_failed = False # Resetuj flagę
+                                        fail_info = f"\n[Informacja dla Ciebie: Poprzednio proponowany termin okazał się w międzyczasie zajęty. Zaproponuj proszę inny dostępny termin z listy dla {effective_subject_for_action}.]"
+                                        user_message_text_for_ai = (user_message_text_for_ai + fail_info) if user_message_text_for_ai else fail_info
+                                        slot_verification_failed = False
 
-                                    # Wywołaj AI planujące dla danego przedmiotu
                                     ai_response_text_raw = get_gemini_scheduling_response(
-                                        user_psid=sender_id,
-                                        history_for_scheduling_ai=history_for_gemini,
-                                        current_user_message_text=current_input_text,
-                                        available_ranges=free_ranges,
-                                        required_subject=current_subject, # Przekaż przedmiot
-                                        page_access_token=current_page_token # Przekaż token
+                                        sender_id, history_for_gemini, user_message_text_for_ai,
+                                        free_ranges, effective_subject_for_action, current_page_token
                                     )
-
                                     if ai_response_text_raw:
-                                        # Reszta logiki handle_scheduling (weryfikacja, zapis Fazy 1, przejście do Gathering)
-                                        # pozostaje taka sama jak w poprzedniej wersji,
-                                        # tylko używa `current_subject` i `current_page_token`
-                                        # Wklejam tę część poniżej, upewniając się, że używa poprawnych zmiennych
-
                                         model_resp_content = Content(role="model", parts=[Part.from_text(ai_response_text_raw)])
-
                                         if ai_response_text_raw.strip() == SWITCH_TO_GENERAL:
-                                            logging.info(f"      AI Planujące ({current_subject}) -> Wykryto prośbę o przełączenie na tryb ogólny [{SWITCH_TO_GENERAL}].")
+                                            logging.info(f"      AI Planujące ({effective_subject_for_action}) -> Przełączenie na General.")
                                             context_data_to_save['return_to_state'] = STATE_SCHEDULING_ACTIVE
-                                            context_data_to_save['return_to_context'] = {'required_subject': current_subject} # Zapisz tylko przedmiot
-                                            context_data_to_save['type'] = STATE_GENERAL
+                                            context_data_to_save['return_to_context'] = {'required_subject': effective_subject_for_action}
+                                            context_data_to_save['type'] = STATE_GENERAL # Nowy typ
+                                            # 'required_subject' w context_data_to_save zostanie nadpisany na przedmiot strony (current_subject)
+                                            # gdy wejdzie do 'handle_general' na początku pętli, co jest poprawne dla trybu tymczasowego General.
                                             next_state = STATE_GENERAL
                                             action = 'handle_general'
                                             msg_result = None
-                                            logging.debug(f"      Zapisano stan powrotu. Nowy stan: {next_state}. Kontekst zapisu: {context_data_to_save}")
-                                            current_state = next_state
-                                            continue
-
+                                            current_state = next_state; continue
                                         iso_match = re.search(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}(.*?){re.escape(SLOT_ISO_MARKER_SUFFIX)}", ai_response_text_raw)
                                         if iso_match:
                                             extracted_iso = iso_match.group(1).strip()
-                                            logging.info(f"      AI Planujące ({current_subject}) zwróciło potwierdzony slot ISO: {extracted_iso}")
                                             text_for_user = re.sub(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}.*?{re.escape(SLOT_ISO_MARKER_SUFFIX)}", "", ai_response_text_raw).strip()
                                             text_for_user = re.sub(r'\s+', ' ', text_for_user).strip()
-
                                             try:
                                                 proposed_start = datetime.datetime.fromisoformat(extracted_iso)
-                                                tz_cal = _get_calendar_timezone()
-                                                if proposed_start.tzinfo is None: proposed_start = tz_cal.localize(proposed_start)
-                                                else: proposed_start = proposed_start.astimezone(tz_cal)
-
+                                                if proposed_start.tzinfo is None: proposed_start = tz.localize(proposed_start)
+                                                else: proposed_start = proposed_start.astimezone(tz)
                                                 proposed_slot_formatted = format_slot_for_user(proposed_start)
-                                                logging.info(f"      Rozpoczynam weryfikację dostępności slotu: {proposed_slot_formatted} ({current_subject}) w kalendarzach i arkuszu '{MAIN_SHEET_NAME}'...")
                                                 _simulate_typing(sender_id, MIN_TYPING_DELAY_SECONDS * 0.6, current_page_token)
 
-                                                chosen_calendar_id = None
-                                                chosen_calendar_name = None
-                                                sheet_blocks_slot = False
+                                                chosen_calendar_id = None; chosen_calendar_name = None; sheet_blocks_slot = False
                                                 min_duration_delta = datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
                                                 proposed_end = proposed_start + min_duration_delta
-
-                                                logging.debug(f"      Weryfikacja w arkuszu '{MAIN_SHEET_NAME}' dla slotu {proposed_start:%H:%M}-{proposed_end:%H:%M}")
                                                 potential_sheet_blockers = get_sheet_booked_slots(SPREADSHEET_ID, MAIN_SHEET_NAME, proposed_start, proposed_end)
                                                 for blocker in potential_sheet_blockers:
                                                     if max(proposed_start, blocker['start']) < min(proposed_end, blocker['end']):
-                                                         logging.warning(f"      Weryfikacja: Slot {proposed_slot_formatted} ZAJĘTY w ARKUSZU '{MAIN_SHEET_NAME}' przez rezerwację '{blocker.get('calendar_name', '?')}' ({blocker['start']:%H:%M}-{blocker['end']:%H:%M}).")
-                                                         sheet_blocks_slot = True
-                                                         break
-
+                                                         sheet_blocks_slot = True; break
                                                 if not sheet_blocks_slot:
-                                                    logging.debug(f"      Slot nie zablokowany w arkuszu '{MAIN_SHEET_NAME}'. Weryfikacja w Google Calendar (dla {current_subject})...")
                                                     for cal_config in subject_calendars_config:
-                                                        cal_id = cal_config['id']
-                                                        cal_name = cal_config['name']
-                                                        if is_slot_actually_free(proposed_start, cal_id):
-                                                            chosen_calendar_id = cal_id
-                                                            chosen_calendar_name = cal_name
-                                                            logging.info(f"      Slot {proposed_slot_formatted} POTWIERDZONY jako wolny w kalendarzu '{cal_name}' ({cal_id}).")
-                                                            break
-
+                                                        if is_slot_actually_free(proposed_start, cal_config['id']):
+                                                            chosen_calendar_id = cal_config['id']; chosen_calendar_name = cal_config['name']; break
                                                 if chosen_calendar_id:
-                                                    logging.info(f"      Wybrano kalendarz '{chosen_calendar_name}' ({chosen_calendar_id}) dla rezerwacji. Rozpoczynam zapis Fazy 1 do '{MAIN_SHEET_NAME}'...")
                                                     write_ok, write_msg_or_row = write_to_sheet_phase1(sender_id, proposed_start, chosen_calendar_name)
-
                                                     if write_ok:
                                                         sheet_row_idx = write_msg_or_row if isinstance(write_msg_or_row, int) else None
-                                                        parent_profile = get_user_profile(sender_id, current_page_token) # Użyj tokenu strony
+                                                        parent_profile = get_user_profile(sender_id, current_page_token)
                                                         parent_fn = parent_profile.get('first_name', '') if parent_profile else ''
                                                         parent_ln = parent_profile.get('last_name', '') if parent_profile else ''
-
-                                                        confirm_msg = text_for_user if text_for_user else f"Potwierdzam rezerwację terminu {proposed_slot_formatted} na {current_subject}."
+                                                        confirm_msg = text_for_user if text_for_user else f"Potwierdzam rezerwację terminu {proposed_slot_formatted} na {effective_subject_for_action}."
                                                         confirm_msg += " Aby dokończyć rezerwację, poproszę teraz o kilka informacji dotyczących ucznia."
                                                         msg_result = confirm_msg
                                                         model_resp_content = Content(role="model", parts=[Part.from_text(confirm_msg)])
-
                                                         next_state = STATE_GATHERING_INFO
                                                         context_data_to_save = {
                                                             'type': STATE_GATHERING_INFO,
@@ -2748,286 +2690,167 @@ def webhook_handle():
                                                             'proposed_slot_formatted': proposed_slot_formatted,
                                                             'chosen_calendar_id': chosen_calendar_id,
                                                             'chosen_calendar_name': chosen_calendar_name,
-                                                            'required_subject': current_subject, # Zachowaj przedmiot
-                                                            'known_parent_first_name': parent_fn,
-                                                            'known_parent_last_name': parent_ln,
-                                                            'known_student_first_name': '',
-                                                            'known_student_last_name': '',
-                                                            'known_grade': '',
-                                                            'known_level': '',
+                                                            'required_subject': effective_subject_for_action, # Ważne: przedmiot rezerwacji
+                                                            'known_parent_first_name': parent_fn, 'known_parent_last_name': parent_ln,
+                                                            'known_student_first_name': '', 'known_student_last_name': '',
+                                                            'known_grade': '', 'known_level': '',
                                                             'sheet_row_index': sheet_row_idx
                                                         }
-                                                        action = 'handle_gathering'
-                                                        trigger_gathering_ai_immediately = True
-                                                        logging.debug(f"      Przejście do {next_state}. Akcja: {action}. Trigger AI: {trigger_gathering_ai_immediately}. Kontekst: {list(context_data_to_save.keys())}")
-                                                        current_state = next_state
-                                                        continue
-
+                                                        action = 'handle_gathering'; trigger_gathering_ai_immediately = True
+                                                        current_state = next_state; continue
                                                     else: # Błąd zapisu Fazy 1
-                                                        logging.error(f"Błąd zapisu Fazy 1 do arkusza '{MAIN_SHEET_NAME}': {write_msg_or_row}. PSID: {sender_id}")
-                                                        msg_result = f"Przepraszam, wystąpił błąd techniczny podczas próby rezerwacji terminu ({write_msg_or_row}). Proszę spróbować ponownie za chwilę lub skontaktować się z nami bezpośrednio."
+                                                        msg_result = f"Przepraszam, błąd techniczny ({write_msg_or_row}). Spróbujmy ponownie."
                                                         model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
-                                                        next_state = STATE_GENERAL
-                                                        context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
-                                                        action = None
-                                                        # break
-
+                                                        next_state = STATE_SCHEDULING_ACTIVE # Pozostań w scheduling
+                                                        context_data_to_save['type'] = STATE_SCHEDULING_ACTIVE
+                                                        context_data_to_save['required_subject'] = effective_subject_for_action
+                                                        action = None # Wyślij i czekaj
                                                 else: # Slot zajęty
-                                                    blocker_source = f"w arkuszu '{MAIN_SHEET_NAME}'" if sheet_blocks_slot else f'w kalendarzu Google dla {current_subject}'
-                                                    logging.warning(f"      Weryfikacja NIEUDANA! Slot {extracted_iso} ({proposed_slot_formatted}) okazał się zajęty {blocker_source}. PSID: {sender_id}")
-                                                    fail_msg = f"Ojej, wygląda na to, że termin {proposed_slot_formatted} został w międzyczasie zarezerwowany. Spróbujmy znaleźć inny pasujący termin dla {current_subject}."
+                                                    fail_msg = f"Ojej, termin {proposed_slot_formatted} został w międzyczasie zarezerwowany. Spróbujmy znaleźć inny dla {effective_subject_for_action}."
                                                     msg_result = fail_msg
-                                                    fail_info_for_ai = f"\n[System: Termin {proposed_slot_formatted} okazał się zajęty. Zaproponuj inny dostępny termin z listy dla {current_subject}.]"
+                                                    fail_info_for_ai = f"\n[System: Termin {proposed_slot_formatted} zajęty. Zaproponuj inny.]"
                                                     model_resp_content = Content(role="model", parts=[Part.from_text(ai_response_text_raw + fail_info_for_ai)])
-                                                    next_state = STATE_SCHEDULING_ACTIVE
-                                                    slot_verification_failed = True
+                                                    next_state = STATE_SCHEDULING_ACTIVE; slot_verification_failed = True
                                                     context_data_to_save['type'] = STATE_SCHEDULING_ACTIVE
-                                                    context_data_to_save['required_subject'] = current_subject # Upewnij się, że jest
+                                                    context_data_to_save['required_subject'] = effective_subject_for_action
                                                     action = None
-                                                    # break
-
-                                            except ValueError:
-                                                logging.error(f"!!! BŁĄD: AI ({current_subject}) zwróciło nieprawidłowy format ISO w znaczniku: '{extracted_iso}'. PSID: {sender_id}")
-                                                msg_result = "Przepraszam, wystąpił błąd techniczny podczas przetwarzania wybranego terminu. Spróbujmy wybrać termin jeszcze raz."
+                                            except ValueError: # Błąd parsowania ISO
+                                                msg_result = "Błąd przetwarzania terminu. Wybierzmy jeszcze raz."
                                                 model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
                                                 next_state = STATE_SCHEDULING_ACTIVE
                                                 context_data_to_save['type'] = STATE_SCHEDULING_ACTIVE
-                                                context_data_to_save['required_subject'] = current_subject
+                                                context_data_to_save['required_subject'] = effective_subject_for_action
                                                 action = None
-                                                # break
-                                            except Exception as verif_err:
-                                                logging.error(f"!!! KRYTYCZNY BŁĄD podczas weryfikacji/zapisu slotu {extracted_iso} ({current_subject}): {verif_err}", exc_info=True)
-                                                msg_result = "Przepraszam, wystąpił nieoczekiwany błąd podczas finalizowania rezerwacji. Proszę spróbować ponownie później."
+                                            except Exception as verif_err_final:
+                                                logging.error(f"Krytyczny błąd weryfikacji/zapisu slotu ({effective_subject_for_action}): {verif_err_final}", exc_info=True)
+                                                msg_result = "Przepraszam, błąd systemowy. Spróbuj później."
                                                 model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
                                                 next_state = STATE_GENERAL
                                                 context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
                                                 action = None
-                                                # break
-                                        else: # AI kontynuuje rozmowę
-                                            logging.info(f"      AI Planujące ({current_subject}) kontynuuje rozmowę (brak znacznika ISO/SWITCH).")
+                                        else: # AI kontynuuje rozmowę planującą
                                             msg_result = ai_response_text_raw
                                             next_state = STATE_SCHEDULING_ACTIVE
                                             context_data_to_save['type'] = STATE_SCHEDULING_ACTIVE
-                                            context_data_to_save['required_subject'] = current_subject # Upewnij się
+                                            context_data_to_save['required_subject'] = effective_subject_for_action
                                             action = None
-                                            # break
-
                                     else: # Błąd AI Scheduling
-                                        logging.error(f"!!! BŁĄD: AI Planujące ({current_subject}) nie zwróciło odpowiedzi. PSID: {sender_id}")
-                                        msg_result = f"Przepraszam, wystąpił problem z systemem planowania dla przedmiotu {current_subject}. Spróbuj ponownie za chwilę."
+                                        msg_result = f"Problem z systemem planowania dla {effective_subject_for_action}. Spróbuj za chwilę."
                                         model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
                                         next_state = STATE_GENERAL
                                         context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
                                         action = None
-                                        # break
                                 else: # Brak wolnych zakresów
-                                    logging.warning(f"      Brak wolnych zakresów (po filtrach) dla przedmiotu '{current_subject}'. PSID: {sender_id}")
-                                    no_slots_msg = f"Niestety, wygląda na to, że w tej chwili brak wolnych terminów na korepetycje z przedmiotu **{current_subject}** w najbliższym okresie ({MAX_SEARCH_DAYS} dni, z wyprzedzeniem {MIN_BOOKING_LEAD_HOURS}h). Proszę spróbować ponownie później lub zapytać o inny przedmiot."
+                                    no_slots_msg = f"Niestety, brak wolnych terminów na korepetycje z **{effective_subject_for_action}** w najbliższym okresie. Spróbuj ponownie później."
                                     msg_result = no_slots_msg
                                     model_resp_content = Content(role="model", parts=[Part.from_text(no_slots_msg)])
                                     next_state = STATE_GENERAL
                                     context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
                                     action = None
-                                    # break
-                            except Exception as schedule_err:
-                                logging.error(f"!!! KRYTYCZNY BŁĄD w logice 'handle_scheduling' dla {current_subject}: {schedule_err}", exc_info=True)
-                                msg_result = "Przepraszam, wystąpił nieoczekiwany błąd systemu podczas planowania terminu. Proszę spróbować ponownie później."
+                            except Exception as schedule_err_final:
+                                logging.error(f"Krytyczny błąd w 'handle_scheduling' ({effective_subject_for_action}): {schedule_err_final}", exc_info=True)
+                                msg_result = "Błąd systemu planowania. Spróbuj później."
                                 model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
                                 next_state = STATE_GENERAL
                                 context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
                                 action = None
-                                # break
 
-                        # --- Stan Zbierania Informacji ---
                         elif current_action == 'handle_gathering':
                             logging.debug("  >> Wykonanie: handle_gathering")
+                            # `effective_subject_for_action` to przedmiot, na który była rezerwacja
                             try:
-                                # Przedmiot powinien być w kontekście `context_data_to_save['required_subject']`
-                                known_info_for_ai = context_data_to_save.copy()
-                                logging.debug(f"    Kontekst przekazywany do AI (Gathering): {list(known_info_for_ai.keys())}")
-
-                                current_input_text = None
+                                known_info_for_ai_gathering = context_data_to_save.copy()
+                                user_message_text_for_ai = user_content.parts[0].text if user_content and user_content.parts else None
                                 if trigger_gathering_ai_immediately:
-                                    logging.info("      Inicjuję AI zbierające dane (pierwsze wywołanie w tym stanie).")
+                                    logging.info("      Inicjuję AI zbierające dane.")
                                     trigger_gathering_ai_immediately = False
-                                elif user_content and user_content.parts:
-                                    current_input_text = user_content.parts[0].text
-
-                                # Wywołaj AI zbierające dane
                                 ai_response_text_raw = get_gemini_gathering_response(
-                                    user_psid=sender_id,
-                                    history_for_gathering_ai=history_for_gemini,
-                                    current_user_message_text=current_input_text,
-                                    context_info=known_info_for_ai,
-                                    page_access_token=current_page_token # Przekaż token
+                                    sender_id, history_for_gemini, user_message_text_for_ai,
+                                    known_info_for_ai_gathering, current_page_token
                                 )
-
                                 if ai_response_text_raw:
-                                    # Reszta logiki handle_gathering (przełączenie na General, parsowanie danych, aktualizacja Fazy 2)
-                                    # pozostaje taka sama jak w poprzedniej wersji.
-                                    # Wklejam tę część poniżej.
-
                                     model_resp_content = Content(role="model", parts=[Part.from_text(ai_response_text_raw)])
-
                                     if ai_response_text_raw.strip() == SWITCH_TO_GENERAL:
-                                        logging.info(f"      AI Zbierające -> Wykryto prośbę o przełączenie na tryb ogólny [{SWITCH_TO_GENERAL}].")
+                                        logging.info(f"      AI Zbierające -> Przełączenie na General.")
                                         context_data_to_save['return_to_state'] = STATE_GATHERING_INFO
-                                        # Zapisz kopię CAŁEGO kontekstu zbierania danych do powrotu
-                                        context_data_to_save['return_to_context'] = context_data_to_save.copy()
+                                        context_data_to_save['return_to_context'] = context_data_to_save.copy() # Zapisz CAŁY kontekst gathering
                                         context_data_to_save['type'] = STATE_GENERAL
+                                        # 'required_subject' zostanie ustawiony na przedmiot strony (current_subject) w handle_general
                                         next_state = STATE_GENERAL
                                         action = 'handle_general'
                                         msg_result = None
-                                        logging.debug(f"      Zapisano stan powrotu. Nowy stan: {next_state}. Kontekst zapisu (klucze): {list(context_data_to_save.keys())}")
-                                        current_state = next_state
-                                        continue
-
+                                        current_state = next_state; continue
                                     if INFO_GATHERED_MARKER in ai_response_text_raw:
-                                        logging.info(f"      AI Zbierające -> Wykryto koniec zbierania danych [{INFO_GATHERED_MARKER}]. Parsowanie i aktualizacja Fazy 2 w '{MAIN_SHEET_NAME}'.")
+                                        logging.info(f"      AI Zbierające -> Koniec zbierania danych. Parsowanie i Faza 2.")
                                         response_parts = ai_response_text_raw.split(INFO_GATHERED_MARKER, 1)
                                         ai_full_resp_before_marker = response_parts[0].strip()
-
-                                        final_msg_for_user = ""
-                                        parsed_student_data = {}
-                                        data_line_found = False
+                                        final_msg_for_user = ""; parsed_student_data = {}; data_line_found = False
                                         data_regex = r"ZEBRANE_DANE_UCZNIA:\s*\[Imię:\s*(.*?),?\s*Nazwisko:\s*(.*?),?\s*KlasaInfo:\s*(.*?),?\s*Poziom:\s*(.*?)\]"
-                                        match = re.search(data_regex, ai_full_resp_before_marker, re.IGNORECASE | re.DOTALL)
-
-                                        if match:
+                                        match_data = re.search(data_regex, ai_full_resp_before_marker, re.IGNORECASE | re.DOTALL)
+                                        if match_data:
                                             data_line_found = True
-                                            logging.debug("      Znaleziono dopasowanie regex ZEBRANE_DANE_UCZNIA.")
-                                            s_fn = match.group(1).strip() if match.group(1) else "Brak"
-                                            s_ln = match.group(2).strip() if match.group(2) else "Brak"
-                                            g_info = match.group(3).strip() if match.group(3) else "Brak"
-                                            l_info = match.group(4).strip() if match.group(4) else "Brak"
+                                            s_fn, s_ln, g_info, l_info = (m.strip() if m else "Brak" for m in match_data.groups())
                                             l_info = "Brak" if l_info.lower() == 'brak' else l_info
-
-                                            parsed_student_data = {
-                                                'student_first_name': s_fn, 'student_last_name': s_ln,
-                                                'grade_info': g_info, 'level_info': l_info
-                                            }
-                                            logging.info(f"      Sparsowano dane ucznia z AI: {parsed_student_data}")
-                                            final_msg_for_user = ai_full_resp_before_marker[match.end():].strip()
-                                        else:
-                                            logging.error(f"!!! BŁĄD: Nie znaleziono linii 'ZEBRANE_DANE_UCZNIA:' w odpowiedzi AI (Gathering)! PSID: {sender_id}")
+                                            parsed_student_data = {'student_first_name': s_fn, 'student_last_name': s_ln, 'grade_info': g_info, 'level_info': l_info}
+                                            final_msg_for_user = ai_full_resp_before_marker[match_data.end():].strip()
+                                        else: # Fallback
                                             final_msg_for_user = ai_full_resp_before_marker
-                                            parsed_student_data = {
-                                                 'student_first_name': context_data_to_save.get('known_student_first_name', 'Błąd parsowania'),
-                                                 'student_last_name': context_data_to_save.get('known_student_last_name', 'Błąd parsowania'),
-                                                 'grade_info': context_data_to_save.get('known_grade', 'Błąd parsowania'),
-                                                 'level_info': context_data_to_save.get('known_level', 'Błąd parsowania')
-                                            }
-                                            logging.warning(f"      Używam danych z kontekstu jako fallback: {parsed_student_data}")
-
-                                        if not final_msg_for_user:
-                                             final_msg_for_user = "Dziękujemy za podanie informacji. Aby lekcja doszła do skutku, prosimy o potwierdzenie rezerwacji wysyłając wiadomość \"POTWIERDZAM\" na profilu: https://www.facebook.com/profile.php?id=61576135251276 . Jest to również profil do dalszego kontaktu."
-                                             logging.warning("      AI nie zwróciło wiadomości końcowej po zebraniu danych. Użyto domyślnej.")
-
+                                            parsed_student_data = {k: context_data_to_save.get(f'known_{k}', 'Błąd parsowania AI') for k in ['student_first_name', 'student_last_name', 'grade', 'level']}
+                                            parsed_student_data['grade_info'] = parsed_student_data.pop('grade') # zmiana nazwy klucza
+                                            parsed_student_data['level_info'] = parsed_student_data.pop('level')
+                                        if not final_msg_for_user: final_msg_for_user = "Dziękujemy za informacje. Prosimy o potwierdzenie rezerwacji wiadomością \"POTWIERDZAM\" na profilu: https://www.facebook.com/profile.php?id=61576135251276"
                                         try:
-                                            p_fn = context_data_to_save.get('known_parent_first_name', 'Nieznane')
-                                            p_ln = context_data_to_save.get('known_parent_last_name', 'Nieznane')
+                                            p_fn = context_data_to_save.get('known_parent_first_name', 'Nieznane'); p_ln = context_data_to_save.get('known_parent_last_name', 'Nieznane')
                                             sheet_row_idx = context_data_to_save.get('sheet_row_index')
-
-                                            full_data_for_update = {
-                                                'parent_first_name': p_fn, 'parent_last_name': p_ln,
-                                                **parsed_student_data
-                                            }
-
-                                            update_ok, update_msg = find_row_and_update_sheet(
-                                                psid=sender_id, start_time=None,
-                                                student_data=full_data_for_update,
-                                                sheet_row_index=sheet_row_idx
-                                            )
-
+                                            full_data_for_update = {'parent_first_name': p_fn, 'parent_last_name': p_ln, **parsed_student_data}
+                                            update_ok, update_msg = find_row_and_update_sheet(sender_id, None, full_data_for_update, sheet_row_idx)
                                             if update_ok:
-                                                logging.info(f"      Aktualizacja Fazy 2 w arkuszu '{MAIN_SHEET_NAME}' zakończona pomyślnie. PSID: {sender_id}")
                                                 msg_result = final_msg_for_user
-                                                next_state = STATE_GENERAL
-                                                context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True} # Resetuj kontekst, zachowaj przedmiot
-                                                action = None
-                                                # break
-                                            else: # Błąd aktualizacji Fazy 2
-                                                logging.error(f"!!! BŁĄD aktualizacji Fazy 2 w arkuszu '{MAIN_SHEET_NAME}': {update_msg}. PSID: {sender_id}")
-                                                error_msg_user = f"Przepraszam, wystąpił błąd podczas zapisywania danych ucznia ({update_msg}). Proszę spróbować ponownie za chwilę lub skontaktować się z nami."
-                                                msg_result = error_msg_user
-                                                model_resp_content = Content(role="model", parts=[Part.from_text(ai_full_resp_before_marker + f"\n[System Error: {update_msg}]")])
                                                 next_state = STATE_GENERAL
                                                 context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
                                                 action = None
-                                                # break
-
-                                        except Exception as sheet_update_err:
-                                            logging.error(f"!!! KRYTYCZNY BŁĄD podczas wywoływania aktualizacji Fazy 2: {sheet_update_err}", exc_info=True)
-                                            msg_result = "Przepraszam, wystąpił krytyczny błąd systemu podczas zapisywania danych. Proszę skontaktować się z nami bezpośrednio."
-                                            model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
-                                            next_state = STATE_GENERAL
-                                            context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
-                                            action = None
-                                            # break
+                                            else: # Błąd Fazy 2
+                                                msg_result = f"Błąd zapisu danych ucznia ({update_msg}). Spróbuj ponownie."
+                                                model_resp_content = Content(role="model", parts=[Part.from_text(ai_full_resp_before_marker + f"\n[System Error: {update_msg}]")])
+                                                next_state = STATE_GENERAL # Wróć do General po błędzie
+                                                context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
+                                                action = None
+                                        except Exception as sheet_update_err_final:
+                                            logging.error(f"Krytyczny błąd Fazy 2: {sheet_update_err_final}", exc_info=True)
+                                            msg_result = "Błąd systemowy zapisu danych. Skontaktuj się z nami."; next_state = STATE_GENERAL
+                                            context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}; action = None
                                     else: # AI kontynuuje zbieranie danych
-                                        logging.info("      AI Zbierające kontynuuje rozmowę.")
-                                        msg_result = ai_response_text_raw
-                                        next_state = STATE_GATHERING_INFO
-                                        context_data_to_save['type'] = STATE_GATHERING_INFO # Upewnij się
-                                        # Aktualizuj kontekst na podstawie odpowiedzi AI
-                                        # Prosta aktualizacja - jeśli AI pyta o coś, zakładamy, że reszta jest ok
-                                        # Można to ulepszyć, parsując odpowiedź AI dokładniej
-                                        if "imię" in ai_response_text_raw.lower(): context_data_to_save['known_student_first_name'] = context_data_to_save.get('known_student_first_name', '')
-                                        else: context_data_to_save['known_student_first_name'] = context_data_to_save.get('known_student_first_name', '') or 'Zebrane?' # Lub odczytaj z historii
-                                        if "nazwisko" in ai_response_text_raw.lower(): context_data_to_save['known_student_last_name'] = context_data_to_save.get('known_student_last_name', '')
-                                        else: context_data_to_save['known_student_last_name'] = context_data_to_save.get('known_student_last_name', '') or 'Zebrane?'
-                                        if "klas" in ai_response_text_raw.lower() or "szkoł" in ai_response_text_raw.lower() : context_data_to_save['known_grade'] = context_data_to_save.get('known_grade', '')
-                                        else: context_data_to_save['known_grade'] = context_data_to_save.get('known_grade', '') or 'Zebrane?'
-                                        if "poziom" in ai_response_text_raw.lower(): context_data_to_save['known_level'] = context_data_to_save.get('known_level', '')
-                                        else: context_data_to_save['known_level'] = context_data_to_save.get('known_level', '') or 'Zebrane?' # Poziom może być 'Brak'
-
+                                        msg_result = ai_response_text_raw; next_state = STATE_GATHERING_INFO
+                                        context_data_to_save['type'] = STATE_GATHERING_INFO
+                                        # `required_subject` powinien być już w kontekście z Fazy 1
                                         action = None
-                                        # break
-
                                 else: # Błąd AI Gathering
-                                    logging.error(f"!!! BŁĄD: AI Zbierające nie zwróciło odpowiedzi. PSID: {sender_id}")
-                                    msg_result = "Przepraszam, wystąpił błąd systemu podczas zbierania informacji. Spróbuj podać dane jeszcze raz."
+                                    msg_result = "Błąd systemu zbierania informacji. Spróbuj podać dane jeszcze raz."
                                     model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
-                                    next_state = STATE_GATHERING_INFO # Pozostań
-                                    context_data_to_save['type'] = STATE_GATHERING_INFO
-                                    action = None
-                                    # break
-                            except Exception as gather_err:
-                                logging.error(f"!!! KRYTYCZNY BŁĄD w logice 'handle_gathering': {gather_err}", exc_info=True)
-                                msg_result = "Przepraszam, wystąpił nieoczekiwany błąd systemu podczas przetwarzania danych ucznia."
-                                model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
-                                next_state = STATE_GENERAL
-                                context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
-                                action = None
-                                # break
+                                    next_state = STATE_GATHERING_INFO; context_data_to_save['type'] = STATE_GATHERING_INFO; action = None
+                            except Exception as gather_err_final:
+                                logging.error(f"Krytyczny błąd w 'handle_gathering': {gather_err_final}", exc_info=True)
+                                msg_result = "Błąd systemu przetwarzania danych ucznia."; next_state = STATE_GENERAL
+                                context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}; action = None
 
-
-                        # --- Akcja Wysyłania Informacji ---
                         elif current_action == 'send_info':
                             logging.debug("  >> Wykonanie: send_info")
-                            if msg_result:
-                                if not model_resp_content:
-                                     model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
-                                if 'type' not in context_data_to_save:
-                                     context_data_to_save['type'] = next_state
-                                     context_data_to_save['required_subject'] = current_subject # Upewnij się
-                            else:
-                                logging.warning(f"Akcja 'send_info' wywołana bez ustawionej wiadomości (msg_result). Nic nie wysłano. PSID: {sender_id}")
+                            if msg_result and not model_resp_content:
+                                 model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                            if 'type' not in context_data_to_save: # Upewnij się, że typ jest ustawiony
+                                 context_data_to_save['type'] = next_state
+                            if 'required_subject' not in context_data_to_save: # Upewnij się, że przedmiot jest
+                                 context_data_to_save['required_subject'] = current_subject
                             action = None
-                            # break
                         else:
-                            logging.error(f"   Nieznana lub nieobsługiwana akcja '{current_action}'. Przerywam przetwarzanie. PSID: {sender_id}")
+                            logging.error(f"   Nieznana akcja '{current_action}'. PSID: {sender_id}")
                             action = None
-                            # break
 
-                    # --- Koniec pętli przetwarzania akcji ---
-                    logging.debug(f"  << Koniec pętli przetwarzania (po {loop_guard} iteracjach). Finalny stan: {next_state}")
+                    logging.debug(f"  << Koniec pętli przetwarzania (po {loop_guard} iteracjach). Finalny stan: {next_state}, Finalny przedmiot w kontekście: {context_data_to_save.get('required_subject')}")
 
-                    # --- Zapis Stanu i Historii ---
                     final_context_to_save_dict = context_data_to_save.copy()
                     final_context_to_save_dict['type'] = next_state
-                    # Upewnij się, że 'required_subject' jest w finalnym kontekście
-                    if 'required_subject' not in final_context_to_save_dict:
+                    if 'required_subject' not in final_context_to_save_dict: # Ostateczne upewnienie się
                         final_context_to_save_dict['required_subject'] = current_subject
 
                     if next_state != STATE_GENERAL or 'return_to_state' not in final_context_to_save_dict:
@@ -3035,51 +2858,41 @@ def webhook_handle():
                          final_context_to_save_dict.pop('return_to_context', None)
 
                     if msg_result:
-                        send_message(sender_id, msg_result, current_page_token) # Użyj tokenu strony
-                    elif current_action:
-                        logging.debug(f"    Akcja '{current_action}' zakończona bez wiadomości dla użytkownika.")
+                        send_message(sender_id, msg_result, current_page_token)
+                    elif current_action : # Sprawdź, czy była jakaś akcja, która mogła nie wygenerować wiadomości
+                        logging.debug(f"    Akcja '{current_action}' zakończona bez wiadomości dla użytkownika (PSID: {sender_id}).")
 
                     original_context_no_return = context.copy()
                     original_context_no_return.pop('return_to_state', None)
                     original_context_no_return.pop('return_to_context', None)
-
-                    should_save = (
-                        bool(user_content) or
-                        bool(model_resp_content) or
-                        (original_context_no_return != final_context_to_save_dict)
-                    )
+                    should_save = (bool(user_content) or bool(model_resp_content) or (original_context_no_return != final_context_to_save_dict))
 
                     if should_save:
                         history_to_save = list(history_for_gemini)
                         if user_content: history_to_save.append(user_content)
                         if model_resp_content: history_to_save.append(model_resp_content)
-
-                        max_hist_len = MAX_HISTORY_TURNS * 2
-                        history_to_save = history_to_save[-max_hist_len:]
-
+                        history_to_save = history_to_save[-(MAX_HISTORY_TURNS * 2):]
                         logging.info(f"Zapisywanie historii ({len(history_to_save)} wiad.). Stan: {final_context_to_save_dict.get('type')}, Przedmiot Kontekstu: {final_context_to_save_dict.get('required_subject')}")
                         logging.debug(f"   Kontekst do zapisu (klucze): {list(final_context_to_save_dict.keys())}")
                         save_history(sender_id, history_to_save, context_to_save=final_context_to_save_dict)
                     else:
-                        logging.debug("    Brak zmian w historii lub kontekście - pomijanie zapisu.")
+                        logging.debug(f"    Brak zmian w historii lub kontekście - pomijanie zapisu (PSID: {sender_id}).")
 
-            logging.info(f"--- Zakończono przetwarzanie zdarzeń w batchu dla Strony: '{current_page_name}' ({recipient_id}) ---")
-            # Zwracamy 200 OK do Facebooka po przetworzeniu wszystkich zdarzeń w wejściowym batchu
+                    logging.info(f"--- Zakończono przetwarzanie pojedynczego zdarzenia dla Strony: '{current_page_name}' ({recipient_id}), Sender: {sender_id} ---")
+
+                logging.info(f"--- Zakończono przetwarzanie wszystkich zdarzeń dla page_id: {page_id_from_entry} w tym entry ---")
+            # Zwracamy 200 OK do Facebooka PO przetworzeniu WSZYSTKICH entry w requeście
             return Response("EVENT_RECEIVED", status=200)
         else:
-            # Otrzymano POST, ale nie jest to zdarzenie strony Facebooka
             logging.warning(f"Otrzymano POST na /webhook, ale obiekt != 'page'. Typ: {data.get('object') if isinstance(data, dict) else type(data)}. Dane: {raw_data[:200]}...")
-            return Response("OK", status=200) # Odpowiedz OK, ale zaloguj ostrzeżenie
+            return Response("OK", status=200)
     except json.JSONDecodeError as e:
         logging.error(f"!!! BŁĄD dekodowania JSON w /webhook: {e}", exc_info=True)
         logging.error(f"    Surowe dane: {raw_data[:500]}...")
-        # Zwracamy 400 Bad Request, bo dane wejściowe były nieprawidłowe
         return Response("Invalid JSON", status=400)
     except Exception as e:
-        # Złap wszystkie inne nieoczekiwane błędy
         logging.critical(f"!!! KRYTYCZNY BŁĄD podczas obsługi POST /webhook: {e}", exc_info=True)
-        # Zwróć 200 OK do Facebooka, aby uniknąć ponownych prób, ale zaloguj krytyczny błąd
-        return Response("Internal Server Error Occurred", status=200)
+        return Response("Internal Server Error Occurred", status=200) # Zwróć 200, aby FB nie ponawiał
 
 
 # =====================================================================
