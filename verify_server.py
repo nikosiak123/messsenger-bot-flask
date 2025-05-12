@@ -32,21 +32,21 @@ PAGE_CONFIG = {
     "661857023673365": {
         "token": "EACNAHFzEhkUBO5y1aIKOaYcZCKRz2fS6PpPUwPrdqaYgrJGL8KmAVJtXtwbZAzfzSZAREL67A0Go2xcnYgXy4rwZBwmlrraoQZASwZBZAJFEzzZCwL2vsX8lgodNtr2TiAAN4obiESu4TqLU3OwRbCnHgdDX8dRpaUl1lmO9ZAB8TTfkJ0OVQ9QaQJG7njwhugnHMrgZDZD",
         "subject": "Polski",
-        "name": "Zakrzeczone Korepetycje - Polski",
+        "name": "Zakręcone Korepetycje - Polski",
         "link": "https://tiny.pl/0xnsgbt2" # Link do strony z Polskim
     },
     # Matematyka: ZakrzeczoneKorepetycje - MATEMATYKA... (ID: 638454406015018)
     "638454406015018": {
         "token": "EACNAHFzEhkUBO3hU8CvarZBMqnOeXFZC8v0haCt1fcWIwhiXGQpx98ZBEEGBmoZBwQZADqSSmeb9Py45ie7gXrh5yPCtvVi4aTZBwbggPgjaZCPzRo8dNndqfavc2ZCBZCCtkvVOkPOTs6c9lxmCIdvN1TCzeBszpr3i7n8uUoFme81bZBfm7y5LmwCDYZBy8xMllIy8AZDZD",
         "subject": "Matematyka",
-        "name": "Zakrzeczone Korepetycje - MATEMATYKA",
+        "name": "Zakręcone Korepetycje - MATEMATYKA",
         "link": "https://tiny.pl/f7xz5n0g" # Link do strony z Matematyką
     },
      # Angielski: English Zone: Zakrzeczone Korepetycje (ID: 653018101222547)
     "653018101222547": {
         "token": "EACNAHFzEhkUBOZC2RxQhFkPJOh4H9vMKZCt0KOCFPBscZCGurYZANYFEOkPyaKcsr88PeP36idt6UiXN2fzBKFdqWSxnaqF1WeZAJU3g6wYOVPTHLNjNl6HcW9GHRgTxEdjQdAMDRnnIgkCtGJCe4pSVEIk7yYRXrcfEam5XY6mXabBvqrlDzZBCLHonZCFRyIuuAZDZD",
         "subject": "Angielski",
-        "name": "English Zone: Zakrzeczone Korepetycje",
+        "name": "English Zone: Zakręcone Korepetycje",
         "link": "https://tiny.pl/prrr7qf1" # Link do strony z Angielskim
     },
     # Możesz dodać więcej stron tutaj, jeśli będzie potrzeba
@@ -1992,11 +1992,10 @@ SYSTEM_INSTRUCTION_GENERAL = """Jesteś przyjaznym, proaktywnym i profesjonalnym
 
 **Cennik (za 60 minut):**
 *   Szkoła Podstawowa: 60 zł
-*   Liceum/Technikum (Poziom Podstawowy, klasa 1-2): 65 zł
-*   Liceum/Technikum (Poziom Podstawowy, klasa 3-4/5): 70 zł
-*   Liceum/Technikum (Poziom Rozszerzony, klasa 1): 65 zł
-*   Liceum/Technikum (Poziom Rozszerzony, klasa 2): 70 zł
-*   Liceum/Technikum (Poziom Rozszerzony, klasa 3-4/5): 75 zł
+*   Liceum/Technikum (Poziom Podstawowy, klasa 1-3): 65 zł
+*   Liceum/Technikum (Poziom Podstawowy, klasa 4/5): 70 zł
+*   Liceum/Technikum (Poziom Rozszerzony, klasa 1-3): 70 zł
+*   Liceum/Technikum (Poziom Rozszerzony, klasa 4/5): 75 zł
 
 **Format Lekcji:** Online, przez platformę Microsoft Teams (bez konieczności instalacji, wystarczy link).
 
