@@ -185,6 +185,13 @@ GENERATION_CONFIG_SCHEDULING = MockGenerationConfig(temperature=0.5, top_p=0.95,
 GENERATION_CONFIG_GATHERING = MockGenerationConfig(temperature=0.4, top_p=0.95, top_k=40, max_output_tokens=350)
 GENERATION_CONFIG_DEFAULT = MockGenerationConfig(temperature=0.7, top_p=0.95, top_k=40, max_output_tokens=1024)
 
+SAFETY_SETTINGS = [
+    MockSafetySetting(category_str="HARM_CATEGORY_HARASSMENT", threshold_str="BLOCK_ONLY_HIGH"),
+    MockSafetySetting(category_str="HARM_CATEGORY_HATE_SPEECH", threshold_str="BLOCK_MEDIUM_AND_ABOVE"),
+    MockSafetySetting(category_str="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold_str="BLOCK_ONLY_HIGH"),
+    MockSafetySetting(category_str="HARM_CATEGORY_DANGEROUS_CONTENT", threshold_str="BLOCK_MEDIUM_AND_ABOVE"),
+]
+
 
 
 # --- Ustawienia Lokalizacji ---
