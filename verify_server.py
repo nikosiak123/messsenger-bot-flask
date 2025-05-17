@@ -2668,7 +2668,7 @@ if __name__ == '__main__':
         print("!!! KRYTYCZNE: Brak skonfigurowanych stron w PAGE_CONFIG !!!")
     print("-" * 60)
     print("  Konfiguracja Vertex AI:")
-    print(f"    Projekt: {PROJECT_ID}, Lokalizacja: {LOCATION}, Model: {MODEL_ID}")
+    print(f"   Model: {MODEL_ID}")
     if not gemini_model:
         print("!!! KRYTYCZNE: Model Gemini NIE załadowany! AI będzie niedostępne. !!!")
     else:
