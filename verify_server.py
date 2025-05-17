@@ -2667,11 +2667,16 @@ if __name__ == '__main__':
     else:
         print("!!! KRYTYCZNE: Brak skonfigurowanych stron w PAGE_CONFIG !!!")
     print("-" * 60)
-    print("  Konfiguracja Vertex AI:")
-    if not gemini_model:
-        print("!!! KRYTYCZNE: Model Gemini NIE załadowany! AI będzie niedostępne. !!!")
+    print("  Konfiguracja Gemini API:") # Zmieniony nagłówek
+    # Sprawdzenie klucza API i modelu, które już robisz na początku pliku,
+    # ale można tu powtórzyć dla podsumowania przy starcie.
+    if not GEMINI_API_KEY or len(GEMINI_API_KEY) < 30:
+        print("!!! KRYTYCZNE: Klucz Gemini API NIE jest poprawnie skonfigurowany (brak lub za krótki) !!!")
+        print("!!!             Funkcjonalność AI będzie niedostępna. !!!")
     else:
-        print(f"    Model Gemini Załadowany (OK)")
+        print(f"    Klucz API: OK (ustawiony, długość: {len(GEMINI_API_KEY)})")
+    print(f"    Model używany: {MODEL_FOR_API}") # Loguje poprawny model dla Gemini API
+    print("-" * 60)
     print("-" * 60)
     print("  Konfiguracja Google Calendar:")
     print(f"    Dostępne przedmioty: {', '.join(AVAILABLE_SUBJECTS)}")
