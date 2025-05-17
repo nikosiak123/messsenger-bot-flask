@@ -2080,6 +2080,7 @@ SYSTEM_INSTRUCTION_GENERAL = """Jesteś przyjaznym, proaktywnym i profesjonalnym
 # --- Funkcja AI: Ogólna rozmowa ---
 def get_gemini_general_response(user_psid, current_user_message_text, history_api_format, is_temporary_general_state, page_access_token, current_subject=None):
     """Prowadzi ogólną rozmowę z AI, używając Gemini API."""
+    print("Start general")
     if not GEMINI_API_KEY:
         logging.error(f"!!! [{user_psid}] General Conversation - brak klucza GEMINI_API_KEY!")
         return None
@@ -2312,6 +2313,7 @@ def find_row_and_update_sheet(psid, start_time, student_data, sheet_row_index=No
 
 @app.route('/webhook', methods=['POST'])
 def webhook_handle():
+        print("Start webhook")
     """Główny handler dla przychodzących zdarzeń z Messengera."""
     now_str = datetime.datetime.now(_get_calendar_timezone()).strftime('%Y-%m-%d %H:%M:%S %Z')
     logging.info(f"\n{'='*30} {now_str} POST /webhook {'='*30}")
