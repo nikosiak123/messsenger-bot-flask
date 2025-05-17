@@ -2668,11 +2668,10 @@ if __name__ == '__main__':
         print("!!! KRYTYCZNE: Brak skonfigurowanych stron w PAGE_CONFIG !!!")
     print("-" * 60)
     print("  Konfiguracja Vertex AI:")
-    print(f"   Model: {MODEL_ID}")
     if not gemini_model:
         print("!!! KRYTYCZNE: Model Gemini NIE załadowany! AI będzie niedostępne. !!!")
     else:
-        print(f"    Model Gemini ({MODEL_ID}): Załadowany (OK)")
+        print(f"    Model Gemini Załadowany (OK)")
     print("-" * 60)
     print("  Konfiguracja Google Calendar:")
     print(f"    Dostępne przedmioty: {', '.join(AVAILABLE_SUBJECTS)}")
