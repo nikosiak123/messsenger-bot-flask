@@ -2069,6 +2069,63 @@ SYSTEM_INSTRUCTION_GENERAL = """Jesteś przyjaznym, proaktywnym i profesjonalnym
 
 # --- Funkcja AI: Planowanie terminu ---
 # Zmodyfikowana, aby przyjmować page_access_token
+
+# --- Funkcja AI: Ogólna rozmowa ---
+def get_gemini_general_response(user_psid, current_user_message_text, history_api_format, is_temporary_general_state, page_access_token, current_subject=None):
+    """Prowadzi ogólną rozmowę z AI, używając Gemini API."""
+    if not GEMINI_API_KEY:
+        logging.error(f"!!! [{user_psid}] General Conversation - brak klucza GEMINI_API_KEY!")
+        return None
+
+    formatted_links_for_ai_prompt = "\n".join([f"- {s}: {l}" for s, l in ALL_SUBJECT_LINKS.items() if s.lower() != (current_subject or "").lower()])
+
+    try:
+        system_instruction_formatted = SYSTEM_INSTRUCTION_GENERAL.format(
+            all_subject_links_formatted_for_ai=formatted_links_for_ai_prompt,
+            current_subject_from_page=current_subject or "nieznany",
+            available_subjects_list=", ".join(AVAILABLE_SUBJECTS),
+            intent_marker=INTENT_SCHEDULE_MARKER,
+            return_marker=RETURN_TO_PREVIOUS
+        )
+    except KeyError as e:
+        logging.error(f"!!! BŁĄD formatowania instrukcji (General): Brak klucza {e} w SYSTEM_INSTRUCTION_GENERAL. Upewnij się, że wszystkie placeholdery są obecne.")
+        return "Błąd konfiguracji asystenta ogólnego."
+    except Exception as format_e:
+        logging.error(f"!!! BŁĄD formatowania instrukcji (General): {format_e}")
+        return "Błąd wewnętrzny asystenta ogólnego."
+
+    model_ack = f"Rozumiem. Rozmawiamy o '{current_subject or 'nieznanym przedmiocie'}'. W razie potrzeby poinformuję o innych ({formatted_links_for_ai_prompt})."
+    if is_temporary_general_state:
+        model_ack += f" Będąc w trybie tymczasowym, po odpowiedzi na pytanie ogólne, jeśli user nie pyta dalej, dodam {RETURN_TO_PREVIOUS}."
+
+    initial_prompt_api = [
+        {"role": "user", "parts": [{"text": system_instruction_formatted}]},
+        {"role": "model", "parts": [{"text": model_ack}]}
+    ]
+    
+    prompt_for_this_call = initial_prompt_api + list(history_api_format)
+    max_prompt_messages = (MAX_HISTORY_TURNS * 2) + 2
+    while len(prompt_for_this_call) > max_prompt_messages:
+         if len(prompt_for_this_call) > 3:
+             prompt_for_this_call.pop(2)
+             if len(prompt_for_this_call) > 2:
+                 prompt_for_this_call.pop(2)
+         else:
+             break
+        
+    response_text = _call_gemini(user_psid, prompt_for_this_call, GENERATION_CONFIG_DEFAULT, SAFETY_SETTINGS, f"General Conversation (Strona: {current_subject or '?'})", page_access_token, user_message=current_user_message_text)
+
+    if response_text:
+        # Oczyszczanie odpowiedzi (bez zmian w tej logice)
+        response_text = re.sub(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}.*?{re.escape(SLOT_ISO_MARKER_SUFFIX)}", "", response_text).strip()
+        response_text = response_text.replace(INFO_GATHERED_MARKER, "").strip()
+        response_text = response_text.replace(SWITCH_TO_GENERAL, "").strip()
+        # RETURN_TO_PREVIOUS i INTENT_SCHEDULE_MARKER są obsługiwane w logice webhook_handle po otrzymaniu tej odpowiedzi
+        return response_text
+    else:
+        logging.error(f"!!! [{user_psid}] Nie uzyskano poprawnej odpowiedzi od Gemini (General).")
+        return None
+
 def get_gemini_scheduling_response(user_psid, history_for_scheduling_ai, current_user_message_text, available_ranges, required_subject, page_access_token):
     """Prowadzi rozmowę planującą z AI dla konkretnego przedmiotu."""
     print("  Konfiguracja Gemini API:") # Zamiast "Konfiguracja Vertex AI"
