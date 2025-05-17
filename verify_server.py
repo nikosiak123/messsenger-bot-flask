@@ -78,7 +78,7 @@ MAX_TYPING_DELAY_SECONDS = 3.0
 TYPING_CHARS_PER_SECOND = 35
 
 # --- Konfiguracja Kalendarza (ODCZYT/WERYFIKACJA) ---
-CALENDAR_SERVICE_ACCOUNT_FILE = 'kalendarzklucz.json'
+CALENDAR_SERVICE_ACCOUNT_FILE = 'KALENDARZ_KLUCZ.json'
 CALENDAR_SCOPES = ['https://www.googleapis.com/auth/calendar.readonly']
 CALENDAR_TIMEZONE = 'Europe/Warsaw'
 APPOINTMENT_DURATION_MINUTES = 60
@@ -124,7 +124,7 @@ MAX_SEARCH_DAYS = 14
 MIN_BOOKING_LEAD_HOURS = 24
 
 # --- Konfiguracja Google Sheets (ZAPIS + ODCZYT) ---
-SHEETS_SERVICE_ACCOUNT_FILE = 'arkuszklucz.json'
+SHEETS_SERVICE_ACCOUNT_FILE = 'ARKUSZ_KLUCZ.json'
 SHEET_SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 SPREADSHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "1vpsIAEkqtY3ZJ5Mr67Dda45aZ55V1O-Ux9ODjwk13qw")
 MAIN_SHEET_NAME = os.environ.get("GOOGLE_SHEET_NAME", 'Arkusz1') # Główne rezerwacje
