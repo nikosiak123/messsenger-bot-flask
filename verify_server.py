@@ -2315,26 +2315,24 @@ def find_row_and_update_sheet(psid, start_time, student_data, sheet_row_index=No
 def webhook_handle():
     """Główny handler dla przychodzących zdarzeń z Messengera."""
     now_str = datetime.datetime.now(_get_calendar_timezone()).strftime('%Y-%m-%d %H:%M:%S %Z')
-    # Logowanie każdego fizycznego wywołania endpointu
-    logging.info(f"\n{'='*40}\n--- WH_ENDPOINT_CALLED: {now_str} POST /webhook ---\n{'='*40}")
+    print(f"\n{'='*40}\n--- WH_ENDPOINT_CALLED: {now_str} POST /webhook ---\n{'='*40}")
     raw_data = request.data
     data = None
     try:
         decoded_data = raw_data.decode('utf-8')
         data = json.loads(decoded_data)
-        logging.debug(f"--- WH: Otrzymane surowe dane (pierwsze 500 znaków): {decoded_data[:500]}")
+        print(f"--- WH: Otrzymane surowe dane (pierwsze 500 znaków): {decoded_data[:500]}")
 
         if data and data.get("object") == "page":
             for entry_idx, entry in enumerate(data.get("entry", [])):
                 page_id_from_entry = entry.get("id")
-                logging.debug(f"--- WH: Przetwarzanie Entry {entry_idx+1}/{len(data.get('entry', []))} dla Page ID: {page_id_from_entry} ---")
+                print(f"--- WH: Przetwarzanie Entry {entry_idx+1}/{len(data.get('entry', []))} dla Page ID: {page_id_from_entry} ---")
 
                 for event_idx, event in enumerate(entry.get("messaging", [])):
-                    # === INICJALIZACJA ZMIENNYCH DLA KAŻDEGO EVENTU ===
                     sender_id = event.get("sender", {}).get("id")
                     recipient_id = event.get("recipient", {}).get("id")
                     
-                    logging.info(f"--- WH_EVENT_START --- Event {event_idx+1} dla Sender: {sender_id}, Recipient (Page): {recipient_id} ---")
+                    print(f"--- WH_EVENT_START --- Event {event_idx+1} dla Sender: {sender_id}, Recipient (Page): {recipient_id} ---")
                     
                     msg_result = None
                     ai_response_text_raw = None
@@ -2342,53 +2340,51 @@ def webhook_handle():
                     user_content_api_fmt = None
                     model_resp_api_fmt = None
                     action = None 
-                    # ====================================================
-
+                    
                     if not sender_id or not recipient_id:
-                        logging.warning(f"WH_EVENT: Pominięto event z brakującym sender_id lub recipient_id. Event: {event}")
+                        print(f"WH_EVENT: Pominięto event z brakującym sender_id lub recipient_id. Event: {event}")
                         continue
                     
                     page_info = PAGE_CONFIG.get(recipient_id)
                     if not page_info:
-                        logging.error(f"!!! WH_EVENT: Otrzymano wiadomość dla nieznanej/nieskonfigurowanej strony ID: {recipient_id} (Sender: {sender_id}). Pomijam. Event: {event}")
+                        print(f"!!! WH_EVENT: Otrzymano wiadomość dla nieznanej/nieskonfigurowanej strony ID: {recipient_id} (Sender: {sender_id}). Pomijam. Event: {event}")
                         continue
 
                     current_page_token = page_info['token']
                     current_subject = page_info['subject']
                     current_page_name = page_info['name']
-                    logging.info(f"--- WH_EVENT_CONTEXT: Strona: '{current_page_name}' ({recipient_id}) | Przedmiot Główny: {current_subject} ---")
+                    print(f"--- WH_EVENT_CONTEXT: Strona: '{current_page_name}' ({recipient_id}) | Przedmiot Główny: {current_subject} ---")
 
                     if not current_page_token or len(current_page_token) < 50:
-                         logging.error(f"!!! WH_EVENT: KRYTYCZNY BŁĄD - Brak lub nieprawidłowy token dostępu dla strony '{current_page_name}' ({recipient_id}). Nie można odpowiedzieć.")
+                         print(f"!!! WH_EVENT: KRYTYCZNY BŁĄD - Brak lub nieprawidłowy token dostępu dla strony '{current_page_name}' ({recipient_id}). Nie można odpowiedzieć.")
                          continue
 
                     history_api_format, context, is_new_contact = load_history(sender_id)
                     current_state = context.get('type', STATE_GENERAL)
-                    next_state = current_state # Inicjalizacja next_state
+                    next_state = current_state 
 
                     if is_new_contact:
-                        logging.info(f"WH_EVENT: [{sender_id}] Wykryto nowy kontakt dla strony '{current_page_name}'. Logowanie statystyki.")
-                        log_statistic("new_contact")
+                        print(f"WH_EVENT: [{sender_id}] Wykryto nowy kontakt dla strony '{current_page_name}'. Logowanie statystyki.")
+                        log_statistic("new_contact") 
                     
-                    logging.info(f"    WH_EVENT: Stan (przed przetworzeniem): {current_state}, Historia: {len(history_api_format)} wiad.")
-                    logging.debug(f"    WH_EVENT: Kontekst wejściowy: {context}")
+                    print(f"    WH_EVENT: Stan (przed przetworzeniem): {current_state}, Historia: {len(history_api_format)} wiad.")
+                    print(f"    WH_EVENT: Kontekst wejściowy: {context}")
 
                     context_data_to_save = context.copy()
                     context_data_to_save.pop('return_to_state', None)
                     context_data_to_save.pop('return_to_context', None)
                     if context_data_to_save.get('required_subject') != current_subject or 'required_subject' not in context_data_to_save:
                         context_data_to_save['required_subject'] = current_subject
-                        logging.debug(f"    WH_EVENT: Ustawiono/zaktualizowano 'required_subject' w kontekście na: {current_subject}")
+                        print(f"    WH_EVENT: Ustawiono/zaktualizowano 'required_subject' w kontekście na: {current_subject}")
 
                     trigger_gathering_ai_immediately = False
                     slot_verification_failed = False
                     is_temporary_general_state = 'return_to_state' in context
 
-                    # === Rozpoznawanie typu zdarzenia i ustawianie user_input_text oraz initial action ===
                     if message_data := event.get("message"):
-                        if message_data.get("is_echo"): logging.debug(f"    WH_EVENT: Pominięto echo. PSID: {sender_id}"); continue
+                        if message_data.get("is_echo"): print(f"    WH_EVENT: Pominięto echo. PSID: {sender_id}"); continue
                         user_input_text = message_data.get("text", "").strip()
-                        logging.debug(f"    WH_EVENT: Odebrano wiadomość tekstową: '{user_input_text}'")
+                        print(f"    WH_EVENT: Odebrano wiadomość tekstową: '{user_input_text}'")
                         if user_input_text:
                             if ENABLE_TYPING_DELAY: time.sleep(MIN_TYPING_DELAY_SECONDS * 0.3)
                             if current_state == STATE_SCHEDULING_ACTIVE: action = 'handle_scheduling'
@@ -2397,14 +2393,14 @@ def webhook_handle():
                         elif attachments := message_data.get("attachments"):
                             att_type = attachments[0].get('type', 'nieznany')
                             user_input_text = f"[Załącznik: {att_type}]"
-                            logging.info(f"    WH_EVENT: Odebrano załącznik typu: {att_type}")
+                            print(f"    WH_EVENT: Odebrano załącznik typu: {att_type}")
                             msg_result = "Przepraszam, ale na ten moment mogę przetwarzać tylko wiadomości tekstowe."; action = 'send_info'
-                        else: logging.info("    WH_EVENT: Odebrano pustą wiadomość (bez tekstu i załączników). Pomijanie."); continue
+                        else: print("    WH_EVENT: Odebrano pustą wiadomość (bez tekstu i załączników). Pomijanie."); continue
                     
                     elif postback := event.get("postback"):
                         payload = postback.get("payload"); title = postback.get("title", "")
-                        user_input_text = f"Użytkownik kliknął: '{title}' (Payload: {payload})"
-                        logging.info(f"    WH_EVENT: Odebrano Postback: Payload='{payload}', Tytuł='{title}' (stan={current_state})")
+                        user_input_text = f"Użytkownik kliknął przycisk: '{title}' (Payload: {payload})"
+                        print(f"    WH_EVENT: Odebrano Postback: Payload='{payload}', Tytuł='{title}' (stan={current_state})")
                         if payload == "CANCEL_SCHEDULING":
                              msg_result = "Rozumiem, proces umawiania terminu został anulowany. Jeśli zmienisz zdanie, daj znać!"; action = 'send_info'; next_state = STATE_GENERAL
                              context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
@@ -2412,62 +2408,62 @@ def webhook_handle():
                         elif current_state == STATE_GATHERING_INFO: action = 'handle_gathering'
                         else: action = 'handle_general'
                     
-                    elif event.get("read"): logging.debug(f"    WH_EVENT: Zdarzenie: Potwierdzenie odczytania. PSID: {sender_id}"); continue
-                    elif event.get("delivery"): logging.debug(f"    WH_EVENT: Zdarzenie: Potwierdzenie dostarczenia. PSID: {sender_id}"); continue
-                    else: logging.warning(f"    WH_EVENT: Nieobsługiwany typ zdarzenia w 'messaging': {json.dumps(event)}"); continue
-                    # ================================================================================
+                    elif event.get("read"): print(f"    WH_EVENT: Zdarzenie: Potwierdzenie odczytania. PSID: {sender_id}"); continue
+                    elif event.get("delivery"): print(f"    WH_EVENT: Zdarzenie: Potwierdzenie dostarczenia. PSID: {sender_id}"); continue
+                    else: print(f"    WH_EVENT: Nieobsługiwany typ zdarzenia w 'messaging': {json.dumps(event)}"); continue
                     
                     if user_input_text:
                         user_content_api_fmt = {"role": "user", "parts": [{"text": user_input_text}]}
-                        logging.debug(f"    WH_EVENT: Utworzono user_content_api_fmt: {user_content_api_fmt}")
+                        print(f"    WH_EVENT: Utworzono user_content_api_fmt: {user_content_api_fmt}")
 
                     loop_guard = 0; max_loops = 3
-                    logging.debug(f"--- WH_LOOP_PRE --- Initial Action: {action}, CurrentState: {current_state}, UserInput: '{user_input_text}'")
+                    print(f"--- WH_LOOP_PRE --- Initial Action: {action}, CurrentState: {current_state}, UserInput: '{user_input_text}'")
                     while action and loop_guard < max_loops:
                         loop_guard += 1
                         effective_subject_for_action = context_data_to_save.get('required_subject', current_subject)
-                        logging.info(f"  >> WH_LOOP {loop_guard}/{max_loops} START --- Action: {action}, CurrentState: {current_state}, NextState(pre): {next_state}, EffSubject: {effective_subject_for_action}")
+                        print(f"  >> WH_LOOP {loop_guard}/{max_loops} START --- Action: {action}, CurrentState: {current_state}, NextState(pre): {next_state}, EffSubject: {effective_subject_for_action}")
                         
                         current_action_in_loop = action
-                        action = None # Resetuj na początku każdej iteracji
+                        action = None 
 
                         if current_action_in_loop == 'handle_general':
-                            # ... (Twoja logika dla handle_general)
-                            # Dodaj logowanie PRZED wywołaniem get_gemini_general_response
-                            logging.debug(f"    WH_LOOP {loop_guard}: Wywołuję get_gemini_general_response z user_input_text: '{user_input_text}'")
+                            print(f"    WH_LOOP {loop_guard}: Wywołuję get_gemini_general_response z user_input_text: '{user_input_text}'")
                             ai_response_text_raw = get_gemini_general_response(sender_id, user_input_text, history_api_format, is_temporary_general_state, current_page_token, effective_subject_for_action)
-                            logging.debug(f"    WH_LOOP {loop_guard}: Odpowiedź z get_gemini_general_response: '{ai_response_text_raw}'")
-                            # ... (reszta Twojej logiki dla handle_general, ustawianie msg_result, next_state, action) ...
+                            print(f"    WH_LOOP {loop_guard}: Odpowiedź z get_gemini_general_response: '{ai_response_text_raw}'")
+                            # ... (Twoja reszta logiki dla handle_general, która ustawia msg_result, next_state, action)
 
                         elif current_action_in_loop == 'handle_scheduling':
-                            # ... (Twoja logika dla handle_scheduling)
-                            logging.debug(f"    WH_LOOP {loop_guard}: Wywołuję get_gemini_scheduling_response z user_input_text: '{user_input_text}'")
-                            ai_response_text_raw = get_gemini_scheduling_response(sender_id, history_api_format, user_input_text, free_ranges, effective_subject_for_action, current_page_token) # free_ranges musi być zdefiniowane
-                            logging.debug(f"    WH_LOOP {loop_guard}: Odpowiedź z get_gemini_scheduling_response: '{ai_response_text_raw}'")
-                            # ... (reszta Twojej logiki dla handle_scheduling) ...
+                            print(f"    WH_LOOP {loop_guard}: Wywołuję get_gemini_scheduling_response z user_input_text: '{user_input_text}'")
+                            # Pamiętaj, że `free_ranges` musi być zdefiniowane przed tym wywołaniem, jeśli jest potrzebne
+                            # Dla uproszczenia zakładam, że jest (musisz dostosować, jeśli nie jest wołane zawsze)
+                            tz = _get_calendar_timezone(); now_cal = datetime.datetime.now(tz)
+                            search_end = tz.localize(datetime.datetime.combine((now_cal + datetime.timedelta(days=MAX_SEARCH_DAYS)).date(), datetime.time(WORK_END_HOUR,0)))
+                            subject_cals_for_sched = SUBJECT_TO_CALENDARS.get(effective_subject_for_action.lower(), [])
+                            free_ranges_for_sched = get_free_time_ranges(subject_cals_for_sched, now_cal, search_end) if subject_cals_for_sched else []
+
+                            ai_response_text_raw = get_gemini_scheduling_response(sender_id, history_api_format, user_input_text, free_ranges_for_sched, effective_subject_for_action, current_page_token)
+                            print(f"    WH_LOOP {loop_guard}: Odpowiedź z get_gemini_scheduling_response: '{ai_response_text_raw}'")
+                            # ... (Twoja reszta logiki dla handle_scheduling) ...
 
                         elif current_action_in_loop == 'handle_gathering':
-                            # ... (Twoja logika dla handle_gathering)
                             user_msg_for_gather_ai = user_input_text if not trigger_gathering_ai_immediately else None
-                            logging.debug(f"    WH_LOOP {loop_guard}: Wywołuję get_gemini_gathering_response z user_msg_for_gather_ai: '{user_msg_for_gather_ai}'")
+                            print(f"    WH_LOOP {loop_guard}: Wywołuję get_gemini_gathering_response z user_msg_for_gather_ai: '{user_msg_for_gather_ai}'")
                             ai_response_text_raw = get_gemini_gathering_response(sender_id, history_api_format, user_msg_for_gather_ai, context_data_to_save.copy(), current_page_token)
-                            logging.debug(f"    WH_LOOP {loop_guard}: Odpowiedź z get_gemini_gathering_response: '{ai_response_text_raw}'")
+                            print(f"    WH_LOOP {loop_guard}: Odpowiedź z get_gemini_gathering_response: '{ai_response_text_raw}'")
                             trigger_gathering_ai_immediately = False
-                            # ... (reszta Twojej logiki dla handle_gathering) ...
+                            # ... (Twoja reszta logiki dla handle_gathering) ...
 
                         elif current_action_in_loop == 'send_info':
-                            logging.debug(f"    WH_LOOP {loop_guard}: Akcja send_info, msg_result='{msg_result}', next_state='{next_state}'")
+                            print(f"    WH_LOOP {loop_guard}: Akcja send_info, msg_result='{msg_result}', next_state='{next_state}'")
                             if 'type' not in context_data_to_save: context_data_to_save['type'] = next_state
                             if 'required_subject' not in context_data_to_save: context_data_to_save['required_subject'] = current_subject
-                            action = None # Zakończ pętlę po send_info, bo msg_result zostanie wysłany poniżej
+                            action = None 
                         
-                        logging.debug(f"  << WH_LOOP {loop_guard} END --- Action(post-proc): {action}, NextState(post-proc): {next_state}, MsgResult(in-loop): '{msg_result}'")
-                        current_state = next_state # Aktualizuj current_state dla następnej potencjalnej iteracji
+                        print(f"  << WH_LOOP {loop_guard} END --- Action(post-proc): {action}, NextState(post-proc): {next_state}, MsgResult(in-loop): '{msg_result}'")
+                        current_state = next_state
 
-                    # Koniec pętli while action
-                    logging.debug(f"--- WH_AFTER_LOOP --- MsgResult(final): '{msg_result}', Final NextState: {next_state}")
+                    print(f"--- WH_AFTER_LOOP --- MsgResult(final): '{msg_result}', Final NextState: {next_state}")
 
-                    # Przygotowanie danych do zapisu historii po zakończeniu pętli akcji
                     final_context_to_save = context_data_to_save.copy()
                     final_context_to_save['type'] = next_state 
                     if 'required_subject' not in final_context_to_save:
@@ -2477,7 +2473,7 @@ def webhook_handle():
                          final_context_to_save.pop('return_to_context', None)
                     
                     if msg_result: 
-                        logging.info(f"--- WH_FINAL_SEND --- Wysyłanie wiadomości: '{msg_result[:100]}...' ---")
+                        print(f"--- WH_FINAL_SEND --- Wysyłanie wiadomości: '{msg_result[:100]}...' ---")
                         send_message(sender_id, msg_result, current_page_token)
                         if not model_resp_api_fmt and ai_response_text_raw:
                              model_resp_api_fmt = {"role": "model", "parts": [{"text": ai_response_text_raw}]}
@@ -2493,26 +2489,29 @@ def webhook_handle():
                         if user_content_api_fmt: history_for_saving.append(user_content_api_fmt)
                         if model_resp_api_fmt: history_for_saving.append(model_resp_api_fmt)
                         history_for_saving = history_for_saving[-(MAX_HISTORY_TURNS*2):]
-                        logging.info(f"--- WH_SAVE_HISTORY --- Zapisywanie historii ({len(history_for_saving)} wiad.). Stan: {final_context_to_save.get('type')}, Przedmiot: {final_context_to_save.get('required_subject')}")
+                        print(f"--- WH_SAVE_HISTORY --- Zapisywanie historii ({len(history_for_saving)} wiad.). Stan: {final_context_to_save.get('type')}, Przedmiot: {final_context_to_save.get('required_subject')}")
                         save_history(sender_id, history_for_saving, context_to_save=final_context_to_save)
                     else:
-                        logging.debug(f"--- WH_NO_SAVE --- Brak istotnych zmian w historii lub kontekście - pomijanie zapisu. PSID: {sender_id}")
+                        print(f"--- WH_NO_SAVE --- Brak istotnych zmian w historii lub kontekście - pomijanie zapisu. PSID: {sender_id}")
                     
-                    logging.info(f"--- WH_EVENT_END --- Zakończono przetwarzanie eventu dla Sender: {sender_id} ---")
-                logging.info(f"--- WH: Zakończono wszystkie eventy dla Page ID: {page_id_from_entry} w tym entry ---")
+                    print(f"--- WH_EVENT_END --- Zakończono przetwarzanie eventu dla Sender: {sender_id} ---")
+                print(f"--- WH: Zakończono wszystkie eventy dla Page ID: {page_id_from_entry} w tym entry ---")
             
-            logging.info("--- WH_RESPONSE_TO_FB: Zwracam 200 OK ---")
-            return Response("EVENT_RECEIVED", status=200) # Zwróć 200 OK natychmiast po przetworzeniu wszystkich eventów w entry
+            print("--- WH_RESPONSE_TO_FB: Zwracam 200 OK ---")
+            return Response("EVENT_RECEIVED", status=200)
         else:
-            logging.warning(f"--- WH: Otrzymano POST, ale obiekt nie jest 'page' lub brak danych. Typ: {type(data)}. Dane: {raw_data[:200]}...")
+            print(f"--- WH: Otrzymano POST, ale obiekt nie jest 'page' lub brak danych. Typ: {type(data)}. Dane: {raw_data[:200]}...")
             return Response("OK_NOT_PAGE_OBJECT", status=200)
     except json.JSONDecodeError as e:
-        logging.error(f"--- WH_ERROR: BŁĄD dekodowania JSON przychodzącego żądania: {e} ---", exc_info=True)
-        logging.error(f"    Surowe dane (pierwsze 500 znaków): {raw_data[:500]}...")
+        print(f"--- WH_ERROR: BŁĄD dekodowania JSON przychodzącego żądania: {e} ---") # Użyj print
+        print(f"    Surowe dane (pierwsze 500 znaków): {raw_data[:500]}...") # Użyj print
         return Response("INVALID_JSON", status=400) 
     except Exception as e:
-        logging.critical(f"--- WH_CRITICAL_ERROR: KRYTYCZNY BŁĄD podczas przetwarzania POST /webhook: {e} ---", exc_info=True)
-        return Response("INTERNAL_SERVER_ERROR", status=200) # Zwróć 200, aby FB nie ponawiał, ale błąd jest krytyczny
+        print(f"--- WH_CRITICAL_ERROR: KRYTYCZNY BŁĄD podczas przetwarzania POST /webhook: {e} ---") # Użyj print
+        # Logowanie pełnego tracebacku do konsoli dla błędów krytycznych
+        import traceback
+        traceback.print_exc()
+        return Response("INTERNAL_SERVER_ERROR", status=200)
 
 
 # =====================================================================
