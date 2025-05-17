@@ -2313,7 +2313,7 @@ def find_row_and_update_sheet(psid, start_time, student_data, sheet_row_index=No
 
 @app.route('/webhook', methods=['POST'])
 def webhook_handle():
-        print("Start webhook")
+    print("Start webhook")
     """Główny handler dla przychodzących zdarzeń z Messengera."""
     now_str = datetime.datetime.now(_get_calendar_timezone()).strftime('%Y-%m-%d %H:%M:%S %Z')
     logging.info(f"\n{'='*30} {now_str} POST /webhook {'='*30}")
