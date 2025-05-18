@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 # verify_server.py (Wersja: Wiele Stron FB + Statystyki + Poprawki)
-
+from vertexai.generative_models import Content, Part 
 from flask import Flask, request, Response
 import os
 import json
