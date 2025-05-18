@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 # verify_server.py (Wersja: Wiele Stron FB + Statystyki + Poprawki)
+import threading
 from vertexai.generative_models import Content, Part 
 from flask import Flask, request, Response
 import os
@@ -2394,244 +2395,195 @@ def find_row_and_update_sheet(psid, start_time, student_data, sheet_row_index=No
 
     return update_sheet_phase2(student_data, sheet_row_index)
 
-@app.route('/webhook', methods=['POST'])
-def webhook_handle():
-    """Główny handler dla przychodzących zdarzeń z Messengera."""
-    now_str = datetime.datetime.now(_get_calendar_timezone()).strftime('%Y-%m-%d %H:%M:%S %Z')
-    # Użyj print zamiast logging dla spójności z Twoją prośbą
-    print(f"\n{'='*40}\n--- WH_ENDPOINT_CALLED: {now_str} POST /webhook ---\n{'='*40}")
-    raw_data = request.data
-    data = None
+def process_single_event_in_background(event_data, page_info_for_event):
+    """
+    Przetwarza pojedyncze zdarzenie Messengera w tle.
+    Ta funkcja zawiera logikę, która była wcześniej w pętli 'for event in ...' w webhook_handle.
+    """
     try:
-        decoded_data = raw_data.decode('utf-8')
-        data = json.loads(decoded_data)
-        print(f"--- WH: Otrzymane surowe dane (pierwsze 500 znaków): {decoded_data[:500]}")
+        sender_id = event_data.get("sender", {}).get("id")
+        recipient_id = event_data.get("recipient", {}).get("id") # To jest ID strony, która otrzymała event
 
-        if data and data.get("object") == "page":
-            for entry_idx, entry in enumerate(data.get("entry", [])):
-                page_id_from_entry = entry.get("id")
-                print(f"--- WH: Przetwarzanie Entry {entry_idx+1}/{len(data.get('entry', []))} dla Page ID: {page_id_from_entry} ---")
+        # page_info_for_event jest już przekazane, więc nie musimy robić PAGE_CONFIG.get(recipient_id)
+        current_page_token = page_info_for_event['token']
+        current_subject = page_info_for_event['subject']
+        current_page_name = page_info_for_event['name']
 
-                for event_idx, event in enumerate(entry.get("messaging", [])):
-                    # === INICJALIZACJA ZMIENNYCH DLA KAŻDEGO EVENTU ===
-                    sender_id = event.get("sender", {}).get("id")
-                    recipient_id = event.get("recipient", {}).get("id")
-                    
-                    print(f"--- WH_EVENT_START --- Event {event_idx+1} dla Sender: {sender_id}, Recipient (Page): {recipient_id} ---")
-                    
-                    msg_result = None
-                    ai_response_text_raw = None # Surowy tekst z AI
-                    user_input_text = None      # Tekst od użytkownika
-                    
-                    # ZMIANA: Te będą teraz obiektami Content/Part lub słownikami je naśladującymi
-                    user_content_vertex = None 
-                    model_resp_vertex = None   
-                    
-                    action = None 
-                    # ====================================================
+        print(f"--- BG_THREAD_START: Przetwarzanie dla Sender: {sender_id}, Strona: '{current_page_name}' ---")
 
-                    if not sender_id or not recipient_id:
-                        print(f"WH_EVENT: Pominięto event z brakującym sender_id lub recipient_id. Event: {event}")
-                        continue
-                    
-                    page_info = PAGE_CONFIG.get(recipient_id)
-                    if not page_info:
-                        print(f"!!! WH_EVENT: Otrzymano wiadomość dla nieznanej/nieskonfigurowanej strony ID: {recipient_id} (Sender: {sender_id}). Pomijam. Event: {event}")
-                        continue
+        if not current_page_token or len(current_page_token) < 50:
+             print(f"!!! BG_THREAD: KRYTYCZNY BŁĄD - Brak tokenu dla strony '{current_page_name}'.")
+             return # Zakończ wątek
 
-                    current_page_token = page_info['token']
-                    current_subject = page_info['subject']
-                    current_page_name = page_info['name']
-                    print(f"--- WH_EVENT_CONTEXT: Strona: '{current_page_name}' ({recipient_id}) | Przedmiot Główny: {current_subject} ---")
+        # === Tutaj wklej całą resztę swojej logiki z wewnętrznej pętli webhook_handle ===
+        # Zaczynając od:
+        # history_api_format, context, is_new_contact = load_history(sender_id)
+        # ... aż do końca logiki zapisu historii ...
+        # Pamiętaj, aby używać `current_page_token`, `current_subject`, `current_page_name`
+        # pobranych na początku tej funkcji.
 
-                    if not current_page_token or len(current_page_token) < 50:
-                         print(f"!!! WH_EVENT: KRYTYCZNY BŁĄD - Brak lub nieprawidłowy token dostępu dla strony '{current_page_name}' ({recipient_id}). Nie można odpowiedzieć.")
-                         continue
+        # Przykład fragmentu logiki, którą tu przenosisz:
+        history_api_format, context, is_new_contact = load_history(sender_id)
+        current_state = context.get('type', STATE_GENERAL)
+        next_state = current_state 
 
-                    # Zakładamy, że load_history zwraca historię jako listę obiektów Content/Part (lub słowników je naśladujących)
-                    history_vertex, context, is_new_contact = load_history(sender_id)
-                    current_state = context.get('type', STATE_GENERAL)
-                    next_state = current_state 
+        if is_new_contact:
+            print(f"BG_THREAD: [{sender_id}] Nowy kontakt dla '{current_page_name}'. Logowanie statystyki.")
+            log_statistic("new_contact")
+        
+        print(f"    BG_THREAD: Stan (przed): {current_state}, Historia: {len(history_api_format)} wiad.")
+        print(f"    BG_THREAD: Kontekst wej.: {context}")
 
-                    if is_new_contact:
-                        print(f"WH_EVENT: [{sender_id}] Wykryto nowy kontakt dla strony '{current_page_name}'. Logowanie statystyki.")
-                        log_statistic("new_contact") 
-                    
-                    print(f"    WH_EVENT: Stan (przed przetworzeniem): {current_state}, Historia (Vertex format): {len(history_vertex)} wiad.")
-                    print(f"    WH_EVENT: Kontekst wejściowy: {context}")
+        context_data_to_save = context.copy()
+        context_data_to_save.pop('return_to_state', None)
+        context_data_to_save.pop('return_to_context', None)
+        if context_data_to_save.get('required_subject') != current_subject or 'required_subject' not in context_data_to_save:
+            context_data_to_save['required_subject'] = current_subject
+            print(f"    BG_THREAD: Ustawiono 'required_subject' na: {current_subject}")
 
-                    context_data_to_save = context.copy()
-                    context_data_to_save.pop('return_to_state', None)
-                    context_data_to_save.pop('return_to_context', None)
-                    if context_data_to_save.get('required_subject') != current_subject or 'required_subject' not in context_data_to_save:
-                        context_data_to_save['required_subject'] = current_subject
-                        print(f"    WH_EVENT: Ustawiono/zaktualizowano 'required_subject' w kontekście na: {current_subject}")
+        msg_result = None; ai_response_text_raw = None; user_input_text = None 
+        user_content_api_fmt = None; model_resp_api_fmt = None; action = None
+        trigger_gathering_ai_immediately = False; slot_verification_failed = False
+        is_temporary_general_state = 'return_to_state' in context
 
-                    trigger_gathering_ai_immediately = False
-                    slot_verification_failed = False
-                    is_temporary_general_state = 'return_to_state' in context
+        if message_data := event_data.get("message"): # Użyj event_data
+            if message_data.get("is_echo"): print(f"    BG_THREAD: Pominięto echo. PSID: {sender_id}"); return
+            user_input_text = message_data.get("text", "").strip()
+            print(f"    BG_THREAD: Odebrano wiadomość: '{user_input_text}'")
+            if user_input_text:
+                if ENABLE_TYPING_DELAY: time.sleep(MIN_TYPING_DELAY_SECONDS * 0.3)
+                if current_state == STATE_SCHEDULING_ACTIVE: action = 'handle_scheduling'
+                elif current_state == STATE_GATHERING_INFO: action = 'handle_gathering'
+                else: action = 'handle_general'
+            elif attachments := message_data.get("attachments"):
+                user_input_text = f"[Załącznik: {attachments[0].get('type', 'nieznany')}]"
+                print(f"    BG_THREAD: Odebrano załącznik: {attachments[0].get('type', 'nieznany')}")
+                msg_result = "Mogę przetwarzać tylko wiadomości tekstowe."; action = 'send_info'
+            else: print("    BG_THREAD: Pusta wiadomość."); return
+        
+        elif postback := event_data.get("postback"): # Użyj event_data
+            payload = postback.get("payload"); title = postback.get("title", "")
+            user_input_text = f"Użytkownik kliknął: '{title}' (Payload: {payload})"
+            print(f"    BG_THREAD: Odebrano Postback: Payload='{payload}', Tytuł='{title}' (stan={current_state})")
+            if payload == "CANCEL_SCHEDULING":
+                 msg_result = "Rozumiem, proces umawiania terminu został anulowany."; action = 'send_info'; next_state = STATE_GENERAL
+                 context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
+            elif current_state == STATE_SCHEDULING_ACTIVE: action = 'handle_scheduling'
+            elif current_state == STATE_GATHERING_INFO: action = 'handle_gathering'
+            else: action = 'handle_general'
+        
+        elif event_data.get("read") or event_data.get("delivery"): # Użyj event_data
+            print(f"    BG_THREAD: Zdarzenie read/delivery. PSID: {sender_id}"); return # Zakończ wątek tutaj
+        else: 
+            print(f"    BG_THREAD: Nieobsługiwany typ zdarzenia: {json.dumps(event_data)}"); return
 
-                    # === Rozpoznawanie typu zdarzenia i tworzenie user_content_vertex ===
-                    if message_data := event.get("message"):
-                        if message_data.get("is_echo"): print(f"    WH_EVENT: Pominięto echo. PSID: {sender_id}"); continue
-                        user_input_text = message_data.get("text", "").strip()
-                        print(f"    WH_EVENT: Odebrano wiadomość tekstową: '{user_input_text}'")
-                        if user_input_text:
-                            # === WAŻNE: Upewnij się, że Content i Part są zaimportowane ===
-                            try: from vertexai.generative_models import Content, Part
-                            except ImportError: Content, Part = dict, lambda text: {'text': text} # Proste atrapy
-                            user_content_vertex = Content(role="user", parts=[Part.from_text(user_input_text) if Part.__name__ != '<lambda>' else Part(user_input_text)])
-                            # ===============================================================
-                            if ENABLE_TYPING_DELAY: time.sleep(MIN_TYPING_DELAY_SECONDS * 0.3)
-                            if current_state == STATE_SCHEDULING_ACTIVE: action = 'handle_scheduling'
-                            elif current_state == STATE_GATHERING_INFO: action = 'handle_gathering'
-                            else: action = 'handle_general'
-                        elif attachments := message_data.get("attachments"):
-                            att_type = attachments[0].get('type', 'nieznany')
-                            user_input_text = f"[Załącznik: {att_type}]" # Tekst do zapisu
-                            try: from vertexai.generative_models import Content, Part
-                            except ImportError: Content, Part = dict, lambda text: {'text': text}
-                            user_content_vertex = Content(role="user", parts=[Part.from_text(user_input_text) if Part.__name__ != '<lambda>' else Part(user_input_text)])
-                            print(f"    WH_EVENT: Odebrano załącznik typu: {att_type}")
-                            msg_result = "Przepraszam, ale na ten moment mogę przetwarzać tylko wiadomości tekstowe."; action = 'send_info'
-                        else: print("    WH_EVENT: Odebrano pustą wiadomość. Pomijanie."); continue
-                    
-                    elif postback := event.get("postback"):
-                        payload = postback.get("payload"); title = postback.get("title", "")
-                        user_input_text = f"Użytkownik kliknął: '{title}' (Payload: {payload})"
-                        try: from vertexai.generative_models import Content, Part
-                        except ImportError: Content, Part = dict, lambda text: {'text': text}
-                        user_content_vertex = Content(role="user", parts=[Part.from_text(user_input_text) if Part.__name__ != '<lambda>' else Part(user_input_text)])
-                        print(f"    WH_EVENT: Odebrano Postback: Payload='{payload}', Tytuł='{title}' (stan={current_state})")
-                        if payload == "CANCEL_SCHEDULING":
-                             msg_result = "Rozumiem, proces umawiania terminu został anulowany."; action = 'send_info'; next_state = STATE_GENERAL
-                             context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
-                        elif current_state == STATE_SCHEDULING_ACTIVE: action = 'handle_scheduling'
-                        elif current_state == STATE_GATHERING_INFO: action = 'handle_gathering'
-                        else: action = 'handle_general'
-                    
-                    elif event.get("read") or event.get("delivery"): continue
-                    else: print(f"    WH_EVENT: Nieobsługiwany typ zdarzenia: {json.dumps(event)}"); continue
-                    # ================================================================================
-                    
-                    print(f"    WH_EVENT: Utworzono user_content_vertex: {user_content_vertex}")
+        if user_input_text:
+            user_content_api_fmt = {"role": "user", "parts": [{"text": user_input_text}]}
+            print(f"    BG_THREAD: Utworzono user_content_api_fmt: {user_content_api_fmt}")
 
-                    loop_guard = 0; max_loops = 3
-                    print(f"--- WH_LOOP_PRE --- Initial Action: {action}, CurrentState: {current_state}, UserInput (string): '{user_input_text}'")
-                    while action and loop_guard < max_loops:
-                        loop_guard += 1
-                        effective_subject_for_action = context_data_to_save.get('required_subject', current_subject)
-                        print(f"  >> WH_LOOP {loop_guard}/{max_loops} START --- Action: {action}, CurrentState: {current_state}, NextState(pre): {next_state}, EffSubject: {effective_subject_for_action}")
-                        
-                        current_action_in_loop = action
-                        # Zresetuj msg_result i ai_response_text_raw na początku każdej iteracji pętli,
-                        # aby uniknąć przenoszenia starych odpowiedzi.
-                        msg_result = None
-                        ai_response_text_raw = None
-                        
-                        # action zostanie zresetowane na None w każdej gałęzi poniżej, jeśli ma zakończyć pętlę,
-                        # lub ustawione na nową akcję, jeśli pętla ma kontynuować.
-                        # Na wszelki wypadek, jeśli żadna gałąź nie ustawi action, ustawmy domyślnie na None.
-                        # action = None # Można to zrobić tutaj, ale lepiej w każdej gałęzi.
-
-                        if current_action_in_loop == 'handle_general':
-                            is_initial_general_entry = (current_state != STATE_GENERAL) or (not history_vertex) or (context_data_to_save.get('_just_reset', False)) # Użyj history_vertex
-                            context_data_to_save.pop('_just_reset', None)
-                            if is_initial_general_entry and not user_input_text:
-                                # ... (logika powitania, ustawia msg_result) ...
-                                action = 'send_info'; current_state = next_state; user_input_text = None; continue
-                            elif user_input_text:
-                                was_temporary_general = 'return_to_state' in context
-                                print(f"    WH_LOOP {loop_guard} (general): Wywołuję get_gemini_general_response z user_input_text: '{user_input_text}'")
-                                ai_response_text_raw = get_gemini_general_response(sender_id, user_input_text, history_vertex, was_temporary_general, current_page_token, effective_subject_for_action) # Przekaż history_vertex
-                                print(f"    WH_LOOP {loop_guard} (general): Odpowiedź z AI: '{ai_response_text_raw}'")
-                                # ... (reszta logiki dla handle_general, która ustawia msg_result, next_state, action) ...
-                                # Upewnij się, że jeśli jest odpowiedź, msg_result jest ustawiany, a action na None
-                                if ai_response_text_raw:
-                                    if RETURN_TO_PREVIOUS in ai_response_text_raw and was_temporary_general: # ... (obsługa RETURN) ...
-                                        action = 'handle_scheduling' # lub handle_gathering, etc.
-                                        current_state = next_state; user_input_text = None; continue
-                                    elif INTENT_SCHEDULE_MARKER in ai_response_text_raw: # ... (obsługa INTENT) ...
-                                        action = 'handle_scheduling'; current_state = next_state; user_input_text = None; continue
-                                    else: msg_result = ai_response_text_raw; next_state = STATE_GENERAL; action = None
-                                else: msg_result="Problem z AI (general)."; next_state=STATE_GENERAL; action = None
-                            else: action = None
-
-                        elif current_action_in_loop == 'handle_scheduling':
-                            # ... (logika dla handle_scheduling, woła get_gemini_scheduling_response z history_vertex) ...
-                            # Upewnij się, że `action` jest ustawiane na None lub na nową akcję.
-                            # msg_result jest ustawiany
-                            action = None # Załóżmy, że kończy się po jednym wywołaniu
-
-                        elif current_action_in_loop == 'handle_gathering':
-                            # ... (logika dla handle_gathering, woła get_gemini_gathering_response z history_vertex) ...
-                            # Upewnij się, że `action` jest ustawiane na None lub na nową akcję.
-                            # msg_result jest ustawiany
-                            action = None # Załóżmy, że kończy się po jednym wywołaniu
-
-                        elif current_action_in_loop == 'send_info':
-                            # ... (ustawianie kontekstu) ...
-                            action = None # Zakończ pętlę po send_info
-                        
-                        print(f"  << WH_LOOP {loop_guard} END --- Action(post-proc): {action}, NextState(post-proc): {next_state}, MsgResult(in-loop): '{msg_result}'")
-                        if action is None and msg_result is None and ai_response_text_raw is not None:
-                             # Jeśli akcja się zakończyła, ale nie ma msg_result, a było coś z AI, użyj tego.
-                             msg_result = ai_response_text_raw
-                        current_state = next_state
-                    
-                    print(f"--- WH_AFTER_LOOP --- MsgResult(final): '{msg_result}', Final NextState: {next_state}")
-
-                    final_context_to_save = context_data_to_save.copy(); final_context_to_save['type'] = next_state
-                    if 'required_subject' not in final_context_to_save: final_context_to_save['required_subject'] = current_subject
-                    if next_state != STATE_GENERAL or 'return_to_state' not in final_context_to_save:
-                         final_context_to_save.pop('return_to_state', None); final_context_to_save.pop('return_to_context', None)
-                    
-                    model_resp_vertex = None # Reset
-                    if msg_result: 
-                        print(f"--- WH_FINAL_SEND --- Wysyłanie wiadomości: '{msg_result[:100]}...' ---")
-                        send_message(sender_id, msg_result, current_page_token)
-                        # Tworzenie model_resp_vertex dla zapisu do historii
-                        try:
-                            from vertexai.generative_models import Content, Part
-                            if ai_response_text_raw: # Jeśli odpowiedź była z AI
-                                model_resp_vertex = Content(role="model", parts=[Part.from_text(ai_response_text_raw)])
-                            elif msg_result: # Jeśli wiadomość była manualna
-                                model_resp_vertex = Content(role="model", parts=[Part.from_text(msg_result)])
-                        except ImportError:
-                            if ai_response_text_raw: model_resp_vertex = {"role": "model", "parts": [{"text": ai_response_text_raw}]}
-                            elif msg_result: model_resp_vertex = {"role": "model", "parts": [{"text": msg_result}]}
-                    
-                    original_context_no_return_keys = context.copy()
-                    original_context_no_return_keys.pop('return_to_state', None); original_context_no_return_keys.pop('return_to_context', None)
-                    should_save_history_flag = (bool(user_content_vertex) or bool(model_resp_vertex) or (original_context_no_return_keys != final_context_to_save))
-
-                    if should_save_history_flag:
-                        history_for_saving_vertex = list(history_vertex) 
-                        if user_content_vertex: history_for_saving_vertex.append(user_content_vertex)
-                        if model_resp_vertex: history_for_saving_vertex.append(model_resp_vertex)
-                        history_for_saving_vertex = history_for_saving_vertex[-(MAX_HISTORY_TURNS*2):]
-                        print(f"--- WH_SAVE_HISTORY --- Zapisywanie historii ({len(history_for_saving_vertex)} wiad.). Stan: {final_context_to_save.get('type')}, Przedmiot: {final_context_to_save.get('required_subject')}")
-                        save_history(sender_id, history_for_saving_vertex, context_to_save=final_context_to_save)
-                    else:
-                        print(f"--- WH_NO_SAVE --- Brak istotnych zmian w historii lub kontekście. PSID: {sender_id}")
-                    
-                    print(f"--- WH_EVENT_END --- Zakończono przetwarzanie eventu dla Sender: {sender_id} ---")
-                print(f"--- WH: Zakończono wszystkie eventy dla Page ID: {page_id_from_entry} w tym entry ---")
+        loop_guard = 0; max_loops = 3
+        print(f"--- BG_LOOP_PRE --- Initial Action: {action}, CurrentState: {current_state}, UserInput: '{user_input_text}'")
+        while action and loop_guard < max_loops:
+            loop_guard += 1
+            effective_subject_for_action = context_data_to_save.get('required_subject', current_subject)
+            print(f"  >> BG_LOOP {loop_guard}/{max_loops} START --- Action: {action}, CurrentState: {current_state}, NextState(pre): {next_state}, EffSubject: {effective_subject_for_action}")
             
-            print("--- WH_RESPONSE_TO_FB: Zwracam 200 OK ---")
-            return Response("EVENT_RECEIVED", status=200)
+            current_action_in_loop = action
+            # WAŻNE: Resetuj msg_result i ai_response_text_raw na początku każdej iteracji pętli akcji,
+            # aby uniknąć przenoszenia starych wartości, jeśli akcja się zmienia.
+            # `action` zostanie ustawione na None lub na nową akcję w każdej gałęzi.
+            msg_result = None 
+            ai_response_text_raw = None
+            action = None # Resetuj tutaj, każda gałąź musi ustawić nową akcję jeśli pętla ma kontynuować
+
+            if current_action_in_loop == 'handle_general':
+                # ... (Twoja logika dla handle_general, pamiętaj o ustawieniu action = None na końcu, jeśli to finalna odpowiedź)
+                # ... (lub action = 'nowa_akcja' jeśli ma być kontynuacja w pętli)
+                # PRZYKŁAD:
+                is_initial = (current_state != STATE_GENERAL) or not history_api_format or context_data_to_save.get('_just_reset')
+                context_data_to_save.pop('_just_reset', None)
+                if is_initial and not user_input_text:
+                    # ... logika powitania ...
+                    msg_result = "Dzień dobry! ..." # Ustaw wiadomość
+                    action = 'send_info' # Ustaw następną akcję
+                    next_state = STATE_GENERAL
+                elif user_input_text:
+                    ai_response_text_raw = get_gemini_general_response(sender_id, user_input_text, history_api_format, is_temporary_general_state, current_page_token, effective_subject_for_action)
+                    if ai_response_text_raw:
+                        if INTENT_SCHEDULE_MARKER in ai_response_text_raw:
+                            msg_result = ai_response_text_raw.split(INTENT_SCHEDULE_MARKER,1)[0].strip()
+                            # ... logika zmiany stanu na scheduling ...
+                            action = 'handle_scheduling' # Następna akcja
+                            next_state = STATE_SCHEDULING_ACTIVE
+                            # ...
+                        elif RETURN_TO_PREVIOUS in ai_response_text_raw and is_temporary_general_state:
+                             msg_result = ai_response_text_raw.split(RETURN_TO_PREVIOUS,1)[0].strip()
+                             # ... logika powrotu ...
+                             action = context.get('return_to_state_action', None) # Ustaw akcję na podstawie zapisanego stanu powrotu
+                             next_state = context.get('return_to_state', STATE_GENERAL)
+                        else:
+                            msg_result = ai_response_text_raw
+                            action = None # Koniec pętli
+                            next_state = STATE_GENERAL
+                    else: # Błąd AI
+                        msg_result = "Problem z AI."
+                        action = None # Koniec pętli
+                        next_state = STATE_GENERAL
+                else: action = None # Nic do zrobienia
+
+            elif current_action_in_loop == 'handle_scheduling':
+                # ... (Twoja logika dla handle_scheduling, która ustawia msg_result, next_state i ewentualnie action)
+                action = None # Załóżmy, że kończy po jednym wywołaniu lub ustawia nową akcję
+
+            elif current_action_in_loop == 'handle_gathering':
+                # ... (Twoja logika dla handle_gathering, która ustawia msg_result, next_state i ewentualnie action)
+                action = None # Załóżmy, że kończy po jednym wywołaniu lub ustawia nową akcję
+
+            elif current_action_in_loop == 'send_info':
+                # Ta akcja głównie służy do wysłania wiadomości ustawionej w poprzedniej iteracji.
+                # msg_result powinien już być ustawiony.
+                print(f"    BG_LOOP {loop_guard}: Akcja send_info, msg_result='{msg_result}', next_state='{next_state}'")
+                action = None # Zawsze kończ pętlę po send_info
+            
+            print(f"  << BG_LOOP {loop_guard} END --- Action(post-proc): {action}, NextState(post-proc): {next_state}, MsgResult(in-loop): '{msg_result}'")
+            current_state = next_state
+        
+        print(f"--- BG_AFTER_LOOP --- MsgResult(final): '{msg_result}', Final NextState: {next_state}")
+        
+        final_context_to_save = context_data_to_save.copy(); final_context_to_save['type'] = next_state
+        if 'required_subject' not in final_context_to_save: final_context_to_save['required_subject'] = current_subject
+        if next_state != STATE_GENERAL or 'return_to_state' not in final_context_to_save:
+             final_context_to_save.pop('return_to_state', None); final_context_to_save.pop('return_to_context', None)
+        
+        model_resp_api_fmt = None 
+        if msg_result: 
+            print(f"--- BG_FINAL_SEND --- Wysyłanie wiadomości: '{msg_result[:100]}...' ---")
+            send_message(sender_id, msg_result, current_page_token)
+            if ai_response_text_raw and msg_result == ai_response_text_raw:
+                 model_resp_api_fmt = {"role": "model", "parts": [{"text": ai_response_text_raw}]}
+            elif msg_result:
+                 model_resp_api_fmt = {"role": "model", "parts": [{"text": msg_result}]}
+        
+        original_context_no_return_keys = context.copy()
+        original_context_no_return_keys.pop('return_to_state', None); original_context_no_return_keys.pop('return_to_context', None)
+        should_save_history_flag = (bool(user_content_api_fmt) or bool(model_resp_api_fmt) or (original_context_no_return_keys != final_context_to_save))
+
+        if should_save_history_flag:
+            history_for_saving = list(history_api_format) 
+            if user_content_api_fmt: history_for_saving.append(user_content_api_fmt)
+            if model_resp_api_fmt: history_for_saving.append(model_resp_api_fmt)
+            history_for_saving = history_for_saving[-(MAX_HISTORY_TURNS*2):]
+            print(f"--- BG_SAVE_HISTORY --- Stan: {final_context_to_save.get('type')}")
+            save_history(sender_id, history_for_saving, context_to_save=final_context_to_save)
         else:
-            print(f"--- WH: Otrzymano POST, ale obiekt nie jest 'page'. Dane: {raw_data[:200]}...")
-            return Response("OK_NOT_PAGE_OBJECT", status=200)
-    except json.JSONDecodeError as e:
-        print(f"--- WH_ERROR: BŁĄD dekodowania JSON: {e} ---")
-        print(f"    Surowe dane (pierwsze 500 znaków): {raw_data[:500]}...")
-        return Response("INVALID_JSON", status=400) 
-    except Exception as e:
-        print(f"--- WH_CRITICAL_ERROR: KRYTYCZNY BŁĄD POST /webhook: {e} ---")
+            print(f"--- BG_NO_SAVE --- Brak zmian do zapisu. PSID: {sender_id}")
+            
+        print(f"--- BG_THREAD_END --- Zakończono przetwarzanie eventu dla Sender: {sender_id} ---")
+
+    except Exception as e_bg_thread:
+        print(f"!!! BG_THREAD_CRITICAL_ERROR w process_single_event_in_background dla sender {sender_id}: {e_bg_thread} !!!")
         import traceback
         traceback.print_exc()
-        return Response("INTERNAL_SERVER_ERROR", status=200)
 
 # =====================================================================
 # === URUCHOMIENIE SERWERA ============================================
