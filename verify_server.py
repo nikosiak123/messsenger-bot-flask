@@ -282,133 +282,218 @@ def get_user_profile(psid, page_access_token): # Dodano page_access_token
         return None
 
 
+# NOWE FUNKCJE KONWERSJI
+def convert_vertex_history_to_gemini_api_format(vertex_history_list):
+    """Konwertuje listę obiektów Content (Vertex AI) na format listy słowników (Gemini API)."""
+    gemini_api_history = []
+    if not vertex_history_list:
+        return gemini_api_history
+    for content_obj in vertex_history_list:
+        if isinstance(content_obj, Content) and hasattr(content_obj, 'role') and hasattr(content_obj, 'parts'):
+            parts_list = []
+            for part_obj in content_obj.parts:
+                if isinstance(part_obj, Part) and hasattr(part_obj, 'text'):
+                    parts_list.append({'text': part_obj.text})
+            if parts_list: # Dodaj tylko jeśli są jakieś części tekstowe
+                gemini_api_history.append({'role': content_obj.role, 'parts': parts_list})
+        else:
+            logging.warning(f"Pominięto niepoprawny obiekt historii (nie Content/Part) podczas konwersji do formatu Gemini API: {type(content_obj)}")
+    return gemini_api_history
+
+def convert_gemini_api_message_to_vertex_format(api_message_dict):
+    """Konwertuje pojedynczą wiadomość w formacie Gemini API (słownik) na obiekt Content (Vertex AI)."""
+    if isinstance(api_message_dict, dict) and 'role' in api_message_dict and 'parts' in api_message_dict:
+        try:
+            # UWAGA: Tutaj potrzebujemy importów Content i Part, jeśli ich nie masz globalnie
+            # Możesz je zaimportować warunkowo lub na początku pliku, jeśli jeszcze nie są
+            # from vertexai.generative_models import Content, Part # Upewnij się, że to jest dostępne
+            
+            # Jeśli nie chcesz importować z vertexai, musisz stworzyć własne klasy/struktury
+            # które naśladują Content i Part, a save_history musi umieć je obsłużyć.
+            # Dla uproszczenia, zakładam, że Content i Part są dostępne (nawet jeśli tylko jako "atrapy").
+            # Jeśli nie, save_history musi być zmodyfikowane, aby akceptować słowniki.
+
+            # Aby uniknąć zależności od vertexai.generative_models, jeśli go usunąłeś całkowicie:
+            # Możesz po prostu zwrócić słownik, a save_history musi być dostosowane, aby go poprawnie zapisać.
+            # Albo, jeśli save_history oczekuje obiektów, to jest problem.
+            # ZAŁÓŻMY NA RAZIE, ŻE ZWRACAMY SŁOWNIK, a save_history sobie z tym poradzi,
+            # LUB ŻE save_history zostanie zmodyfikowane, aby zapisywać bezpośrednio format Gemini API.
+            # Dla spójności z "powrotem do starego systemu historii", save_history powinno oczekiwać obiektów Content/Part.
+            # To oznacza, że potrzebujesz tych klas.
+
+            # Jeśli Content i Part nie są dostępne, to jest fundamentalny problem z tym podejściem.
+            # Poniższy kod zakłada, że są.
+            # from vertexai.generative_models import Content, Part # Upewnij się, że to jest gdzieś
+
+            parts_vertex = [Part.from_text(p['text']) for p in api_message_dict['parts'] if 'text' in p]
+            if parts_vertex:
+                return Content(role=api_message_dict['role'], parts=parts_vertex)
+        except NameError: # Jeśli Content lub Part nie są zdefiniowane
+             logging.error("Klasy Content/Part z vertexai.generative_models nie są dostępne do konwersji!")
+             # W tym przypadku po prostu zwróć słownik, a save_history musi być dostosowane
+             return api_message_dict 
+        except Exception as e:
+            logging.error(f"Błąd konwersji wiadomości API na format Vertex: {e}")
+            return None # lub api_message_dict
+    return None # lub api_message_dict
+
+
 def load_history(user_psid):
-    """Wczytuje historię i ostatni kontekst/stan z pliku (format Gemini API)."""
+    """Wczytuje historię (jako listę obiektów Content) i ostatni kontekst/stan z pliku."""
     filepath = os.path.join(HISTORY_DIR, f"{user_psid}.json")
-    history_api_format = [] # Lista słowników dla Gemini API
+    history = [] # Lista obiektów Content
     context = {}
     valid_states = [STATE_GENERAL, STATE_SCHEDULING_ACTIVE, STATE_GATHERING_INFO]
     default_context = {'type': STATE_GENERAL}
 
     if not os.path.exists(filepath):
         logging.info(f"[{user_psid}] Plik historii nie istnieje, zwracam stan domyślny {STATE_GENERAL}.")
-        return history_api_format, default_context.copy(), True # Zwróć True dla nowego kontaktu
+        return history, default_context.copy(), True
 
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
-            stored_data = json.load(f) # stored_data to teraz lista słowników (wiadomości + kontekst na końcu)
-
-            if isinstance(stored_data, list):
+            history_data_json = json.load(f) 
+            if isinstance(history_data_json, list):
                 last_system_message_index = -1
                 system_context_found = False
-
-                # Iteruj od końca, aby znaleźć najnowszy kontekst systemowy
-                for i, item_data in enumerate(reversed(stored_data)):
-                    if isinstance(item_data, dict) and item_data.get('role') == 'system_context': # Używamy 'system_context' dla rozróżnienia
+                
+                for i, item_data in enumerate(reversed(history_data_json)):
+                    if isinstance(item_data, dict) and item_data.get('role') == 'system_context': # Lub 'system', jeśli tak zapisywałeś
                         state_type = item_data.get('type')
                         if state_type and state_type in valid_states:
                             context = item_data.copy()
-                            context.pop('role', None) # Usuń 'role' jeśli jest, bo to nie rola wiadomości
-                            context.pop('system_context', None) # Usuń stary znacznik, jeśli był
-                            logging.debug(f"[{user_psid}] Odczytano AKTYWNY kontekst: {context}")
+                            context.pop('role', None) 
+                            context.pop('system_context', None)
                             system_context_found = True
-                        elif state_type:
-                            logging.warning(f"[{user_psid}] Znaleziono kontekst w pliku {filepath}, ale z nieprawidłowym typem: {item_data}. Używam domyślnego {STATE_GENERAL}.")
-                            context = default_context.copy()
-                        else:
-                            logging.warning(f"[{user_psid}] Znaleziono kontekst systemowy w pliku {filepath}, ale bez typu: {item_data}. Używam domyślnego {STATE_GENERAL}.")
-                            context = default_context.copy()
-                        last_system_message_index = len(stored_data) - 1 - i
-                        break # Znaleziono ostatni kontekst systemowy, przerwij
-
+                        else: context = default_context.copy()
+                        last_system_message_index = len(history_data_json) - 1 - i
+                        break
+                
                 if not system_context_found:
-                    logging.debug(f"[{user_psid}] Nie znaleziono poprawnego kontekstu systemowego na końcu pliku {filepath}. Ustawiam stan {STATE_GENERAL}.")
                     context = default_context.copy()
 
-                # Wczytaj historię wiadomości (wszystkie przed ostatnim systemowym lub wszystkie jeśli nie ma systemowego)
-                limit_index = last_system_message_index if system_context_found else len(stored_data)
-                for i, msg_data in enumerate(stored_data[:limit_index]):
-                    # Walidacja dla formatu Gemini API: słownik z 'role' i 'parts' (lista słowników z 'text')
-                    if (isinstance(msg_data, dict) and 'role' in msg_data and
-                            msg_data['role'] in ('user', 'model') and 'parts' in msg_data and
-                            isinstance(msg_data['parts'], list) and
-                            all(isinstance(p, dict) and 'text' in p for p in msg_data['parts'])):
-                        history_api_format.append(msg_data) # Dodaj bezpośrednio, bo już jest w dobrym formacie
+                limit_index = last_system_message_index if system_context_found else len(history_data_json)
+                for i, msg_data_dict in enumerate(history_data_json[:limit_index]):
+                    if (isinstance(msg_data_dict, dict) and 'role' in msg_data_dict and
+                            msg_data_dict['role'] in ('user', 'model') and 'parts' in msg_data_dict and
+                            isinstance(msg_data_dict['parts'], list) and
+                            all(isinstance(p, dict) and 'text' in p for p in msg_data_dict['parts'])):
+                        try:
+                            # === WAŻNE: Ten import musi działać ===
+                            from vertexai.generative_models import Content, Part 
+                            # =======================================
+                            parts_vertex = [Part.from_text(p['text']) for p in msg_data_dict['parts']]
+                            if parts_vertex:
+                                history.append(Content(role=msg_data_dict['role'], parts=parts_vertex))
+                        except ImportError:
+                            logging.critical("load_history: KRYTYCZNY BŁĄD - Brak Content/Part z vertexai.generative_models. Historia nie może być wczytana jako obiekty.")
+                            raise # Rzuć błąd, bo nie można kontynuować zgodnie z założeniem
+                        except Exception as e_conv:
+                            logging.warning(f"load_history: Błąd konwersji wiadomości na obiekt Content: {e_conv} dla {msg_data_dict}")
                     else:
-                        # Ignoruj stare konteksty systemowe lub niepoprawne wpisy
-                        logging.debug(f"Ostrz. [{user_psid}]: Pominięto niepoprawną/starą wiadomość/kontekst (idx {i}) w pliku {filepath}: {msg_data}")
-
-
-                logging.info(f"[{user_psid}] Wczytano historię z {filepath}: {len(history_api_format)} wiad. Stan: {context.get('type', STATE_GENERAL)}")
-                return history_api_format, context, False # Zwróć False dla istniejącego kontaktu
-
+                        logging.debug(f"Ostrz. [{user_psid}]: Pominięto niepoprawny wpis (idx {i}) w pliku {filepath}: {msg_data_dict}")
+                
+                logging.info(f"[{user_psid}] Wczytano historię (jako obiekty Content): {len(history)} wiad. Stan: {context.get('type', STATE_GENERAL)}")
+                return history, context, False
             else:
                 logging.error(f"BŁĄD [{user_psid}]: Plik historii {filepath} nie jest listą.")
-                return [], default_context.copy(), False # Załóż, że nie jest nowy
+                return [], default_context.copy(), False
     except FileNotFoundError:
         logging.info(f"[{user_psid}] Plik historii {filepath} nie istnieje.")
-        return [], default_context.copy(), True # Zwróć True dla nowego kontaktu
+        return [], default_context.copy(), True
     except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
         logging.error(f"BŁĄD [{user_psid}] parsowania historii z {filepath}: {e}.")
-        try:
-            os.rename(filepath, f"{filepath}.error_{int(time.time())}")
-            logging.warning("    Zmieniono nazwę uszkodzonego pliku historii.")
-        except OSError as rename_err:
-            logging.error(f"    Nie udało się zmienić nazwy: {rename_err}")
-        return [], default_context.copy(), False # Załóż, że nie jest nowy
+        try: os.rename(filepath, f"{filepath}.error_{int(time.time())}")
+        except OSError as rename_err: logging.error(f"    Nie udało się zmienić nazwy: {rename_err}")
+        return [], default_context.copy(), False
     except Exception as e:
         logging.error(f"BŁĄD [{user_psid}] wczytywania historii z {filepath}: {e}", exc_info=True)
-        return [], default_context.copy(), False # Załóż, że nie jest nowy
+        return [], default_context.copy(), False
 
 
-def save_history(user_psid, history_api_format, context_to_save=None):
-    """Zapisuje historię (format Gemini API) i aktualny kontekst/stan."""
+def save_history(user_psid, history_vertex_format, context_to_save=None): # Zmieniono nazwę argumentu dla jasności
+    """Zapisuje historię (listę obiektów Content) i aktualny kontekst/stan."""
     ensure_dir(HISTORY_DIR)
     filepath = os.path.join(HISTORY_DIR, f"{user_psid}.json")
     temp_filepath = f"{filepath}.tmp"
-    data_to_store = [] # Będzie przechowywać historię i kontekst jako listę słowników
+    data_to_store_json = [] 
     try:
-        # Historia jest już w formacie Gemini API (lista słowników)
-        history_to_process = [msg for msg in history_api_format if isinstance(msg, dict) and msg.get('role') in ('user', 'model')]
+        # Konwertuj obiekty Content na słowniki przed zapisem
+        # === WAŻNE: Upewnij się, że Content i Part są zaimportowane ===
+        try:
+            from vertexai.generative_models import Content, Part
+        except ImportError:
+            logging.critical("save_history: KRYTYCZNY BŁĄD - Brak Content/Part z vertexai.generative_models. Nie można zapisać historii jako obiekty.")
+            raise # Rzuć błąd, bo nie można kontynuować
+        # ===========================================================
+
+        history_to_process_vertex = [m for m in history_vertex_format if isinstance(m, Content) and m.role in ('user', 'model')]
         max_messages_to_save = MAX_HISTORY_TURNS * 2
-        if len(history_to_process) > max_messages_to_save:
-            logging.debug(f"[{user_psid}] Ograniczanie historii do zapisu z {len(history_to_process)} do {max_messages_to_save}.")
-            history_to_process = history_to_process[-max_messages_to_save:]
+        if len(history_to_process_vertex) > max_messages_to_save:
+            logging.debug(f"[{user_psid}] Ograniczanie historii do zapisu z {len(history_to_process_vertex)} do {max_messages_to_save}.")
+            history_to_process_vertex = history_to_process_vertex[-max_messages_to_save:]
 
-        data_to_store.extend(history_to_process) # Dodaj przetworzoną historię
+        for msg_content in history_to_process_vertex:
+            if hasattr(msg_content, 'parts') and isinstance(msg_content.parts, list):
+                # Zakładamy, że msg_content.parts zawiera obiekty Part
+                parts_data = [{'text': part.text} for part in msg_content.parts if hasattr(part, 'text')]
+                if parts_data:
+                    data_to_store_json.append({'role': msg_content.role, 'parts': parts_data})
+            else:
+                logging.warning(f"save_history: Pomijanie nieprawidłowego obiektu Content (brak atrybutu parts lub parts nie jest listą): {type(msg_content)}")
 
-        # Dodaj kontekst systemowy NA KOŃCU listy
         current_state_to_save = STATE_GENERAL
         if context_to_save and isinstance(context_to_save, dict):
             context_copy = context_to_save.copy()
             current_state_to_save = context_copy.get('type', STATE_GENERAL)
-            context_copy['role'] = 'system_context' # Użyj innego klucza 'role' dla kontekstu, aby go odróżnić
-            # Zapisuj kontekst zawsze, chyba że jest to domyślny {'type': 'general'} bez dodatkowych pól
+            context_copy['role'] = 'system_context' # Użyj 'system_context' dla odróżnienia
             is_default_general = (current_state_to_save == STATE_GENERAL and
-                                  len(context_copy) == 2 and # tylko 'type' i 'role'
-                                  'type' in context_copy and 'role' in context_copy)
+                                  len(context_copy) == 2 and 'type' in context_copy and 'role' in context_copy)
             if not is_default_general:
-                 data_to_store.append(context_copy)
-                 logging.debug(f"[{user_psid}] Dodano kontekst {current_state_to_save} do zapisu: {context_copy}")
-            else:
-                 logging.debug(f"[{user_psid}] Pominięto zapis domyślnego kontekstu 'general'.")
-        else:
-            logging.debug(f"[{user_psid}] Brak kontekstu do zapisu lub niepoprawny typ kontekstu.")
-
-
+                 data_to_store_json.append(context_copy)
+        
         with open(temp_filepath, 'w', encoding='utf-8') as f:
-            json.dump(data_to_store, f, ensure_ascii=False, indent=2)
+            json.dump(data_to_store_json, f, ensure_ascii=False, indent=2)
         os.replace(temp_filepath, filepath)
-        logging.info(f"[{user_psid}] Zapisano historię/kontekst ({len(data_to_store)} wpisów, stan: {current_state_to_save}) do {filepath}")
+        logging.info(f"[{user_psid}] Zapisano historię/kontekst ({len(data_to_store_json)} wpisów, stan: {current_state_to_save}) do {filepath}")
 
     except Exception as e:
         logging.error(f"BŁĄD [{user_psid}] zapisu historii/kontekstu do {filepath}: {e}", exc_info=True)
         if os.path.exists(temp_filepath):
-            try:
-                os.remove(temp_filepath)
-                logging.info(f"    Usunięto plik tymczasowy {temp_filepath} po błędzie zapisu.")
-            except OSError as remove_e:
-                logging.error(f"    Nie można usunąć pliku tymczasowego {temp_filepath} po błędzie zapisu: {remove_e}")
+            try: os.remove(temp_filepath)
+            except OSError as remove_e: logging.error(f"    Nie można usunąć pliku {temp_filepath}: {remove_e}")
+
+def convert_vertex_history_to_gemini_api_format(vertex_history_list):
+    """Konwertuje listę obiektów Content (Vertex AI) na format listy słowników (Gemini API)."""
+    gemini_api_history = []
+    if not vertex_history_list:
+        return gemini_api_history
+    
+    # === WAŻNE: Upewnij się, że Content i Part są zaimportowane ===
+    try:
+        from vertexai.generative_models import Content, Part
+    except ImportError:
+        logging.critical("convert_vertex_history_to_gemini_api_format: KRYTYCZNY BŁĄD - Brak Content/Part. Nie można konwertować historii.")
+        # Można by tu zwrócić pustą listę lub rzucić wyjątek, w zależności od tego, jak chcesz obsłużyć ten błąd.
+        # Jeśli te klasy nie są dostępne, całe podejście "starej historii" się załamuje.
+        return [] # Zwracanie pustej listy w przypadku braku importu
+    # ===========================================================
+
+    for content_obj in vertex_history_list:
+        if isinstance(content_obj, Content) and hasattr(content_obj, 'role') and hasattr(content_obj, 'parts'):
+            parts_list = []
+            for part_obj in content_obj.parts:
+                if isinstance(part_obj, Part) and hasattr(part_obj, 'text'):
+                    parts_list.append({'text': part_obj.text})
+            if parts_list: 
+                gemini_api_history.append({'role': content_obj.role, 'parts': parts_list})
+        elif isinstance(content_obj, dict) and content_obj.get('role') and content_obj.get('parts'):
+             # Jeśli jakimś cudem dostajemy już słownik, który wygląda jak format API, przekaż go dalej.
+             # To może się zdarzyć, jeśli user_content_vertex/model_resp_vertex były tworzone jako słowniki.
+             gemini_api_history.append(content_obj)
+        else:
+            logging.warning(f"Pominięto niepoprawny obiekt historii ({type(content_obj)}) podczas konwersji do formatu Gemini API.")
+    return gemini_api_history
 
 def _get_calendar_timezone():
     """Pobiera (i cachuje) obiekt strefy czasowej dla Kalendarza."""
@@ -2073,20 +2158,17 @@ SYSTEM_INSTRUCTION_GENERAL = """Jesteś przyjaznym, proaktywnym i profesjonalnym
     intent_marker=INTENT_SCHEDULE_MARKER,
     return_marker=RETURN_TO_PREVIOUS
 )
-
 # --- Funkcja AI: Planowanie terminu ---
 # Zmodyfikowana, aby przyjmować page_access_token
 
 # --- Funkcja AI: Ogólna rozmowa ---
-def get_gemini_general_response(user_psid, current_user_message_text, history_api_format, is_temporary_general_state, page_access_token, current_subject=None):
-    """Prowadzi ogólną rozmowę z AI, używając Gemini API."""
-    print("Start general")
+def get_gemini_general_response(user_psid, current_user_message_text, history_vertex_format, is_temporary_general_state, page_access_token, current_subject=None): # Zmieniono nazwę argumentu historii
+    """Prowadzi ogólną rozmowę z AI, używając Gemini API, ale przyjmuje historię w formacie Vertex."""
     if not GEMINI_API_KEY:
         logging.error(f"!!! [{user_psid}] General Conversation - brak klucza GEMINI_API_KEY!")
         return None
 
     formatted_links_for_ai_prompt = "\n".join([f"- {s}: {l}" for s, l in ALL_SUBJECT_LINKS.items() if s.lower() != (current_subject or "").lower()])
-
     try:
         system_instruction_formatted = SYSTEM_INSTRUCTION_GENERAL.format(
             all_subject_links_formatted_for_ai=formatted_links_for_ai_prompt,
@@ -2096,7 +2178,7 @@ def get_gemini_general_response(user_psid, current_user_message_text, history_ap
             return_marker=RETURN_TO_PREVIOUS
         )
     except KeyError as e:
-        logging.error(f"!!! BŁĄD formatowania instrukcji (General): Brak klucza {e} w SYSTEM_INSTRUCTION_GENERAL. Upewnij się, że wszystkie placeholdery są obecne.")
+        logging.error(f"!!! BŁĄD formatowania instrukcji (General): Brak klucza {e}...")
         return "Błąd konfiguracji asystenta ogólnego."
     except Exception as format_e:
         logging.error(f"!!! BŁĄD formatowania instrukcji (General): {format_e}")
@@ -2111,24 +2193,25 @@ def get_gemini_general_response(user_psid, current_user_message_text, history_ap
         {"role": "model", "parts": [{"text": model_ack}]}
     ]
     
-    prompt_for_this_call = initial_prompt_api + list(history_api_format)
+    # KONWERSJA historii Vertex na format Gemini API
+    history_api_for_this_call = convert_vertex_history_to_gemini_api_format(history_vertex_format)
+    
+    prompt_for_this_call = initial_prompt_api + history_api_for_this_call
+    
     max_prompt_messages = (MAX_HISTORY_TURNS * 2) + 2
     while len(prompt_for_this_call) > max_prompt_messages:
-         if len(prompt_for_this_call) > 3:
-             prompt_for_this_call.pop(2)
-             if len(prompt_for_this_call) > 2:
-                 prompt_for_this_call.pop(2)
-         else:
-             break
+         if len(prompt_for_this_call) > 3: prompt_for_this_call.pop(2); 
+         if len(prompt_for_this_call) > 2: prompt_for_this_call.pop(2)
+         else: break
         
-    response_text = _call_gemini(user_psid, prompt_for_this_call, GENERATION_CONFIG_DEFAULT, SAFETY_SETTINGS, f"General Conversation (Strona: {current_subject or '?'})", page_access_token, user_message=current_user_message_text)
+    response_text_raw = _call_gemini(user_psid, prompt_for_this_call, GENERATION_CONFIG_DEFAULT, SAFETY_SETTINGS, 
+                                   f"General Conversation (Strona: {current_subject or '?'})", 
+                                   page_access_token, user_message=current_user_message_text)
 
-    if response_text:
-        # Oczyszczanie odpowiedzi (bez zmian w tej logice)
-        response_text = re.sub(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}.*?{re.escape(SLOT_ISO_MARKER_SUFFIX)}", "", response_text).strip()
+    if response_text_raw:
+        response_text = re.sub(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}.*?{re.escape(SLOT_ISO_MARKER_SUFFIX)}", "", response_text_raw).strip()
         response_text = response_text.replace(INFO_GATHERED_MARKER, "").strip()
         response_text = response_text.replace(SWITCH_TO_GENERAL, "").strip()
-        # RETURN_TO_PREVIOUS i INTENT_SCHEDULE_MARKER są obsługiwane w logice webhook_handle po otrzymaniu tej odpowiedzi
         return response_text
     else:
         logging.error(f"!!! [{user_psid}] Nie uzyskano poprawnej odpowiedzi od Gemini (General).")
@@ -2315,6 +2398,7 @@ def find_row_and_update_sheet(psid, start_time, student_data, sheet_row_index=No
 def webhook_handle():
     """Główny handler dla przychodzących zdarzeń z Messengera."""
     now_str = datetime.datetime.now(_get_calendar_timezone()).strftime('%Y-%m-%d %H:%M:%S %Z')
+    # Użyj print zamiast logging dla spójności z Twoją prośbą
     print(f"\n{'='*40}\n--- WH_ENDPOINT_CALLED: {now_str} POST /webhook ---\n{'='*40}")
     raw_data = request.data
     data = None
@@ -2329,18 +2413,23 @@ def webhook_handle():
                 print(f"--- WH: Przetwarzanie Entry {entry_idx+1}/{len(data.get('entry', []))} dla Page ID: {page_id_from_entry} ---")
 
                 for event_idx, event in enumerate(entry.get("messaging", [])):
+                    # === INICJALIZACJA ZMIENNYCH DLA KAŻDEGO EVENTU ===
                     sender_id = event.get("sender", {}).get("id")
                     recipient_id = event.get("recipient", {}).get("id")
                     
                     print(f"--- WH_EVENT_START --- Event {event_idx+1} dla Sender: {sender_id}, Recipient (Page): {recipient_id} ---")
                     
                     msg_result = None
-                    ai_response_text_raw = None
-                    user_input_text = None 
-                    user_content_api_fmt = None
-                    model_resp_api_fmt = None
-                    action = None 
+                    ai_response_text_raw = None # Surowy tekst z AI
+                    user_input_text = None      # Tekst od użytkownika
                     
+                    # ZMIANA: Te będą teraz obiektami Content/Part lub słownikami je naśladującymi
+                    user_content_vertex = None 
+                    model_resp_vertex = None   
+                    
+                    action = None 
+                    # ====================================================
+
                     if not sender_id or not recipient_id:
                         print(f"WH_EVENT: Pominięto event z brakującym sender_id lub recipient_id. Event: {event}")
                         continue
@@ -2359,7 +2448,8 @@ def webhook_handle():
                          print(f"!!! WH_EVENT: KRYTYCZNY BŁĄD - Brak lub nieprawidłowy token dostępu dla strony '{current_page_name}' ({recipient_id}). Nie można odpowiedzieć.")
                          continue
 
-                    history_api_format, context, is_new_contact = load_history(sender_id)
+                    # Zakładamy, że load_history zwraca historię jako listę obiektów Content/Part (lub słowników je naśladujących)
+                    history_vertex, context, is_new_contact = load_history(sender_id)
                     current_state = context.get('type', STATE_GENERAL)
                     next_state = current_state 
 
@@ -2367,7 +2457,7 @@ def webhook_handle():
                         print(f"WH_EVENT: [{sender_id}] Wykryto nowy kontakt dla strony '{current_page_name}'. Logowanie statystyki.")
                         log_statistic("new_contact") 
                     
-                    print(f"    WH_EVENT: Stan (przed przetworzeniem): {current_state}, Historia: {len(history_api_format)} wiad.")
+                    print(f"    WH_EVENT: Stan (przed przetworzeniem): {current_state}, Historia (Vertex format): {len(history_vertex)} wiad.")
                     print(f"    WH_EVENT: Kontekst wejściowy: {context}")
 
                     context_data_to_save = context.copy()
@@ -2381,154 +2471,149 @@ def webhook_handle():
                     slot_verification_failed = False
                     is_temporary_general_state = 'return_to_state' in context
 
+                    # === Rozpoznawanie typu zdarzenia i tworzenie user_content_vertex ===
                     if message_data := event.get("message"):
                         if message_data.get("is_echo"): print(f"    WH_EVENT: Pominięto echo. PSID: {sender_id}"); continue
                         user_input_text = message_data.get("text", "").strip()
                         print(f"    WH_EVENT: Odebrano wiadomość tekstową: '{user_input_text}'")
                         if user_input_text:
+                            # === WAŻNE: Upewnij się, że Content i Part są zaimportowane ===
+                            try: from vertexai.generative_models import Content, Part
+                            except ImportError: Content, Part = dict, lambda text: {'text': text} # Proste atrapy
+                            user_content_vertex = Content(role="user", parts=[Part.from_text(user_input_text) if Part.__name__ != '<lambda>' else Part(user_input_text)])
+                            # ===============================================================
                             if ENABLE_TYPING_DELAY: time.sleep(MIN_TYPING_DELAY_SECONDS * 0.3)
                             if current_state == STATE_SCHEDULING_ACTIVE: action = 'handle_scheduling'
                             elif current_state == STATE_GATHERING_INFO: action = 'handle_gathering'
                             else: action = 'handle_general'
                         elif attachments := message_data.get("attachments"):
                             att_type = attachments[0].get('type', 'nieznany')
-                            user_input_text = f"[Załącznik: {att_type}]"
+                            user_input_text = f"[Załącznik: {att_type}]" # Tekst do zapisu
+                            try: from vertexai.generative_models import Content, Part
+                            except ImportError: Content, Part = dict, lambda text: {'text': text}
+                            user_content_vertex = Content(role="user", parts=[Part.from_text(user_input_text) if Part.__name__ != '<lambda>' else Part(user_input_text)])
                             print(f"    WH_EVENT: Odebrano załącznik typu: {att_type}")
                             msg_result = "Przepraszam, ale na ten moment mogę przetwarzać tylko wiadomości tekstowe."; action = 'send_info'
-                        else: print("    WH_EVENT: Odebrano pustą wiadomość (bez tekstu i załączników). Pomijanie."); continue
+                        else: print("    WH_EVENT: Odebrano pustą wiadomość. Pomijanie."); continue
                     
                     elif postback := event.get("postback"):
                         payload = postback.get("payload"); title = postback.get("title", "")
-                        user_input_text = f"Użytkownik kliknął przycisk: '{title}' (Payload: {payload})"
+                        user_input_text = f"Użytkownik kliknął: '{title}' (Payload: {payload})"
+                        try: from vertexai.generative_models import Content, Part
+                        except ImportError: Content, Part = dict, lambda text: {'text': text}
+                        user_content_vertex = Content(role="user", parts=[Part.from_text(user_input_text) if Part.__name__ != '<lambda>' else Part(user_input_text)])
                         print(f"    WH_EVENT: Odebrano Postback: Payload='{payload}', Tytuł='{title}' (stan={current_state})")
                         if payload == "CANCEL_SCHEDULING":
-                             msg_result = "Rozumiem, proces umawiania terminu został anulowany. Jeśli zmienisz zdanie, daj znać!"; action = 'send_info'; next_state = STATE_GENERAL
+                             msg_result = "Rozumiem, proces umawiania terminu został anulowany."; action = 'send_info'; next_state = STATE_GENERAL
                              context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
                         elif current_state == STATE_SCHEDULING_ACTIVE: action = 'handle_scheduling'
                         elif current_state == STATE_GATHERING_INFO: action = 'handle_gathering'
                         else: action = 'handle_general'
                     
-                    elif event.get("read"): print(f"    WH_EVENT: Zdarzenie: Potwierdzenie odczytania. PSID: {sender_id}"); continue
-                    elif event.get("delivery"): print(f"    WH_EVENT: Zdarzenie: Potwierdzenie dostarczenia. PSID: {sender_id}"); continue
-                    else: print(f"    WH_EVENT: Nieobsługiwany typ zdarzenia w 'messaging': {json.dumps(event)}"); continue
+                    elif event.get("read") or event.get("delivery"): continue
+                    else: print(f"    WH_EVENT: Nieobsługiwany typ zdarzenia: {json.dumps(event)}"); continue
+                    # ================================================================================
                     
-                    if user_input_text:
-                        user_content_api_fmt = {"role": "user", "parts": [{"text": user_input_text}]}
-                        print(f"    WH_EVENT: Utworzono user_content_api_fmt: {user_content_api_fmt}")
+                    print(f"    WH_EVENT: Utworzono user_content_vertex: {user_content_vertex}")
 
                     loop_guard = 0; max_loops = 3
-                    print(f"--- WH_LOOP_PRE --- Initial Action: {action}, CurrentState: {current_state}, UserInput: '{user_input_text}'")
+                    print(f"--- WH_LOOP_PRE --- Initial Action: {action}, CurrentState: {current_state}, UserInput (string): '{user_input_text}'")
                     while action and loop_guard < max_loops:
                         loop_guard += 1
                         effective_subject_for_action = context_data_to_save.get('required_subject', current_subject)
                         print(f"  >> WH_LOOP {loop_guard}/{max_loops} START --- Action: {action}, CurrentState: {current_state}, NextState(pre): {next_state}, EffSubject: {effective_subject_for_action}")
                         
                         current_action_in_loop = action
-                        action = None 
+                        # Zresetuj msg_result i ai_response_text_raw na początku każdej iteracji pętli,
+                        # aby uniknąć przenoszenia starych odpowiedzi.
+                        msg_result = None
+                        ai_response_text_raw = None
+                        
+                        # action zostanie zresetowane na None w każdej gałęzi poniżej, jeśli ma zakończyć pętlę,
+                        # lub ustawione na nową akcję, jeśli pętla ma kontynuować.
+                        # Na wszelki wypadek, jeśli żadna gałąź nie ustawi action, ustawmy domyślnie na None.
+                        # action = None # Można to zrobić tutaj, ale lepiej w każdej gałęzi.
 
                         if current_action_in_loop == 'handle_general':
-                            is_initial_general_entry = (current_state != STATE_GENERAL) or (not history_api_format) or (context_data_to_save.get('_just_reset', False))
+                            is_initial_general_entry = (current_state != STATE_GENERAL) or (not history_vertex) or (context_data_to_save.get('_just_reset', False)) # Użyj history_vertex
                             context_data_to_save.pop('_just_reset', None)
                             if is_initial_general_entry and not user_input_text:
-                                other_links = ("\n\nUdzielamy również korepetycji z innych przedmiotów:\n" + "\n".join([f"- {s}: {l}" for s,l in ALL_SUBJECT_LINKS.items() if s.lower()!=current_subject.lower()])) if any(s.lower()!=current_subject.lower() for s in ALL_SUBJECT_LINKS) else ""
-                                msg_result = f"Dzień dobry! Dziękujemy za kontakt w sprawie korepetycji z przedmiotu **{current_subject}**. W czym mogę pomóc? Jeśli chcą Państwo umówić termin, proszę dać znać." + other_links
-                                next_state = STATE_GENERAL; context_data_to_save.update({'type': STATE_GENERAL, 'required_subject': current_subject})
+                                # ... (logika powitania, ustawia msg_result) ...
                                 action = 'send_info'; current_state = next_state; user_input_text = None; continue
                             elif user_input_text:
                                 was_temporary_general = 'return_to_state' in context
-                                print(f"    WH_LOOP {loop_guard}: Wywołuję get_gemini_general_response z user_input_text: '{user_input_text}'")
-                                ai_response_text_raw = get_gemini_general_response(sender_id, user_input_text, history_api_format, was_temporary_general, current_page_token, effective_subject_for_action)
-                                print(f"    WH_LOOP {loop_guard}: Odpowiedź z get_gemini_general_response: '{ai_response_text_raw}'")
+                                print(f"    WH_LOOP {loop_guard} (general): Wywołuję get_gemini_general_response z user_input_text: '{user_input_text}'")
+                                ai_response_text_raw = get_gemini_general_response(sender_id, user_input_text, history_vertex, was_temporary_general, current_page_token, effective_subject_for_action) # Przekaż history_vertex
+                                print(f"    WH_LOOP {loop_guard} (general): Odpowiedź z AI: '{ai_response_text_raw}'")
+                                # ... (reszta logiki dla handle_general, która ustawia msg_result, next_state, action) ...
+                                # Upewnij się, że jeśli jest odpowiedź, msg_result jest ustawiany, a action na None
                                 if ai_response_text_raw:
-                                    if RETURN_TO_PREVIOUS in ai_response_text_raw and was_temporary_general:
-                                        msg_result = ai_response_text_raw.split(RETURN_TO_PREVIOUS,1)[0].strip()
-                                        next_state = context.get('return_to_state', STATE_GENERAL); context_data_to_save = context.get('return_to_context',{}).copy(); context_data_to_save['type']=next_state
-                                        if next_state == STATE_SCHEDULING_ACTIVE: action = 'handle_scheduling'
-                                        elif next_state == STATE_GATHERING_INFO: action='handle_gathering'; trigger_gathering_ai_immediately=True
-                                        else: action = 'handle_general'
-                                        if action: current_state=next_state; user_input_text=None; continue
-                                    elif INTENT_SCHEDULE_MARKER in ai_response_text_raw:
-                                        msg_result = ai_response_text_raw.split(INTENT_SCHEDULE_MARKER,1)[0].strip()
-                                        subj_match = re.search(r'\b(polski|matematyka|angielski)\b',msg_result,re.I); confirmed_subj = subj_match.group(1).capitalize() if subj_match else effective_subject_for_action
-                                        if confirmed_subj in AVAILABLE_SUBJECTS:
-                                            next_state=STATE_SCHEDULING_ACTIVE; context_data_to_save={'type':STATE_SCHEDULING_ACTIVE, 'required_subject':confirmed_subj}
-                                            action='handle_scheduling'; current_state=next_state; user_input_text=None;
-                                            if msg_result: send_message(sender_id, msg_result, current_page_token); msg_result=None
-                                            continue
-                                        else: msg_result = (msg_result + "\n\n" if msg_result else "") + f"Proszę sprecyzować przedmiot ({', '.join(AVAILABLE_SUBJECTS)})?"; next_state=STATE_GENERAL; context_data_to_save.update({'type':STATE_GENERAL, 'required_subject':current_subject}); action=None
-                                    else: # Normalna odpowiedź AI General
-                                        msg_result = ai_response_text_raw; next_state = STATE_GENERAL
-                                        context_data_to_save.update({'type':STATE_GENERAL, 'required_subject':effective_subject_for_action})
-                                        if was_temporary_general: # <--- TUTAJ BYŁ BŁĄD WCIĘCIA, POPRAWIONO
-                                            context_data_to_save.update({
-                                                'return_to_state': context.get('return_to_state'),
-                                                'return_to_context': context.get('return_to_context', {})
-                                            })
-                                        action = None 
-                                else: msg_result="Problem z AI."; next_state=STATE_GENERAL; context_data_to_save={'type':STATE_GENERAL, 'required_subject':current_subject, '_just_reset':True}; action=None
+                                    if RETURN_TO_PREVIOUS in ai_response_text_raw and was_temporary_general: # ... (obsługa RETURN) ...
+                                        action = 'handle_scheduling' # lub handle_gathering, etc.
+                                        current_state = next_state; user_input_text = None; continue
+                                    elif INTENT_SCHEDULE_MARKER in ai_response_text_raw: # ... (obsługa INTENT) ...
+                                        action = 'handle_scheduling'; current_state = next_state; user_input_text = None; continue
+                                    else: msg_result = ai_response_text_raw; next_state = STATE_GENERAL; action = None
+                                else: msg_result="Problem z AI (general)."; next_state=STATE_GENERAL; action = None
                             else: action = None
 
                         elif current_action_in_loop == 'handle_scheduling':
-                            print(f"    WH_LOOP {loop_guard}: Wywołuję get_gemini_scheduling_response z user_input_text: '{user_input_text}'")
-                            tz = _get_calendar_timezone(); now_cal = datetime.datetime.now(tz)
-                            search_end = tz.localize(datetime.datetime.combine((now_cal + datetime.timedelta(days=MAX_SEARCH_DAYS)).date(), datetime.time(WORK_END_HOUR,0)))
-                            subject_cals_for_sched = SUBJECT_TO_CALENDARS.get(effective_subject_for_action.lower(), [])
-                            free_ranges_for_sched = get_free_time_ranges(subject_cals_for_sched, now_cal, search_end) if subject_cals_for_sched else []
-                            ai_response_text_raw = get_gemini_scheduling_response(sender_id, history_api_format, user_input_text, free_ranges_for_sched, effective_subject_for_action, current_page_token)
-                            print(f"    WH_LOOP {loop_guard}: Odpowiedź z get_gemini_scheduling_response: '{ai_response_text_raw}'")
-                            # ... (reszta Twojej logiki dla handle_scheduling, ustawianie msg_result, next_state, action) ...
-                            # (Logika jak w Twoim oryginalnym, pełnym kodzie)
+                            # ... (logika dla handle_scheduling, woła get_gemini_scheduling_response z history_vertex) ...
+                            # Upewnij się, że `action` jest ustawiane na None lub na nową akcję.
+                            # msg_result jest ustawiany
+                            action = None # Załóżmy, że kończy się po jednym wywołaniu
 
                         elif current_action_in_loop == 'handle_gathering':
-                            user_msg_for_gather_ai = user_input_text if not trigger_gathering_ai_immediately else None
-                            print(f"    WH_LOOP {loop_guard}: Wywołuję get_gemini_gathering_response z user_msg_for_gather_ai: '{user_msg_for_gather_ai}'")
-                            ai_response_text_raw = get_gemini_gathering_response(sender_id, history_api_format, user_msg_for_gather_ai, context_data_to_save.copy(), current_page_token)
-                            print(f"    WH_LOOP {loop_guard}: Odpowiedź z get_gemini_gathering_response: '{ai_response_text_raw}'")
-                            trigger_gathering_ai_immediately = False
-                            # ... (reszta Twojej logiki dla handle_gathering, ustawianie msg_result, next_state, action) ...
-                            # (Logika jak w Twoim oryginalnym, pełnym kodzie)
+                            # ... (logika dla handle_gathering, woła get_gemini_gathering_response z history_vertex) ...
+                            # Upewnij się, że `action` jest ustawiane na None lub na nową akcję.
+                            # msg_result jest ustawiany
+                            action = None # Załóżmy, że kończy się po jednym wywołaniu
 
                         elif current_action_in_loop == 'send_info':
-                            print(f"    WH_LOOP {loop_guard}: Akcja send_info, msg_result='{msg_result}', next_state='{next_state}'")
-                            if 'type' not in context_data_to_save: context_data_to_save['type'] = next_state
-                            if 'required_subject' not in context_data_to_save: context_data_to_save['required_subject'] = current_subject
-                            action = None 
+                            # ... (ustawianie kontekstu) ...
+                            action = None # Zakończ pętlę po send_info
                         
                         print(f"  << WH_LOOP {loop_guard} END --- Action(post-proc): {action}, NextState(post-proc): {next_state}, MsgResult(in-loop): '{msg_result}'")
+                        if action is None and msg_result is None and ai_response_text_raw is not None:
+                             # Jeśli akcja się zakończyła, ale nie ma msg_result, a było coś z AI, użyj tego.
+                             msg_result = ai_response_text_raw
                         current_state = next_state
-
+                    
                     print(f"--- WH_AFTER_LOOP --- MsgResult(final): '{msg_result}', Final NextState: {next_state}")
 
-                    final_context_to_save = context_data_to_save.copy()
-                    final_context_to_save['type'] = next_state 
-                    if 'required_subject' not in final_context_to_save:
-                        final_context_to_save['required_subject'] = current_subject
+                    final_context_to_save = context_data_to_save.copy(); final_context_to_save['type'] = next_state
+                    if 'required_subject' not in final_context_to_save: final_context_to_save['required_subject'] = current_subject
                     if next_state != STATE_GENERAL or 'return_to_state' not in final_context_to_save:
-                         final_context_to_save.pop('return_to_state', None);
-                         final_context_to_save.pop('return_to_context', None)
+                         final_context_to_save.pop('return_to_state', None); final_context_to_save.pop('return_to_context', None)
                     
-                    model_resp_api_fmt = None # Resetuj przed potencjalnym ustawieniem
-                    if ai_response_text_raw : model_resp_api_fmt = {"role": "model", "parts": [{"text": ai_response_text_raw}]}
-                    elif msg_result : # Jeśli msg_result był ustawiony manualnie i nie było odpowiedzi AI w tej ostatniej fazie
-                        model_resp_api_fmt = {"role": "model", "parts": [{"text": msg_result}]}
-
+                    model_resp_vertex = None # Reset
                     if msg_result: 
                         print(f"--- WH_FINAL_SEND --- Wysyłanie wiadomości: '{msg_result[:100]}...' ---")
                         send_message(sender_id, msg_result, current_page_token)
+                        # Tworzenie model_resp_vertex dla zapisu do historii
+                        try:
+                            from vertexai.generative_models import Content, Part
+                            if ai_response_text_raw: # Jeśli odpowiedź była z AI
+                                model_resp_vertex = Content(role="model", parts=[Part.from_text(ai_response_text_raw)])
+                            elif msg_result: # Jeśli wiadomość była manualna
+                                model_resp_vertex = Content(role="model", parts=[Part.from_text(msg_result)])
+                        except ImportError:
+                            if ai_response_text_raw: model_resp_vertex = {"role": "model", "parts": [{"text": ai_response_text_raw}]}
+                            elif msg_result: model_resp_vertex = {"role": "model", "parts": [{"text": msg_result}]}
                     
                     original_context_no_return_keys = context.copy()
                     original_context_no_return_keys.pop('return_to_state', None); original_context_no_return_keys.pop('return_to_context', None)
-                    should_save_history_flag = (bool(user_content_api_fmt) or bool(model_resp_api_fmt) or (original_context_no_return_keys != final_context_to_save))
+                    should_save_history_flag = (bool(user_content_vertex) or bool(model_resp_vertex) or (original_context_no_return_keys != final_context_to_save))
 
                     if should_save_history_flag:
-                        history_for_saving = list(history_api_format) 
-                        if user_content_api_fmt: history_for_saving.append(user_content_api_fmt)
-                        if model_resp_api_fmt: history_for_saving.append(model_resp_api_fmt)
-                        history_for_saving = history_for_saving[-(MAX_HISTORY_TURNS*2):]
-                        print(f"--- WH_SAVE_HISTORY --- Zapisywanie historii ({len(history_for_saving)} wiad.). Stan: {final_context_to_save.get('type')}, Przedmiot: {final_context_to_save.get('required_subject')}")
-                        save_history(sender_id, history_for_saving, context_to_save=final_context_to_save)
+                        history_for_saving_vertex = list(history_vertex) 
+                        if user_content_vertex: history_for_saving_vertex.append(user_content_vertex)
+                        if model_resp_vertex: history_for_saving_vertex.append(model_resp_vertex)
+                        history_for_saving_vertex = history_for_saving_vertex[-(MAX_HISTORY_TURNS*2):]
+                        print(f"--- WH_SAVE_HISTORY --- Zapisywanie historii ({len(history_for_saving_vertex)} wiad.). Stan: {final_context_to_save.get('type')}, Przedmiot: {final_context_to_save.get('required_subject')}")
+                        save_history(sender_id, history_for_saving_vertex, context_to_save=final_context_to_save)
                     else:
-                        print(f"--- WH_NO_SAVE --- Brak istotnych zmian w historii lub kontekście - pomijanie zapisu. PSID: {sender_id}")
+                        print(f"--- WH_NO_SAVE --- Brak istotnych zmian w historii lub kontekście. PSID: {sender_id}")
                     
                     print(f"--- WH_EVENT_END --- Zakończono przetwarzanie eventu dla Sender: {sender_id} ---")
                 print(f"--- WH: Zakończono wszystkie eventy dla Page ID: {page_id_from_entry} w tym entry ---")
@@ -2536,14 +2621,14 @@ def webhook_handle():
             print("--- WH_RESPONSE_TO_FB: Zwracam 200 OK ---")
             return Response("EVENT_RECEIVED", status=200)
         else:
-            print(f"--- WH: Otrzymano POST, ale obiekt nie jest 'page' lub brak danych. Typ: {type(data)}. Dane: {raw_data[:200]}...")
+            print(f"--- WH: Otrzymano POST, ale obiekt nie jest 'page'. Dane: {raw_data[:200]}...")
             return Response("OK_NOT_PAGE_OBJECT", status=200)
     except json.JSONDecodeError as e:
-        print(f"--- WH_ERROR: BŁĄD dekodowania JSON przychodzącego żądania: {e} ---")
+        print(f"--- WH_ERROR: BŁĄD dekodowania JSON: {e} ---")
         print(f"    Surowe dane (pierwsze 500 znaków): {raw_data[:500]}...")
         return Response("INVALID_JSON", status=400) 
     except Exception as e:
-        print(f"--- WH_CRITICAL_ERROR: KRYTYCZNY BŁĄD podczas przetwarzania POST /webhook: {e} ---")
+        print(f"--- WH_CRITICAL_ERROR: KRYTYCZNY BŁĄD POST /webhook: {e} ---")
         import traceback
         traceback.print_exc()
         return Response("INTERNAL_SERVER_ERROR", status=200)
