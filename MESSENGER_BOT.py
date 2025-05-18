@@ -62,7 +62,7 @@ app = Flask(__name__)
 # --- Konfiguracja Ogólna ---
 VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "KOLAGEN") # Używane tylko do weryfikacji webhooka
 PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "singular-carver-459118-g5")
-LOCATION = os.environ.get("GCP_LOCATION", "us-central1-f")
+LOCATION = os.environ.get("GCP_LOCATION", "us-central1")
 MODEL_ID = os.environ.get("VERTEX_MODEL_ID", "gemini-2.0-flash-001")
 
 FACEBOOK_GRAPH_API_URL = "https://graph.facebook.com/v19.0/me/messages"
