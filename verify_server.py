@@ -1,14 +1,18 @@
 # -*- coding: utf-8 -*-
 
 # verify_server.py (Wersja: Wiele Stron FB + Statystyki + Poprawki)
-import threading
-from vertexai.generative_models import Content, Part 
+
 from flask import Flask, request, Response
 import os
 import json
 import requests
 import time
+import vertexai
 import random
+from vertexai.generative_models import (
+    GenerativeModel, Part, Content, GenerationConfig,
+    SafetySetting, HarmCategory, HarmBlockThreshold
+)
 import errno
 import logging
 import datetime
@@ -57,6 +61,9 @@ app = Flask(__name__)
 
 # --- Konfiguracja Ogólna ---
 VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "KOLAGEN") # Używane tylko do weryfikacji webhooka
+PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "linear-booth-450221-k1")
+LOCATION = os.environ.get("GCP_LOCATION", "us-central1")
+MODEL_ID = os.environ.get("VERTEX_MODEL_ID", "gemini-2.0-flash-001")
 
 FACEBOOK_GRAPH_API_URL = "https://graph.facebook.com/v19.0/me/messages"
 
@@ -71,7 +78,7 @@ MAX_TYPING_DELAY_SECONDS = 3.0
 TYPING_CHARS_PER_SECOND = 35
 
 # --- Konfiguracja Kalendarza (ODCZYT/WERYFIKACJA) ---
-CALENDAR_SERVICE_ACCOUNT_FILE = 'KALENDARZ_KLUCZ.json'
+CALENDAR_SERVICE_ACCOUNT_FILE = 'kalendarzklucz.json'
 CALENDAR_SCOPES = ['https://www.googleapis.com/auth/calendar.readonly']
 CALENDAR_TIMEZONE = 'Europe/Warsaw'
 APPOINTMENT_DURATION_MINUTES = 60
@@ -117,7 +124,7 @@ MAX_SEARCH_DAYS = 14
 MIN_BOOKING_LEAD_HOURS = 24
 
 # --- Konfiguracja Google Sheets (ZAPIS + ODCZYT) ---
-SHEETS_SERVICE_ACCOUNT_FILE = 'ARKUSZ_KLUCZ.json'
+SHEETS_SERVICE_ACCOUNT_FILE = 'arkuszklucz.json'
 SHEET_SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 SPREADSHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "1vpsIAEkqtY3ZJ5Mr67Dda45aZ55V1O-Ux9ODjwk13qw")
 MAIN_SHEET_NAME = os.environ.get("GOOGLE_SHEET_NAME", 'Arkusz1') # Główne rezerwacje
@@ -158,42 +165,25 @@ STATE_GENERAL = "general"
 STATE_SCHEDULING_ACTIVE = "scheduling_active"
 STATE_GATHERING_INFO = "gathering_info"
 
+# --- Ustawienia Modelu Gemini ---
+GENERATION_CONFIG_SCHEDULING = GenerationConfig(temperature=0.5, top_p=0.95, top_k=40, max_output_tokens=512)
+GENERATION_CONFIG_GATHERING = GenerationConfig(temperature=0.4, top_p=0.95, top_k=40, max_output_tokens=350)
+GENERATION_CONFIG_DEFAULT = GenerationConfig(temperature=0.7, top_p=0.95, top_k=40, max_output_tokens=1024)
+
+# --- Bezpieczeństwo AI ---
+SAFETY_SETTINGS = [
+    SafetySetting(category=HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH),
+    SafetySetting(category=HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE),
+    SafetySetting(category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH),
+    SafetySetting(category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE),
+]
+
 # --- Inicjalizacja Zmiennych Globalnych ---
 _calendar_service = None
 _sheets_service = None
 _cal_tz = None
 _sheet_tz = None
 POLISH_WEEKDAYS = ["Poniedziałek", "Wtorek", "Środa", "Czwartek", "Piątek", "Sobota", "Niedziela"]
-
-GEMINI_API_KEY = os.environ.get("GOOGLE_GEMINI_API_KEY", "AIzaSyCJGoODg04hUZ3PpKf5tb7NoIMtT9G9K9I") # PAMIĘTAJ O BEZPIECZEŃSTWIE TEGO KLUCZA! LEPIEJ ZE ZMIENNEJ ŚRODOWISKOWEJ.
-MODEL_ID_FROM_ENV = os.environ.get("GEMINI_MODEL_ID", "gemini-1.5-flash-latest") # Upewnij się, że to poprawny ID dla Gemini API (np. gemini-1.5-flash-latest)
-MODEL_FOR_API = f"models/{MODEL_ID_FROM_ENV}"
-
-# --- Ustawienia Modelu Gemini (teraz jako Mock obiekty dla kompatybilności konwerterów) ---
-class MockGenerationConfig: # Symulacja obiektu GenerationConfig
-    def __init__(self, temperature, top_p, top_k, max_output_tokens):
-        self.temperature = temperature
-        self.top_p = top_p
-        self.top_k = top_k
-        self.max_output_tokens = max_output_tokens
-
-class MockSafetySetting: # Symulacja obiektu SafetySetting
-    def __init__(self, category_str, threshold_str):
-        self.category = category_str # Przechowujemy jako string zgodny z Gemini API
-        self.threshold = threshold_str # Przechowujemy jako string zgodny z Gemini API
-
-GENERATION_CONFIG_SCHEDULING = MockGenerationConfig(temperature=0.5, top_p=0.95, top_k=40, max_output_tokens=512)
-GENERATION_CONFIG_GATHERING = MockGenerationConfig(temperature=0.4, top_p=0.95, top_k=40, max_output_tokens=350)
-GENERATION_CONFIG_DEFAULT = MockGenerationConfig(temperature=0.7, top_p=0.95, top_k=40, max_output_tokens=1024)
-
-SAFETY_SETTINGS = [
-    MockSafetySetting(category_str="HARM_CATEGORY_HARASSMENT", threshold_str="BLOCK_ONLY_HIGH"),
-    MockSafetySetting(category_str="HARM_CATEGORY_HATE_SPEECH", threshold_str="BLOCK_MEDIUM_AND_ABOVE"),
-    MockSafetySetting(category_str="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold_str="BLOCK_ONLY_HIGH"),
-    MockSafetySetting(category_str="HARM_CATEGORY_DANGEROUS_CONTENT", threshold_str="BLOCK_MEDIUM_AND_ABOVE"),
-]
-
-
 
 # --- Ustawienia Lokalizacji ---
 try:
@@ -207,21 +197,23 @@ except locale.Error:
 # =====================================================================
 # === INICJALIZACJA AI ================================================
 # =====================================================================
-
-if not logging.getLogger().hasHandlers():
-    log_format = '%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d - %(funcName)s] - %(message)s'
-    log_datefmt = '%Y-%m-%d %H:%M:%S'
-    logging.basicConfig(level=logging.INFO, format=log_format, datefmt=log_datefmt)
-
-# Sprawdzenie i logowanie konfiguracji Gemini API
-print(f"--- Inicjalizacja dla Gemini API ---")
-if not GEMINI_API_KEY or len(GEMINI_API_KEY) < 30: # Prosta walidacja długości klucza
-    logging.critical("!!! KRYTYCZNY BŁĄD: Brak lub nieprawidłowy klucz GEMINI_API_KEY w zmiennych środowiskowych (lub w kodzie) !!!")
-    logging.critical("!!! Funkcjonalność AI będzie niedostępna !!!")
-    print("!!! KRYTYCZNY BŁĄD: Klucz Gemini API nie jest poprawnie skonfigurowany. AI nie będzie działać. !!!", flush=True)
-else:
-    logging.info(f"--- Konfiguracja Gemini API: Model docelowy={MODEL_FOR_API}, Klucz API załadowany (długość: {len(GEMINI_API_KEY)}) ---")
-    print(f"--- Konfiguracja Gemini API: Model={MODEL_FOR_API}. Klucz API załadowany. ---", flush=True)
+gemini_model = None
+try:
+    if not logging.getLogger().hasHandlers():
+        log_format = '%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d - %(funcName)s] - %(message)s'
+        log_datefmt = '%Y-%m-%d %H:%M:%S'
+        logging.basicConfig(level=logging.INFO, format=log_format, datefmt=log_datefmt)
+    print(f"--- Inicjalizowanie Vertex AI: Projekt={PROJECT_ID}, Lokalizacja={LOCATION}")
+    vertexai.init(project=PROJECT_ID, location=LOCATION)
+    print("--- Inicjalizacja Vertex AI OK.")
+    print(f"--- Ładowanie modelu: {MODEL_ID}")
+    gemini_model = GenerativeModel(MODEL_ID)
+    print(f"--- Model {MODEL_ID} załadowany OK.")
+except Exception as e:
+    print(f"!!! KRYTYCZNY BŁĄD inicjalizacji Vertex AI lub ładowania modelu: {e}", flush=True)
+    import traceback
+    traceback.print_exc()
+    print("!!! Funkcjonalność AI będzie niedostępna !!!", flush=True)
 
 # =====================================================================
 # === FUNKCJE POMOCNICZE (Ogólne) =====================================
@@ -283,218 +275,145 @@ def get_user_profile(psid, page_access_token): # Dodano page_access_token
         return None
 
 
-# NOWE FUNKCJE KONWERSJI
-def convert_vertex_history_to_gemini_api_format(vertex_history_list):
-    """Konwertuje listę obiektów Content (Vertex AI) na format listy słowników (Gemini API)."""
-    gemini_api_history = []
-    if not vertex_history_list:
-        return gemini_api_history
-    for content_obj in vertex_history_list:
-        if isinstance(content_obj, Content) and hasattr(content_obj, 'role') and hasattr(content_obj, 'parts'):
-            parts_list = []
-            for part_obj in content_obj.parts:
-                if isinstance(part_obj, Part) and hasattr(part_obj, 'text'):
-                    parts_list.append({'text': part_obj.text})
-            if parts_list: # Dodaj tylko jeśli są jakieś części tekstowe
-                gemini_api_history.append({'role': content_obj.role, 'parts': parts_list})
-        else:
-            logging.warning(f"Pominięto niepoprawny obiekt historii (nie Content/Part) podczas konwersji do formatu Gemini API: {type(content_obj)}")
-    return gemini_api_history
-
-def convert_gemini_api_message_to_vertex_format(api_message_dict):
-    """Konwertuje pojedynczą wiadomość w formacie Gemini API (słownik) na obiekt Content (Vertex AI)."""
-    if isinstance(api_message_dict, dict) and 'role' in api_message_dict and 'parts' in api_message_dict:
-        try:
-            # UWAGA: Tutaj potrzebujemy importów Content i Part, jeśli ich nie masz globalnie
-            # Możesz je zaimportować warunkowo lub na początku pliku, jeśli jeszcze nie są
-            # from vertexai.generative_models import Content, Part # Upewnij się, że to jest dostępne
-            
-            # Jeśli nie chcesz importować z vertexai, musisz stworzyć własne klasy/struktury
-            # które naśladują Content i Part, a save_history musi umieć je obsłużyć.
-            # Dla uproszczenia, zakładam, że Content i Part są dostępne (nawet jeśli tylko jako "atrapy").
-            # Jeśli nie, save_history musi być zmodyfikowane, aby akceptować słowniki.
-
-            # Aby uniknąć zależności od vertexai.generative_models, jeśli go usunąłeś całkowicie:
-            # Możesz po prostu zwrócić słownik, a save_history musi być dostosowane, aby go poprawnie zapisać.
-            # Albo, jeśli save_history oczekuje obiektów, to jest problem.
-            # ZAŁÓŻMY NA RAZIE, ŻE ZWRACAMY SŁOWNIK, a save_history sobie z tym poradzi,
-            # LUB ŻE save_history zostanie zmodyfikowane, aby zapisywać bezpośrednio format Gemini API.
-            # Dla spójności z "powrotem do starego systemu historii", save_history powinno oczekiwać obiektów Content/Part.
-            # To oznacza, że potrzebujesz tych klas.
-
-            # Jeśli Content i Part nie są dostępne, to jest fundamentalny problem z tym podejściem.
-            # Poniższy kod zakłada, że są.
-            # from vertexai.generative_models import Content, Part # Upewnij się, że to jest gdzieś
-
-            parts_vertex = [Part.from_text(p['text']) for p in api_message_dict['parts'] if 'text' in p]
-            if parts_vertex:
-                return Content(role=api_message_dict['role'], parts=parts_vertex)
-        except NameError: # Jeśli Content lub Part nie są zdefiniowane
-             logging.error("Klasy Content/Part z vertexai.generative_models nie są dostępne do konwersji!")
-             # W tym przypadku po prostu zwróć słownik, a save_history musi być dostosowane
-             return api_message_dict 
-        except Exception as e:
-            logging.error(f"Błąd konwersji wiadomości API na format Vertex: {e}")
-            return None # lub api_message_dict
-    return None # lub api_message_dict
-
-
 def load_history(user_psid):
-    """Wczytuje historię (jako listę obiektów Content) i ostatni kontekst/stan z pliku."""
+    """Wczytuje historię i ostatni kontekst/stan z pliku."""
     filepath = os.path.join(HISTORY_DIR, f"{user_psid}.json")
-    history = [] # Lista obiektów Content
+    history = []
     context = {}
     valid_states = [STATE_GENERAL, STATE_SCHEDULING_ACTIVE, STATE_GATHERING_INFO]
-    default_context = {'type': STATE_GENERAL}
+    default_context = {'type': STATE_GENERAL} # Domyślny kontekst
 
     if not os.path.exists(filepath):
         logging.info(f"[{user_psid}] Plik historii nie istnieje, zwracam stan domyślny {STATE_GENERAL}.")
-        return history, default_context.copy(), True
+        return history, default_context.copy(), True # Zwróć True dla nowego kontaktu
 
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
-            history_data_json = json.load(f) 
-            if isinstance(history_data_json, list):
+            history_data = json.load(f)
+            if isinstance(history_data, list):
                 last_system_message_index = -1
                 system_context_found = False
-                
-                for i, item_data in enumerate(reversed(history_data_json)):
-                    if isinstance(item_data, dict) and item_data.get('role') == 'system_context': # Lub 'system', jeśli tak zapisywałeś
-                        state_type = item_data.get('type')
+                # Iteruj od końca, aby znaleźć najnowszy kontekst systemowy
+                for i, msg_data in enumerate(reversed(history_data)):
+                    if isinstance(msg_data, dict) and msg_data.get('role') == 'system':
+                        state_type = msg_data.get('type')
                         if state_type and state_type in valid_states:
-                            context = item_data.copy()
-                            context.pop('role', None) 
-                            context.pop('system_context', None)
+                            context = msg_data.copy() # Kopiuj znaleziony kontekst
+                            context.pop('role', None) # Usuń klucz 'role' z kontekstu
+                            logging.debug(f"[{user_psid}] Odczytano AKTYWNY kontekst: {context}")
                             system_context_found = True
-                        else: context = default_context.copy()
-                        last_system_message_index = len(history_data_json) - 1 - i
-                        break
-                
+                        elif state_type:
+                            logging.warning(f"[{user_psid}] Znaleziono kontekst w pliku {filepath}, ale z nieprawidłowym typem: {msg_data}. Używam domyślnego {STATE_GENERAL}.")
+                            context = default_context.copy()
+                        else:
+                            logging.warning(f"[{user_psid}] Znaleziono kontekst systemowy w pliku {filepath}, ale bez typu: {msg_data}. Używam domyślnego {STATE_GENERAL}.")
+                            context = default_context.copy()
+                        last_system_message_index = len(history_data) - 1 - i
+                        break # Znaleziono ostatni kontekst systemowy, przerwij
+
                 if not system_context_found:
+                    logging.debug(f"[{user_psid}] Nie znaleziono poprawnego kontekstu systemowego na końcu pliku {filepath}. Ustawiam stan {STATE_GENERAL}.")
                     context = default_context.copy()
 
-                limit_index = last_system_message_index if system_context_found else len(history_data_json)
-                for i, msg_data_dict in enumerate(history_data_json[:limit_index]):
-                    if (isinstance(msg_data_dict, dict) and 'role' in msg_data_dict and
-                            msg_data_dict['role'] in ('user', 'model') and 'parts' in msg_data_dict and
-                            isinstance(msg_data_dict['parts'], list) and
-                            all(isinstance(p, dict) and 'text' in p for p in msg_data_dict['parts'])):
-                        try:
-                            # === WAŻNE: Ten import musi działać ===
-                            from vertexai.generative_models import Content, Part 
-                            # =======================================
-                            parts_vertex = [Part.from_text(p['text']) for p in msg_data_dict['parts']]
-                            if parts_vertex:
-                                history.append(Content(role=msg_data_dict['role'], parts=parts_vertex))
-                        except ImportError:
-                            logging.critical("load_history: KRYTYCZNY BŁĄD - Brak Content/Part z vertexai.generative_models. Historia nie może być wczytana jako obiekty.")
-                            raise # Rzuć błąd, bo nie można kontynuować zgodnie z założeniem
-                        except Exception as e_conv:
-                            logging.warning(f"load_history: Błąd konwersji wiadomości na obiekt Content: {e_conv} dla {msg_data_dict}")
+                # Wczytaj historię wiadomości (wszystkie przed ostatnim systemowym lub wszystkie jeśli nie ma systemowego)
+                limit_index = last_system_message_index if system_context_found else len(history_data)
+                for i, msg_data in enumerate(history_data[:limit_index]):
+                    if (isinstance(msg_data, dict) and 'role' in msg_data and
+                            msg_data['role'] in ('user', 'model') and 'parts' in msg_data and
+                            isinstance(msg_data['parts'], list) and msg_data['parts']):
+                        text_parts = []
+                        valid_parts = True
+                        for part_data in msg_data['parts']:
+                            if isinstance(part_data, dict) and 'text' in part_data and isinstance(part_data['text'], str):
+                                text_parts.append(Part.from_text(part_data['text']))
+                            else:
+                                logging.warning(f"Ostrz. [{user_psid}]: Niepoprawna część wiadomości (idx {i}) w pliku {filepath}")
+                                valid_parts = False
+                                break
+                        if valid_parts and text_parts:
+                            history.append(Content(role=msg_data['role'], parts=text_parts))
                     else:
-                        logging.debug(f"Ostrz. [{user_psid}]: Pominięto niepoprawny wpis (idx {i}) w pliku {filepath}: {msg_data_dict}")
-                
-                logging.info(f"[{user_psid}] Wczytano historię (jako obiekty Content): {len(history)} wiad. Stan: {context.get('type', STATE_GENERAL)}")
-                return history, context, False
+                        # Ignoruj stare konteksty systemowe lub niepoprawne wpisy
+                        logging.debug(f"Ostrz. [{user_psid}]: Pominięto niepoprawną/starą wiadomość/kontekst (idx {i}) w pliku {filepath}: {msg_data}")
+
+
+                logging.info(f"[{user_psid}] Wczytano historię z {filepath}: {len(history)} wiad. Stan: {context.get('type', STATE_GENERAL)}")
+                return history, context, False # Zwróć False dla istniejącego kontaktu
+
             else:
                 logging.error(f"BŁĄD [{user_psid}]: Plik historii {filepath} nie jest listą.")
-                return [], default_context.copy(), False
+                return [], default_context.copy(), False # Załóż, że nie jest nowy
     except FileNotFoundError:
         logging.info(f"[{user_psid}] Plik historii {filepath} nie istnieje.")
-        return [], default_context.copy(), True
+        return [], default_context.copy(), True # Zwróć True dla nowego kontaktu
     except (json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
         logging.error(f"BŁĄD [{user_psid}] parsowania historii z {filepath}: {e}.")
-        try: os.rename(filepath, f"{filepath}.error_{int(time.time())}")
-        except OSError as rename_err: logging.error(f"    Nie udało się zmienić nazwy: {rename_err}")
-        return [], default_context.copy(), False
+        try:
+            os.rename(filepath, f"{filepath}.error_{int(time.time())}")
+            logging.warning("    Zmieniono nazwę uszkodzonego pliku historii.")
+        except OSError as rename_err:
+            logging.error(f"    Nie udało się zmienić nazwy: {rename_err}")
+        return [], default_context.copy(), False # Załóż, że nie jest nowy
     except Exception as e:
         logging.error(f"BŁĄD [{user_psid}] wczytywania historii z {filepath}: {e}", exc_info=True)
-        return [], default_context.copy(), False
+        return [], default_context.copy(), False # Załóż, że nie jest nowy
 
 
-def save_history(user_psid, history_vertex_format, context_to_save=None): # Zmieniono nazwę argumentu dla jasności
-    """Zapisuje historię (listę obiektów Content) i aktualny kontekst/stan."""
+def save_history(user_psid, history, context_to_save=None):
+    """Zapisuje historię i aktualny kontekst/stan."""
     ensure_dir(HISTORY_DIR)
     filepath = os.path.join(HISTORY_DIR, f"{user_psid}.json")
     temp_filepath = f"{filepath}.tmp"
-    data_to_store_json = [] 
+    history_data = []
     try:
-        # Konwertuj obiekty Content na słowniki przed zapisem
-        # === WAŻNE: Upewnij się, że Content i Part są zaimportowane ===
-        try:
-            from vertexai.generative_models import Content, Part
-        except ImportError:
-            logging.critical("save_history: KRYTYCZNY BŁĄD - Brak Content/Part z vertexai.generative_models. Nie można zapisać historii jako obiekty.")
-            raise # Rzuć błąd, bo nie można kontynuować
-        # ===========================================================
-
-        history_to_process_vertex = [m for m in history_vertex_format if isinstance(m, Content) and m.role in ('user', 'model')]
+        history_to_process = [m for m in history if isinstance(m, Content) and m.role in ('user', 'model')]
         max_messages_to_save = MAX_HISTORY_TURNS * 2
-        if len(history_to_process_vertex) > max_messages_to_save:
-            logging.debug(f"[{user_psid}] Ograniczanie historii do zapisu z {len(history_to_process_vertex)} do {max_messages_to_save}.")
-            history_to_process_vertex = history_to_process_vertex[-max_messages_to_save:]
+        if len(history_to_process) > max_messages_to_save:
+            logging.debug(f"[{user_psid}] Ograniczanie historii do zapisu z {len(history_to_process)} do {max_messages_to_save} wiadomości.")
+            history_to_process = history_to_process[-max_messages_to_save:]
 
-        for msg_content in history_to_process_vertex:
-            if hasattr(msg_content, 'parts') and isinstance(msg_content.parts, list):
-                # Zakładamy, że msg_content.parts zawiera obiekty Part
-                parts_data = [{'text': part.text} for part in msg_content.parts if hasattr(part, 'text')]
+        # Najpierw dodaj wiadomości do listy
+        for msg in history_to_process:
+            if isinstance(msg, Content) and hasattr(msg, 'role') and msg.role in ('user', 'model') and hasattr(msg, 'parts') and isinstance(msg.parts, list):
+                parts_data = [{'text': part.text} for part in msg.parts if isinstance(part, Part) and hasattr(part, 'text')]
                 if parts_data:
-                    data_to_store_json.append({'role': msg_content.role, 'parts': parts_data})
+                    history_data.append({'role': msg.role, 'parts': parts_data})
             else:
-                logging.warning(f"save_history: Pomijanie nieprawidłowego obiektu Content (brak atrybutu parts lub parts nie jest listą): {type(msg_content)}")
+                logging.warning(f"Ostrz. [{user_psid}]: Pomijanie nieprawidłowego obiektu historii podczas zapisu: {type(msg)}")
 
+        # Następnie dodaj kontekst systemowy NA KOŃCU listy
         current_state_to_save = STATE_GENERAL
         if context_to_save and isinstance(context_to_save, dict):
             context_copy = context_to_save.copy()
             current_state_to_save = context_copy.get('type', STATE_GENERAL)
-            context_copy['role'] = 'system_context' # Użyj 'system_context' dla odróżnienia
+            context_copy['role'] = 'system' # Dodaj rolę 'system'
+            # Zapisuj kontekst zawsze, chyba że jest to domyślny {'type': 'general'} bez dodatkowych pól
             is_default_general = (current_state_to_save == STATE_GENERAL and
-                                  len(context_copy) == 2 and 'type' in context_copy and 'role' in context_copy)
+                                  len(context_copy) == 2 and # tylko 'type' i 'role'
+                                  'type' in context_copy and 'role' in context_copy)
             if not is_default_general:
-                 data_to_store_json.append(context_copy)
-        
+                 history_data.append(context_copy)
+                 logging.debug(f"[{user_psid}] Dodano kontekst {current_state_to_save} do zapisu: {context_copy}")
+            else:
+                 logging.debug(f"[{user_psid}] Pominięto zapis domyślnego kontekstu 'general'.")
+
+        else:
+            logging.debug(f"[{user_psid}] Brak kontekstu do zapisu lub niepoprawny typ kontekstu.")
+
+
         with open(temp_filepath, 'w', encoding='utf-8') as f:
-            json.dump(data_to_store_json, f, ensure_ascii=False, indent=2)
+            json.dump(history_data, f, ensure_ascii=False, indent=2)
         os.replace(temp_filepath, filepath)
-        logging.info(f"[{user_psid}] Zapisano historię/kontekst ({len(data_to_store_json)} wpisów, stan: {current_state_to_save}) do {filepath}")
+        logging.info(f"[{user_psid}] Zapisano historię/kontekst ({len(history_data)} wpisów, stan: {current_state_to_save}) do {filepath}")
 
     except Exception as e:
         logging.error(f"BŁĄD [{user_psid}] zapisu historii/kontekstu do {filepath}: {e}", exc_info=True)
         if os.path.exists(temp_filepath):
-            try: os.remove(temp_filepath)
-            except OSError as remove_e: logging.error(f"    Nie można usunąć pliku {temp_filepath}: {remove_e}")
-
-def convert_vertex_history_to_gemini_api_format(vertex_history_list):
-    """Konwertuje listę obiektów Content (Vertex AI) na format listy słowników (Gemini API)."""
-    gemini_api_history = []
-    if not vertex_history_list:
-        return gemini_api_history
-    
-    # === WAŻNE: Upewnij się, że Content i Part są zaimportowane ===
-    try:
-        from vertexai.generative_models import Content, Part
-    except ImportError:
-        logging.critical("convert_vertex_history_to_gemini_api_format: KRYTYCZNY BŁĄD - Brak Content/Part. Nie można konwertować historii.")
-        # Można by tu zwrócić pustą listę lub rzucić wyjątek, w zależności od tego, jak chcesz obsłużyć ten błąd.
-        # Jeśli te klasy nie są dostępne, całe podejście "starej historii" się załamuje.
-        return [] # Zwracanie pustej listy w przypadku braku importu
-    # ===========================================================
-
-    for content_obj in vertex_history_list:
-        if isinstance(content_obj, Content) and hasattr(content_obj, 'role') and hasattr(content_obj, 'parts'):
-            parts_list = []
-            for part_obj in content_obj.parts:
-                if isinstance(part_obj, Part) and hasattr(part_obj, 'text'):
-                    parts_list.append({'text': part_obj.text})
-            if parts_list: 
-                gemini_api_history.append({'role': content_obj.role, 'parts': parts_list})
-        elif isinstance(content_obj, dict) and content_obj.get('role') and content_obj.get('parts'):
-             # Jeśli jakimś cudem dostajemy już słownik, który wygląda jak format API, przekaż go dalej.
-             # To może się zdarzyć, jeśli user_content_vertex/model_resp_vertex były tworzone jako słowniki.
-             gemini_api_history.append(content_obj)
-        else:
-            logging.warning(f"Pominięto niepoprawny obiekt historii ({type(content_obj)}) podczas konwersji do formatu Gemini API.")
-    return gemini_api_history
+            try:
+                os.remove(temp_filepath)
+                logging.info(f"    Usunięto plik tymczasowy {temp_filepath} po błędzie zapisu.")
+            except OSError as remove_e:
+                logging.error(f"    Nie można usunąć pliku tymczasowego {temp_filepath} po błędzie zapisu: {remove_e}")
 
 def _get_calendar_timezone():
     """Pobiera (i cachuje) obiekt strefy czasowej dla Kalendarza."""
@@ -1827,167 +1746,137 @@ def _simulate_typing(recipient_id, duration_seconds, page_access_token): # Dodan
 # === FUNKCJE WYWOŁANIA AI ============================================
 # =====================================================================
 
-# DODANE Funkcje Pomocnicze do konwersji konfiguracji
-def _convert_generation_config_to_dict(gen_config_obj):
-    # gen_config_obj to teraz instancja MockGenerationConfig
-    if gen_config_obj:
-        return {
-            "temperature": getattr(gen_config_obj, 'temperature', 0.7),
-            "topP": getattr(gen_config_obj, 'top_p', 0.95),
-            "topK": getattr(gen_config_obj, 'top_k', 40),
-            "maxOutputTokens": getattr(gen_config_obj, 'max_output_tokens', 1024)
-            # Można dodać "candidateCount": 1, jeśli API tego wymaga, domyślnie jest 1
-            # "stopSequences": [] # Jeśli potrzebujesz
-        }
-    return {} # Zwróć pusty słownik, jeśli nie ma konfiguracji
+def _call_gemini(user_psid, prompt_history, generation_config, task_name, page_access_token, max_retries=3, user_message=None):
+    """Wywołuje API Gemini z obsługą błędów i ponowień."""
+    if not gemini_model:
+        logging.error(f"!!! [{user_psid}] KRYTYCZNY BŁĄD: Model Gemini ({task_name}) niedostępny (gemini_model is None)!")
+        return "Przepraszam, wystąpił wewnętrzny błąd systemu. Spróbuj ponownie później."
 
-def _convert_safety_settings_to_dict(safety_settings_list):
-    # safety_settings_list to teraz lista instancji MockSafetySetting
-    converted = []
-    if safety_settings_list:
-        for setting in safety_settings_list:
-            # Zakładamy, że category i threshold w MockSafetySetting to już poprawne stringi
-            # zgodne z oczekiwaniami Gemini API
-            category_str = getattr(setting, 'category', None)
-            threshold_str = getattr(setting, 'threshold', None)
-            if category_str and threshold_str:
-                 converted.append({"category": category_str, "threshold": threshold_str})
-    # Zwróć None jeśli puste, API Gemini może nie lubić pustej listy dla 'safetySettings'
-    # Alternatywnie, można pominąć klucz 'safetySettings' w payloadzie, jeśli lista jest pusta
-    return converted if converted else None
+    if not isinstance(prompt_history, list) or not all(isinstance(item, Content) for item in prompt_history):
+        logging.error(f"!!! [{user_psid}] Nieprawidłowy format historii promptu przekazany do _call_gemini ({task_name}). Typ: {type(prompt_history)}")
+        return "Przepraszam, wystąpił błąd przetwarzania wewnętrznego."
 
-
-# ZMODYFIKOWANA CAŁA FUNKCJA _call_gemini
-def _call_gemini(user_psid, prompt_history_api_format, generation_config_obj, safety_settings_list, task_name, page_access_token_unused, max_retries=3, user_message=None):
-    """Wywołuje Gemini API przez HTTP z obsługą błędów i ponowień."""
-    # page_access_token_unused jest w sygnaturze dla spójności, ale nie jest używany w tej funkcji
-    if not GEMINI_API_KEY or len(GEMINI_API_KEY) < 30: # Prosta walidacja długości klucza
-        logging.error(f"!!! [{user_psid}] KRYTYCZNY BŁĄD: Brak lub nieprawidłowy klucz GOOGLE_GEMINI_API_KEY ({task_name})!")
-        return "Przepraszam, wystąpił wewnętrzny błąd systemu (brak klucza API)."
-
-    # Historia jest już w formacie API (lista słowników), skopiuj ją
-    api_formatted_contents = list(prompt_history_api_format)
-
-    if user_message: # Dodaj nową wiadomość użytkownika, jeśli istnieje
+    # Przygotuj finalny prompt dla API
+    # prompt_history tutaj powinno już zawierać instrukcję systemową jako pierwsze elementy
+    final_prompt_for_api = list(prompt_history) # Skopiuj historię
+    if user_message: # Jeśli jest nowa wiadomość użytkownika, dodaj ją
         if not isinstance(user_message, str):
-            logging.warning(f"[{user_psid}] _call_gemini: user_message nie jest stringiem ({type(user_message)}), konwertuję.")
+            logging.warning(f"[{user_psid}] _call_gemini otrzymało user_message, które nie jest stringiem: {type(user_message)}. Konwertuję na string.")
             user_message = str(user_message)
-        if user_message.strip(): # Dodaj tylko jeśli nie jest pusty
-            api_formatted_contents.append({"role": "user", "parts": [{"text": user_message.strip()}]})
+        # Dodaj tylko jeśli user_message nie jest pustym stringiem po konwersji i strip()
+        if user_message.strip():
+            final_prompt_for_api.append(Content(role="user", parts=[Part.from_text(user_message.strip())]))
         else:
-            logging.debug(f"[{user_psid}] _call_gemini: pusty user_message po strip(), nie dodaję.")
+            logging.debug(f"[{user_psid}] _call_gemini otrzymało pusty user_message po strip(). Nie dodaję do promptu.")
 
-    # Przygotuj konfiguracje jako słowniki
-    generation_config_dict = _convert_generation_config_to_dict(generation_config_obj)
-    safety_settings_dict_list = _convert_safety_settings_to_dict(safety_settings_list)
 
-    # Przygotuj payload żądania JSON
-    payload = {"contents": api_formatted_contents}
-    if generation_config_dict: # Dodaj tylko jeśli nie jest pusty
-        payload["generationConfig"] = generation_config_dict
-    if safety_settings_dict_list: # Dodaj tylko jeśli nie jest None/pusty
-        payload["safetySettings"] = safety_settings_dict_list
+    logging.info(f"[{user_psid}] Wywołanie Gemini: {task_name} (Prompt: {len(final_prompt_for_api)} wiadomości)")
 
-    # Skonstruuj URL endpointu Gemini API
-    api_url = f"https://generativelanguage.googleapis.com/v1beta/{MODEL_FOR_API}:generateContent?key={GEMINI_API_KEY}"
+    # Logowanie ostatniej wiadomości użytkownika dla kontekstu (tej, która została właśnie dodana, jeśli była)
+    last_user_msg_to_log = None
+    if final_prompt_for_api and final_prompt_for_api[-1].role == 'user':
+        last_user_msg_to_log = final_prompt_for_api[-1].parts[0].text if final_prompt_for_api[-1].parts else "[Brak treści w ostatniej wiadomości użytkownika]"
 
-    logging.info(f"[{user_psid}] Wywołanie Gemini API: {task_name} (Model: {MODEL_FOR_API})")
-    if api_formatted_contents and api_formatted_contents[-1]['role'] == 'user': # Loguj ostatnią wiadomość użytkownika
-        # Sprawdź, czy 'parts' istnieje i nie jest puste, oraz czy pierwszy element ma 'text'
-        last_user_part = api_formatted_contents[-1].get('parts', [{}])[0]
-        last_user_text = last_user_part.get('text', '[Brak treści w ostatniej wiadomości użytkownika]')
-        last_user_msg_log = last_user_text[:100] + "..." if len(last_user_text) > 100 else last_user_text
-        logging.debug(f"    Ostatnia wiad. usera przekazana do AI ({task_name}): '{last_user_msg_log}'")
+    if last_user_msg_to_log:
+        log_msg_content = f"'{last_user_msg_to_log[:200]}{'...' if len(last_user_msg_to_log)>200 else ''}'"
+        logging.debug(f"    Ostatnia wiad. usera przekazana do AI ({task_name}): {log_msg_content}")
+    else:
+        logging.debug(f"    Brak wiadomości użytkownika na końcu promptu przekazanego do AI ({task_name}).")
 
 
     attempt = 0
     while attempt < max_retries:
         attempt += 1
-        logging.debug(f"    Próba wywołania Gemini API {attempt}/{max_retries} ({task_name})...")
+        logging.debug(f"    Próba wywołania Gemini {attempt}/{max_retries} ({task_name})...")
         try:
-            # _simulate_typing nie jest bezpośrednio związane z Gemini API, więc jeśli jest potrzebne
-            # w logice aplikacji, jego wywołanie powinno być gdzie indziej lub page_access_token
-            # musiałby być przekazywany do tej funkcji, jeśli _simulate_typing go wymaga.
-            # Na razie zakładam, że _simulate_typing jest obsługiwane wyżej.
+            _simulate_typing(user_psid, MIN_TYPING_DELAY_SECONDS * 0.8, page_access_token)
 
-            headers = {"Content-Type": "application/json"}
-            response = requests.post(api_url, headers=headers, json=payload, timeout=45) # Wywołanie HTTP requests.post
-            response.raise_for_status() # Rzuci wyjątkiem dla błędów HTTP 4xx/5xx
+            response = gemini_model.generate_content(
+                final_prompt_for_api, # Użyj final_prompt_for_api
+                generation_config=generation_config,
+                safety_settings=SAFETY_SETTINGS,
+                stream=False
+            )
 
-            response_json = response.json()
+            if not response:
+                 logging.warning(f"[{user_psid}] Gemini ({task_name}) zwróciło pustą odpowiedź (None).")
+                 if attempt < max_retries:
+                     time.sleep(1 + random.random())
+                     continue
+                 else:
+                     return "Przepraszam, nie udało się uzyskać odpowiedzi od AI."
 
-            # Sprawdzanie block_reason w promptFeedback (dla całego promptu)
-            if 'promptFeedback' in response_json and 'blockReason' in response_json['promptFeedback']:
-                block_reason = response_json['promptFeedback']['blockReason']
-                logging.error(f"!!! BŁĄD [{user_psid}] Gemini API ({task_name}) - PROMPT ZABLOKOWANY! Powód: {block_reason}. Feedback: {response_json['promptFeedback']}")
-                return "Przepraszam, Twoja wiadomość nie mogła zostać przetworzona ze względu na zasady bezpieczeństwa."
+            if not response.candidates:
+                prompt_feedback = response.prompt_feedback if hasattr(response, 'prompt_feedback') else None
+                if prompt_feedback and hasattr(prompt_feedback, 'block_reason') and prompt_feedback.block_reason != 0:
+                     block_reason_name = prompt_feedback.block_reason.name if hasattr(prompt_feedback.block_reason, 'name') else str(prompt_feedback.block_reason)
+                     logging.error(f"!!! BŁĄD [{user_psid}] Gemini ({task_name}) - PROMPT ZABLOKOWANY! Powód: {block_reason_name}. Feedback: {prompt_feedback}")
+                     return "Przepraszam, Twoja wiadomość nie mogła zostać przetworzona ze względu na zasady bezpieczeństwa."
+                else:
+                    logging.warning(f"[{user_psid}] Gemini ({task_name}) brak kandydatów w odpowiedzi. Feedback promptu: {prompt_feedback}")
+                    if attempt < max_retries: time.sleep(1.5 * attempt * random.uniform(0.8, 1.2)); continue
+                    else: return "Przepraszam, problem z generowaniem odpowiedzi (brak kandydatów)."
 
-            if not response_json.get('candidates'): # Jeśli nie ma kandydatów
-                logging.warning(f"[{user_psid}] Gemini API ({task_name}) brak kandydatów w odpowiedzi. Odpowiedź: {response_json}")
-                if attempt < max_retries: time.sleep(1.5 * attempt * random.uniform(0.8, 1.2)); continue
-                else: return "Przepraszam, problem z generowaniem odpowiedzi (brak kandydatów)."
+            candidate = response.candidates[0]
+            finish_reason = candidate.finish_reason if hasattr(candidate, 'finish_reason') else None
+            finish_reason_val = finish_reason.value if finish_reason else 0
 
-            candidate = response_json['candidates'][0] # Bierzemy pierwszego kandydata
-            finish_reason = candidate.get('finishReason', 'FINISH_REASON_UNSPECIFIED')
-
-            # Obsługa różnych finishReason
-            if finish_reason not in ['STOP', 'MAX_TOKENS']: # MAX_TOKENS może być akceptowalne, jeśli jest treść
-                safety_ratings_str = str(candidate.get('safetyRatings', "Brak danych safety"))
-                logging.warning(f"[{user_psid}] Gemini API ({task_name}) ZAKOŃCZONE NIEPRAWIDŁOWO! Powód: {finish_reason}. Safety: {safety_ratings_str}")
-                if finish_reason in ['SAFETY', 'RECITATION']:
+            if finish_reason_val != 1: # STOP
+                finish_reason_name = finish_reason.name if hasattr(finish_reason, 'name') else str(finish_reason_val or 'UNKNOWN')
+                safety_ratings = candidate.safety_ratings if hasattr(candidate, 'safety_ratings') else "Brak danych safety"
+                logging.warning(f"[{user_psid}] Gemini ({task_name}) ZAKOŃCZONE NIEPRAWIDŁOWO! Powód: {finish_reason_name}. Safety: {safety_ratings}")
+                if finish_reason_val in [3, 4]: # SAFETY or RECITATION
                     if attempt < max_retries: time.sleep(1.5 * attempt * random.uniform(0.8, 1.2)); continue
                     else:
-                        if finish_reason == 'SAFETY': return "Przepraszam, nie mogę wygenerować odpowiedzi ze względu na zasady bezpieczeństwa."
-                        if finish_reason == 'RECITATION': return "Przepraszam, nie mogę wygenerować odpowiedzi, ponieważ naruszałaby zasady cytowania."
-                elif finish_reason == 'OTHER': # Inne powody
+                        if finish_reason_val == 3: return "Przepraszam, nie mogę wygenerować odpowiedzi ze względu na zasady bezpieczeństwa."
+                        if finish_reason_val == 4: return "Przepraszam, nie mogę wygenerować odpowiedzi, ponieważ naruszałaby zasady cytowania."
+                elif finish_reason_val == 2: # MAX_TOKENS
+                     partial_text = "".join(part.text for part in candidate.content.parts if hasattr(candidate.content, 'parts') and hasattr(part, 'text')).strip()
+                     if partial_text: return partial_text + "..."
+                     else:
+                         if attempt < max_retries: time.sleep(1.5 * attempt * random.uniform(0.8, 1.2)); continue
+                         else: return "Przepraszam, wygenerowana odpowiedź była zbyt długa."
+                else: # OTHER
                     if attempt < max_retries: time.sleep(1.5 * attempt * random.uniform(0.8, 1.2)); continue
-                    else: return f"Przepraszam, problem z generowaniem odpowiedzi (kod: {finish_reason})."
-                else: # Nieznany finishReason
-                    if attempt < max_retries: time.sleep(1.5 * attempt * random.uniform(0.8, 1.2)); continue
-                    else: return f"Przepraszam, problem z generowaniem odpowiedzi (nieznany powód: {finish_reason})."
+                    else: return f"Przepraszam, problem z generowaniem odpowiedzi (kod: {finish_reason_name})."
 
-            # Sprawdzenie treści
-            generated_text = None
-            if candidate.get('content') and candidate['content'].get('parts') and candidate['content']['parts'][0].get('text'):
-                generated_text = candidate['content']['parts'][0]['text'].strip()
-
-            if generated_text: # Jeśli jest tekst
-                logging.info(f"[{user_psid}] Gemini API ({task_name}) zwróciło poprawną odpowiedź (długość: {len(generated_text)}).")
-                logging.debug(f"    Odpowiedź Gemini API ({task_name}): '{generated_text[:300]}{'...' if len(generated_text)>300 else ''}'")
-                return generated_text
-            # Jeśli finishReason to MAX_TOKENS, a nie ma tekstu (co jest dziwne, ale możliwe)
-            elif finish_reason == 'MAX_TOKENS' and not generated_text:
-                 logging.warning(f"[{user_psid}] Gemini API ({task_name}) zakończone przez MAX_TOKENS, ale brak częściowej treści. Kandydat: {candidate}")
-                 if attempt < max_retries: time.sleep(1 + random.random()); continue
-                 else: return "Przepraszam, wygenerowana odpowiedź była zbyt długa i nie udało się uzyskać części."
-            else: # finishReason był STOP lub MAX_TOKENS, ale text jest pusty lub go nie ma w oczekiwanej strukturze
-                logging.warning(f"[{user_psid}] Gemini API ({task_name}) zwróciło pustą treść lub brak struktury. FinishReason: {finish_reason}. Kandydat: {candidate}")
+            if hasattr(candidate, 'content') and candidate.content and hasattr(candidate.content, 'parts') and candidate.content.parts:
+                generated_text = "".join(part.text for part in candidate.content.parts if hasattr(part, 'text')).strip()
+                if generated_text:
+                    logging.info(f"[{user_psid}] Gemini ({task_name}) zwróciło poprawną odpowiedź (długość: {len(generated_text)}).")
+                    logging.debug(f"    Odpowiedź Gemini ({task_name}): '{generated_text[:300]}{'...' if len(generated_text)>300 else ''}'")
+                    return generated_text
+                else:
+                    logging.warning(f"[{user_psid}] Gemini ({task_name}) zwróciło pustą treść mimo FinishReason=STOP.")
+                    if attempt < max_retries: time.sleep(1 + random.random()); continue
+                    else: return "Przepraszam, problem z wygenerowaniem odpowiedzi (pusta treść)."
+            else:
+                logging.warning(f"[{user_psid}] Gemini ({task_name}) zwróciło kandydata bez treści mimo FinishReason=STOP.")
                 if attempt < max_retries: time.sleep(1 + random.random()); continue
-                else: return "Przepraszam, problem z wygenerowaniem odpowiedzi (pusta treść lub brak struktury)."
+                else: return "Przepraszam, problem z wygenerowaniem odpowiedzi (brak struktury treści)."
 
-        except requests.exceptions.HTTPError as http_err: # Obsługa błędów HTTP z biblioteki requests
-            status_code = http_err.response.status_code if http_err.response is not None else 'Nieznany'
-            reason = http_err.response.reason if http_err.response is not None else 'Nieznany'
-            error_content = "Brak treści błędu"
-            if http_err.response is not None:
-                try: error_content = http_err.response.json() # Spróbuj sparsować JSON
-                except json.JSONDecodeError: error_content = http_err.response.text # Jeśli nie JSON, weź tekst
-            logging.error(f"!!! BŁĄD HTTP ({status_code} {reason}) [{user_psid}] Gemini API ({task_name}) - Próba {attempt}/{max_retries}. Treść: {error_content}")
-            if status_code in [429, 500, 503] and attempt < max_retries: # Rate limit, Internal Server Error, Service Unavailable
-                sleep_time = (2 ** attempt) + random.uniform(0, 1) # Exponential backoff
+        except HttpError as http_err:
+            status_code = http_err.resp.status if hasattr(http_err, 'resp') and hasattr(http_err.resp, 'status') else 'Nieznany'
+            reason = http_err.resp.reason if hasattr(http_err, 'resp') and hasattr(http_err.resp, 'reason') else 'Nieznany'
+            logging.error(f"!!! BŁĄD HTTP ({status_code} {reason}) [{user_psid}] Gemini ({task_name}) - Próba {attempt}/{max_retries}.")
+            if status_code in [429, 500, 503] and attempt < max_retries:
+                sleep_time = (2 ** attempt) + random.uniform(0, 1)
                 logging.warning(f"    Oczekiwanie {sleep_time:.2f}s przed ponowieniem z powodu błędu {status_code}...")
                 time.sleep(sleep_time); continue
             else: return f"Przepraszam, błąd komunikacji z AI (HTTP {status_code})."
-        except Exception as e: # Ogólna obsługa innych błędów Python
-            logging.error(f"!!! BŁĄD Python [{user_psid}] podczas wywołania Gemini API ({task_name}) - Próba {attempt}/{max_retries}: {e}", exc_info=True)
-            if attempt < max_retries:
-                sleep_time = (2 ** attempt) + random.uniform(0, 1)
-                logging.warning(f"    Nieoczekiwany błąd Python. Oczekiwanie {sleep_time:.2f}s przed ponowieniem...")
-                time.sleep(sleep_time); continue
-            else: return "Przepraszam, wystąpił nieoczekiwany błąd przetwarzania."
+        except Exception as e:
+            if isinstance(e, NameError) and 'gemini_model' in str(e):
+                 logging.critical(f"!!! KRYTYCZNY NameError [{user_psid}]: {e}. 'gemini_model' nie jest zdefiniowany!", exc_info=True)
+                 return "Przepraszam, krytyczny błąd wewnętrzny systemu AI."
+            else:
+                 logging.error(f"!!! BŁĄD Python [{user_psid}] podczas wywołania Gemini ({task_name}) - Próba {attempt}/{max_retries}: {e}", exc_info=True)
+                 if attempt < max_retries:
+                     sleep_time = (2 ** attempt) + random.uniform(0, 1)
+                     logging.warning(f"    Nieoczekiwany błąd Python. Oczekiwanie {sleep_time:.2f}s przed ponowieniem...")
+                     time.sleep(sleep_time); continue
+                 else: return "Przepraszam, wystąpił nieoczekiwany błąd przetwarzania."
 
-    # Jeśli wszystkie próby zawiodą
-    logging.error(f"!!! KRYTYCZNY BŁĄD [{user_psid}] Gemini API ({task_name}) - Nie udało się uzyskać poprawnej odpowiedzi po {max_retries} próbach.")
+    logging.error(f"!!! KRYTYCZNY BŁĄD [{user_psid}] Gemini ({task_name}) - Nie udało się uzyskać poprawnej odpowiedzi po {max_retries} próbach.")
     return "Przepraszam, nie udało się przetworzyć Twojej wiadomości po kilku próbach. Spróbuj ponownie później."
 
 
@@ -2159,72 +2048,17 @@ SYSTEM_INSTRUCTION_GENERAL = """Jesteś przyjaznym, proaktywnym i profesjonalnym
     intent_marker=INTENT_SCHEDULE_MARKER,
     return_marker=RETURN_TO_PREVIOUS
 )
+
 # --- Funkcja AI: Planowanie terminu ---
 # Zmodyfikowana, aby przyjmować page_access_token
-
-# --- Funkcja AI: Ogólna rozmowa ---
-def get_gemini_general_response(user_psid, current_user_message_text, history_vertex_format, is_temporary_general_state, page_access_token, current_subject=None): # Zmieniono nazwę argumentu historii
-    """Prowadzi ogólną rozmowę z AI, używając Gemini API, ale przyjmuje historię w formacie Vertex."""
-    if not GEMINI_API_KEY:
-        logging.error(f"!!! [{user_psid}] General Conversation - brak klucza GEMINI_API_KEY!")
-        return None
-
-    formatted_links_for_ai_prompt = "\n".join([f"- {s}: {l}" for s, l in ALL_SUBJECT_LINKS.items() if s.lower() != (current_subject or "").lower()])
-    try:
-        system_instruction_formatted = SYSTEM_INSTRUCTION_GENERAL.format(
-            all_subject_links_formatted_for_ai=formatted_links_for_ai_prompt,
-            current_subject_from_page=current_subject or "nieznany",
-            available_subjects_list=", ".join(AVAILABLE_SUBJECTS),
-            intent_marker=INTENT_SCHEDULE_MARKER,
-            return_marker=RETURN_TO_PREVIOUS
-        )
-    except KeyError as e:
-        logging.error(f"!!! BŁĄD formatowania instrukcji (General): Brak klucza {e}...")
-        return "Błąd konfiguracji asystenta ogólnego."
-    except Exception as format_e:
-        logging.error(f"!!! BŁĄD formatowania instrukcji (General): {format_e}")
-        return "Błąd wewnętrzny asystenta ogólnego."
-
-    model_ack = f"Rozumiem. Rozmawiamy o '{current_subject or 'nieznanym przedmiocie'}'. W razie potrzeby poinformuję o innych ({formatted_links_for_ai_prompt})."
-    if is_temporary_general_state:
-        model_ack += f" Będąc w trybie tymczasowym, po odpowiedzi na pytanie ogólne, jeśli user nie pyta dalej, dodam {RETURN_TO_PREVIOUS}."
-
-    initial_prompt_api = [
-        {"role": "user", "parts": [{"text": system_instruction_formatted}]},
-        {"role": "model", "parts": [{"text": model_ack}]}
-    ]
-    
-    # KONWERSJA historii Vertex na format Gemini API
-    history_api_for_this_call = convert_vertex_history_to_gemini_api_format(history_vertex_format)
-    
-    prompt_for_this_call = initial_prompt_api + history_api_for_this_call
-    
-    max_prompt_messages = (MAX_HISTORY_TURNS * 2) + 2
-    while len(prompt_for_this_call) > max_prompt_messages:
-         if len(prompt_for_this_call) > 3: prompt_for_this_call.pop(2); 
-         if len(prompt_for_this_call) > 2: prompt_for_this_call.pop(2)
-         else: break
-        
-    response_text_raw = _call_gemini(user_psid, prompt_for_this_call, GENERATION_CONFIG_DEFAULT, SAFETY_SETTINGS, 
-                                   f"General Conversation (Strona: {current_subject or '?'})", 
-                                   page_access_token, user_message=current_user_message_text)
-
-    if response_text_raw:
-        response_text = re.sub(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}.*?{re.escape(SLOT_ISO_MARKER_SUFFIX)}", "", response_text_raw).strip()
-        response_text = response_text.replace(INFO_GATHERED_MARKER, "").strip()
-        response_text = response_text.replace(SWITCH_TO_GENERAL, "").strip()
-        return response_text
-    else:
-        logging.error(f"!!! [{user_psid}] Nie uzyskano poprawnej odpowiedzi od Gemini (General).")
-        return None
-
 def get_gemini_scheduling_response(user_psid, history_for_scheduling_ai, current_user_message_text, available_ranges, required_subject, page_access_token):
     """Prowadzi rozmowę planującą z AI dla konkretnego przedmiotu."""
-    print("  Konfiguracja Gemini API:") # Zamiast "Konfiguracja Vertex AI"
-    print(f"    Klucz API: {'OK (ustawiony)' if GEMINI_API_KEY and len(GEMINI_API_KEY) > 30 else 'BRAK lub NIEPRAWIDŁOWY!!!'}")
-    print(f"    Model używany: {MODEL_FOR_API}")
-    if not GEMINI_API_KEY or len(GEMINI_API_KEY) < 30:
-        print("!!! KRYTYCZNE: Klucz Gemini API nie skonfigurowany! AI będzie niedostępne. !!!")
+    if not gemini_model:
+        logging.error(f"!!! [{user_psid}] Model Gemini niedostępny (Scheduling dla {required_subject})!")
+        return None # Zwróć None w przypadku braku modelu
+    if not required_subject:
+         logging.error(f"!!! [{user_psid}] Wywołano get_gemini_scheduling_response bez wymaganego przedmiotu!")
+         return "Przepraszam, wystąpił błąd - nie wiem, dla jakiego przedmiotu szukamy terminu."
 
     # Sformatuj zakresy dla AI, dodając informację o przedmiocie
     ranges_text = format_ranges_for_ai(available_ranges, subject=required_subject)
@@ -2288,12 +2122,10 @@ def get_gemini_scheduling_response(user_psid, history_for_scheduling_ai, current
 
 # --- Funkcja AI: Zbieranie informacji ---
 # Zmodyfikowana, aby przyjmować page_access_token
-# --- Funkcja AI: Zbieranie informacji ---
-def get_gemini_gathering_response(user_psid, history_api_format, current_user_message_text, context_info, page_access_token):
-    """Prowadzi rozmowę zbierającą informacje WYŁĄCZNIE o uczniu, używając Gemini API."""
-    # page_access_token nie jest już bezpośrednio używany przez _call_gemini (dla Gemini API)
-    if not GEMINI_API_KEY: # Sprawdzenie klucza API
-        logging.error(f"!!! [{user_psid}] Gathering Info - brak klucza GEMINI_API_KEY!")
+def get_gemini_gathering_response(user_psid, history_for_gathering_ai, current_user_message_text, context_info, page_access_token):
+    """Prowadzi rozmowę zbierającą informacje WYŁĄCZNIE o uczniu."""
+    if not gemini_model:
+        logging.error(f"!!! [{user_psid}] Model Gemini niedostępny (Gathering)!")
         return None
 
     # Pobierz dane z kontekstu do sformatowania instrukcji
@@ -2304,14 +2136,14 @@ def get_gemini_gathering_response(user_psid, history_api_format, current_user_me
     level = context_info.get("known_level", "")
 
     try:
-        # Użyj predefiniowanej instrukcji (SYSTEM_INSTRUCTION_GATHERING jest już sformatowana z placeholderami)
+        # Użyj predefiniowanej instrukcji (bez zmian związanych z przedmiotem)
         system_instruction = SYSTEM_INSTRUCTION_GATHERING.format(
             proposed_slot_formatted=proposed_slot_str,
             known_student_first_name=student_first_name,
             known_student_last_name=student_last_name,
             known_grade=grade,
             known_level=level
-            # info_gathered_marker i switch_marker są już w stringu SYSTEM_INSTRUCTION_GATHERING
+            # info_gathered_marker i switch_marker są już w stringu
         )
     except KeyError as e:
         logging.error(f"!!! BŁĄD formatowania instrukcji (Gathering): Brak klucza {e}")
@@ -2320,36 +2152,91 @@ def get_gemini_gathering_response(user_psid, history_api_format, current_user_me
          logging.error(f"!!! BŁĄD formatowania instrukcji (Gathering): {format_e}")
          return "Błąd wewnętrzny asystenta zbierania danych."
 
-    # Zbuduj prompt dla Gemini API jako lista słowników
-    initial_prompt_api = [
-        {"role": "user", "parts": [{"text": system_instruction}]},
-        {"role": "model", "parts": [{"text": f"Rozumiem. Sprawdzę znane dane ucznia (Imię: {student_first_name or 'brak'}, Nazwisko: {student_last_name or 'brak'}, Klasa: {grade or 'brak'}, Poziom: {level or 'brak'}). Zapytam o brakujące. Zignoruję dane rodzica. Po zebraniu wszystkich danych zwrócę format ZEBRANE_DANE_UCZNIA i znacznik {INFO_GATHERED_MARKER}. Jeśli użytkownik zapyta o coś innego, zwrócę {SWITCH_TO_GENERAL}."}]}
+    # Zbuduj prompt
+    initial_prompt = [
+        Content(role="user", parts=[Part.from_text(system_instruction)]),
+        Content(role="model", parts=[Part.from_text(f"Rozumiem. Sprawdzę znane dane ucznia (Imię: {student_first_name or 'brak'}, Nazwisko: {student_last_name or 'brak'}, Klasa: {grade or 'brak'}, Poziom: {level or 'brak'}). Zapytam o brakujące. Zignoruję dane rodzica. Po zebraniu wszystkich danych zwrócę format ZEBRANE_DANE_UCZNIA i znacznik {INFO_GATHERED_MARKER}. Jeśli użytkownik zapyta o coś innego, zwrócę {SWITCH_TO_GENERAL}.")])
     ]
-    # history_api_format jest już listą słowników
-    # current_user_message_text zostanie dodany wewnątrz _call_gemini
+    full_prompt = initial_prompt + history_for_gathering_ai
+    if current_user_message_text:
+        full_prompt.append(Content(role="user", parts=[Part.from_text(current_user_message_text)]))
 
-    prompt_for_this_call = initial_prompt_api + list(history_api_format) # Użyj kopii
-    max_prompt_messages = (MAX_HISTORY_TURNS * 2) + 2 # +2 dla instrukcji systemowej i potwierdzenia modelu
-    while len(prompt_for_this_call) > max_prompt_messages:
-        if len(prompt_for_this_call) > 3:
-            prompt_for_this_call.pop(2)
-            if len(prompt_for_this_call) > 2:
-                 prompt_for_this_call.pop(2)
+    # Ogranicz historię
+    max_prompt_messages = (MAX_HISTORY_TURNS * 2) + 2
+    while len(full_prompt) > max_prompt_messages:
+        if len(full_prompt) > 3:
+            full_prompt.pop(2)
+            if len(full_prompt) > 2:
+                 full_prompt.pop(2)
         else:
              break
 
-    # Wywołaj nową funkcję _call_gemini
-    response_text = _call_gemini(user_psid, prompt_for_this_call, GENERATION_CONFIG_GATHERING, SAFETY_SETTINGS, "Info Gathering (Student Only)", page_access_token, user_message=current_user_message_text)
+    # Wywołaj Gemini, przekazując token strony
+    response_text = _call_gemini(user_psid, full_prompt, GENERATION_CONFIG_GATHERING, "Info Gathering (Student Only)", page_access_token)
 
+    # Przetwarzanie odpowiedzi
     if response_text:
-        # Oczyszczanie odpowiedzi (bez zmian)
+        # Oczyść odpowiedź z potencjalnych innych znaczników
         response_text = response_text.replace(INTENT_SCHEDULE_MARKER, "").strip()
+        # Usuń potencjalny znacznik ISO slotu, jeśli jakimś cudem się pojawił
         response_text = re.sub(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}.*?{re.escape(SLOT_ISO_MARKER_SUFFIX)}", "", response_text).strip()
         response_text = response_text.replace(RETURN_TO_PREVIOUS, "").strip()
-        # INFO_GATHERED_MARKER i SWITCH_TO_GENERAL są obsługiwane w logice webhook_handle
         return response_text
     else:
         logging.error(f"!!! [{user_psid}] Nie uzyskano poprawnej odpowiedzi od Gemini (Gathering Info).")
+        return None
+
+# --- Funkcja AI: Ogólna rozmowa ---
+# Zmodyfikowana, aby przyjmować page_access_token
+def get_gemini_general_response(user_psid, current_user_message_text, history_for_general_ai, is_temporary_general_state, page_access_token, current_subject=None):
+    """Prowadzi ogólną rozmowę z AI."""
+    if not gemini_model:
+        logging.error(f"!!! [{user_psid}] Model Gemini niedostępny (General)!")
+        return None
+
+    # Użyj predefiniowanej instrukcji (już sformatowanej z listą przedmiotów)
+    system_instruction = SYSTEM_INSTRUCTION_GENERAL
+    model_ack_base = "Rozumiem. Będę asystentem klienta."
+    if current_subject:
+         model_ack_base += f" Przedmiot '{current_subject}' jest już znany. Przejdę do pytania o klasę/szkołę."
+    else:
+        model_ack_base += f" Najpierw ustalę przedmiot ({', '.join(AVAILABLE_SUBJECTS)})."
+    model_ack = model_ack_base + f" Po zebraniu danych i potwierdzeniu zainteresowania, zwrócę {INTENT_SCHEDULE_MARKER}."
+
+    if is_temporary_general_state:
+        model_ack += f" Będąc w trybie tymczasowym, po odpowiedzi na pytanie ogólne, jeśli user nie pyta dalej, dodam {RETURN_TO_PREVIOUS}."
+
+    # Zbuduj prompt
+    initial_prompt = [
+        Content(role="user", parts=[Part.from_text(system_instruction)]),
+        Content(role="model", parts=[Part.from_text(model_ack)])
+    ]
+    full_prompt = initial_prompt + history_for_general_ai
+    if current_user_message_text:
+        full_prompt.append(Content(role="user", parts=[Part.from_text(current_user_message_text)]))
+
+    # Ogranicz historię
+    max_prompt_messages = (MAX_HISTORY_TURNS * 2) + 2
+    while len(full_prompt) > max_prompt_messages:
+         if len(full_prompt) > 3:
+             full_prompt.pop(2)
+             if len(full_prompt) > 2:
+                 full_prompt.pop(2)
+         else:
+             break
+
+    # Wywołaj Gemini, przekazując token strony
+    response_text = _call_gemini(user_psid, full_prompt, GENERATION_CONFIG_DEFAULT, "General Conversation", page_access_token)
+
+    # Przetwarzanie odpowiedzi
+    if response_text:
+        # Oczyść z potencjalnych innych znaczników
+        response_text = re.sub(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}.*?{re.escape(SLOT_ISO_MARKER_SUFFIX)}", "", response_text).strip()
+        response_text = response_text.replace(INFO_GATHERED_MARKER, "").strip()
+        response_text = response_text.replace(SWITCH_TO_GENERAL, "").strip() # SWITCH_TO_GENERAL nie powinien tu być, ale na wszelki wypadek
+        return response_text
+    else:
+        logging.error(f"!!! [{user_psid}] Nie uzyskano poprawnej odpowiedzi od Gemini (General).")
         return None
 
 
@@ -2395,195 +2282,328 @@ def find_row_and_update_sheet(psid, start_time, student_data, sheet_row_index=No
 
     return update_sheet_phase2(student_data, sheet_row_index)
 
-def process_single_event_in_background(event_data, page_info_for_event):
-    """
-    Przetwarza pojedyncze zdarzenie Messengera w tle.
-    Ta funkcja zawiera logikę, która była wcześniej w pętli 'for event in ...' w webhook_handle.
-    """
+@app.route('/webhook', methods=['POST'])
+def webhook_handle():
+    """Główny handler dla przychodzących zdarzeń z Messengera."""
+    now_str = datetime.datetime.now(_get_calendar_timezone()).strftime('%Y-%m-%d %H:%M:%S %Z')
+    logging.info(f"\n{'='*30} {now_str} POST /webhook {'='*30}")
+    raw_data = request.data
+    data = None
     try:
-        sender_id = event_data.get("sender", {}).get("id")
-        recipient_id = event_data.get("recipient", {}).get("id") # To jest ID strony, która otrzymała event
+        decoded_data = raw_data.decode('utf-8')
+        data = json.loads(decoded_data)
+        if data and data.get("object") == "page":
+            for entry in data.get("entry", []): # Pętla po entries
+                page_id_from_entry = entry.get("id") # ID strony z samego entry
 
-        # page_info_for_event jest już przekazane, więc nie musimy robić PAGE_CONFIG.get(recipient_id)
-        current_page_token = page_info_for_event['token']
-        current_subject = page_info_for_event['subject']
-        current_page_name = page_info_for_event['name']
+                for event in entry.get("messaging", []): # Pętla po zdarzeniach w entry
+                    sender_id = event.get("sender", {}).get("id")
+                    recipient_id = event.get("recipient", {}).get("id") # ID strony, która otrzymała wiadomość
 
-        print(f"--- BG_THREAD_START: Przetwarzanie dla Sender: {sender_id}, Strona: '{current_page_name}' ---")
+                    if not sender_id:
+                        logging.warning(f"Pominięto zdarzenie bez sender.id w entry dla page_id: {page_id_from_entry}.")
+                        continue
+                    if not recipient_id:
+                        logging.warning(f"Pominięto zdarzenie dla sender {sender_id} bez recipient.id w entry dla page_id: {page_id_from_entry}.")
+                        continue
 
-        if not current_page_token or len(current_page_token) < 50:
-             print(f"!!! BG_THREAD: KRYTYCZNY BŁĄD - Brak tokenu dla strony '{current_page_name}'.")
-             return # Zakończ wątek
+                    page_info = PAGE_CONFIG.get(recipient_id)
+                    if not page_info:
+                        logging.error(f"!!! Otrzymano wiadomość dla nieznanej/nieskonfigurowanej strony ID: {recipient_id} (Sender: {sender_id}). Pomijam.")
+                        continue
 
-        # === Tutaj wklej całą resztę swojej logiki z wewnętrznej pętli webhook_handle ===
-        # Zaczynając od:
-        # history_api_format, context, is_new_contact = load_history(sender_id)
-        # ... aż do końca logiki zapisu historii ...
-        # Pamiętaj, aby używać `current_page_token`, `current_subject`, `current_page_name`
-        # pobranych na początku tej funkcji.
+                    current_page_token = page_info['token']
+                    current_subject = page_info['subject']
+                    current_page_name = page_info['name']
+                    logging.info(f"--- Przetwarzanie zdarzenia dla Strony: '{current_page_name}' ({recipient_id}) | Przedmiot Główny: {current_subject} | Sender PSID: {sender_id} ---")
 
-        # Przykład fragmentu logiki, którą tu przenosisz:
-        history_api_format, context, is_new_contact = load_history(sender_id)
-        current_state = context.get('type', STATE_GENERAL)
-        next_state = current_state 
+                    if not current_page_token or len(current_page_token) < 50:
+                         logging.error(f"!!! KRYTYCZNY BŁĄD: Brak lub nieprawidłowy token dostępu dla strony '{current_page_name}' ({recipient_id}).")
+                         continue
 
-        if is_new_contact:
-            print(f"BG_THREAD: [{sender_id}] Nowy kontakt dla '{current_page_name}'. Logowanie statystyki.")
-            log_statistic("new_contact")
-        
-        print(f"    BG_THREAD: Stan (przed): {current_state}, Historia: {len(history_api_format)} wiad.")
-        print(f"    BG_THREAD: Kontekst wej.: {context}")
+                    history, context, is_new_contact = load_history(sender_id)
+                    history_for_gemini = [h for h in history if isinstance(h, Content) and h.role in ('user', 'model')]
+                    current_state = context.get('type', STATE_GENERAL)
 
-        context_data_to_save = context.copy()
-        context_data_to_save.pop('return_to_state', None)
-        context_data_to_save.pop('return_to_context', None)
-        if context_data_to_save.get('required_subject') != current_subject or 'required_subject' not in context_data_to_save:
-            context_data_to_save['required_subject'] = current_subject
-            print(f"    BG_THREAD: Ustawiono 'required_subject' na: {current_subject}")
+                    if is_new_contact:
+                        logging.info(f"[{sender_id}] Wykryto nowy kontakt dla strony '{current_page_name}'. Logowanie statystyki.")
+                        log_statistic("new_contact")
 
-        msg_result = None; ai_response_text_raw = None; user_input_text = None 
-        user_content_api_fmt = None; model_resp_api_fmt = None; action = None
-        trigger_gathering_ai_immediately = False; slot_verification_failed = False
-        is_temporary_general_state = 'return_to_state' in context
+                    logging.info(f"    Aktualny stan: {current_state}")
+                    logging.debug(f"    Kontekst wejściowy (klucze): {list(context.keys())}")
 
-        if message_data := event_data.get("message"): # Użyj event_data
-            if message_data.get("is_echo"): print(f"    BG_THREAD: Pominięto echo. PSID: {sender_id}"); return
-            user_input_text = message_data.get("text", "").strip()
-            print(f"    BG_THREAD: Odebrano wiadomość: '{user_input_text}'")
-            if user_input_text:
-                if ENABLE_TYPING_DELAY: time.sleep(MIN_TYPING_DELAY_SECONDS * 0.3)
-                if current_state == STATE_SCHEDULING_ACTIVE: action = 'handle_scheduling'
-                elif current_state == STATE_GATHERING_INFO: action = 'handle_gathering'
-                else: action = 'handle_general'
-            elif attachments := message_data.get("attachments"):
-                user_input_text = f"[Załącznik: {attachments[0].get('type', 'nieznany')}]"
-                print(f"    BG_THREAD: Odebrano załącznik: {attachments[0].get('type', 'nieznany')}")
-                msg_result = "Mogę przetwarzać tylko wiadomości tekstowe."; action = 'send_info'
-            else: print("    BG_THREAD: Pusta wiadomość."); return
-        
-        elif postback := event_data.get("postback"): # Użyj event_data
-            payload = postback.get("payload"); title = postback.get("title", "")
-            user_input_text = f"Użytkownik kliknął: '{title}' (Payload: {payload})"
-            print(f"    BG_THREAD: Odebrano Postback: Payload='{payload}', Tytuł='{title}' (stan={current_state})")
-            if payload == "CANCEL_SCHEDULING":
-                 msg_result = "Rozumiem, proces umawiania terminu został anulowany."; action = 'send_info'; next_state = STATE_GENERAL
-                 context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
-            elif current_state == STATE_SCHEDULING_ACTIVE: action = 'handle_scheduling'
-            elif current_state == STATE_GATHERING_INFO: action = 'handle_gathering'
-            else: action = 'handle_general'
-        
-        elif event_data.get("read") or event_data.get("delivery"): # Użyj event_data
-            print(f"    BG_THREAD: Zdarzenie read/delivery. PSID: {sender_id}"); return # Zakończ wątek tutaj
-        else: 
-            print(f"    BG_THREAD: Nieobsługiwany typ zdarzenia: {json.dumps(event_data)}"); return
+                    action = None
+                    msg_result = None
+                    ai_response_text_raw = None
+                    next_state = current_state
+                    model_resp_content = None
+                    user_content = None
+                    context_data_to_save = context.copy()
+                    context_data_to_save.pop('return_to_state', None)
+                    context_data_to_save.pop('return_to_context', None)
 
-        if user_input_text:
-            user_content_api_fmt = {"role": "user", "parts": [{"text": user_input_text}]}
-            print(f"    BG_THREAD: Utworzono user_content_api_fmt: {user_content_api_fmt}")
+                    if context_data_to_save.get('required_subject') != current_subject or 'required_subject' not in context_data_to_save:
+                        context_data_to_save['required_subject'] = current_subject
+                        logging.debug(f"    Ustawiono/zaktualizowano 'required_subject' w kontekście na: {current_subject} (na podstawie strony)")
 
-        loop_guard = 0; max_loops = 3
-        print(f"--- BG_LOOP_PRE --- Initial Action: {action}, CurrentState: {current_state}, UserInput: '{user_input_text}'")
-        while action and loop_guard < max_loops:
-            loop_guard += 1
-            effective_subject_for_action = context_data_to_save.get('required_subject', current_subject)
-            print(f"  >> BG_LOOP {loop_guard}/{max_loops} START --- Action: {action}, CurrentState: {current_state}, NextState(pre): {next_state}, EffSubject: {effective_subject_for_action}")
-            
-            current_action_in_loop = action
-            # WAŻNE: Resetuj msg_result i ai_response_text_raw na początku każdej iteracji pętli akcji,
-            # aby uniknąć przenoszenia starych wartości, jeśli akcja się zmienia.
-            # `action` zostanie ustawione na None lub na nową akcję w każdej gałęzi.
-            msg_result = None 
-            ai_response_text_raw = None
-            action = None # Resetuj tutaj, każda gałąź musi ustawić nową akcję jeśli pętla ma kontynuować
+                    trigger_gathering_ai_immediately = False
+                    slot_verification_failed = False
+                    is_temporary_general_state = 'return_to_state' in context
 
-            if current_action_in_loop == 'handle_general':
-                # ... (Twoja logika dla handle_general, pamiętaj o ustawieniu action = None na końcu, jeśli to finalna odpowiedź)
-                # ... (lub action = 'nowa_akcja' jeśli ma być kontynuacja w pętli)
-                # PRZYKŁAD:
-                is_initial = (current_state != STATE_GENERAL) or not history_api_format or context_data_to_save.get('_just_reset')
-                context_data_to_save.pop('_just_reset', None)
-                if is_initial and not user_input_text:
-                    # ... logika powitania ...
-                    msg_result = "Dzień dobry! ..." # Ustaw wiadomość
-                    action = 'send_info' # Ustaw następną akcję
-                    next_state = STATE_GENERAL
-                elif user_input_text:
-                    ai_response_text_raw = get_gemini_general_response(sender_id, user_input_text, history_api_format, is_temporary_general_state, current_page_token, effective_subject_for_action)
-                    if ai_response_text_raw:
-                        if INTENT_SCHEDULE_MARKER in ai_response_text_raw:
-                            msg_result = ai_response_text_raw.split(INTENT_SCHEDULE_MARKER,1)[0].strip()
-                            # ... logika zmiany stanu na scheduling ...
-                            action = 'handle_scheduling' # Następna akcja
-                            next_state = STATE_SCHEDULING_ACTIVE
-                            # ...
-                        elif RETURN_TO_PREVIOUS in ai_response_text_raw and is_temporary_general_state:
-                             msg_result = ai_response_text_raw.split(RETURN_TO_PREVIOUS,1)[0].strip()
-                             # ... logika powrotu ...
-                             action = context.get('return_to_state_action', None) # Ustaw akcję na podstawie zapisanego stanu powrotu
-                             next_state = context.get('return_to_state', STATE_GENERAL)
-                        else:
-                            msg_result = ai_response_text_raw
-                            action = None # Koniec pętli
-                            next_state = STATE_GENERAL
-                    else: # Błąd AI
-                        msg_result = "Problem z AI."
-                        action = None # Koniec pętli
-                        next_state = STATE_GENERAL
-                else: action = None # Nic do zrobienia
+                    if message_data := event.get("message"):
+                        if message_data.get("is_echo"): logging.debug(f"    Pominięto echo (PSID: {sender_id}, Strona: {current_page_name})."); continue
+                        user_input_text = message_data.get("text", "").strip()
+                        if user_input_text:
+                            user_content = Content(role="user", parts=[Part.from_text(user_input_text)])
+                            logging.info(f"    Odebrano wiadomość (stan={current_state}): '{user_input_text[:100]}{'...' if len(user_input_text)>100 else ''}'")
+                            if ENABLE_TYPING_DELAY: time.sleep(MIN_TYPING_DELAY_SECONDS * 0.3)
+                            if current_state == STATE_SCHEDULING_ACTIVE: action = 'handle_scheduling'
+                            elif current_state == STATE_GATHERING_INFO: action = 'handle_gathering'
+                            else: action = 'handle_general'
+                        elif attachments := message_data.get("attachments"):
+                            att_type = attachments[0].get('type', 'nieznany')
+                            user_content = Content(role="user", parts=[Part.from_text(f"[Załącznik: {att_type}]")])
+                            msg_result = "Mogę przetwarzać tylko wiadomości tekstowe."; action = 'send_info'; next_state = current_state
+                        else: logging.info("      Odebrano pustą wiadomość/nieobsługiwany typ."); action = None
+                    elif postback := event.get("postback"):
+                        payload = postback.get("payload"); title = postback.get("title", "")
+                        user_input_text = f"Kliknięto: '{title}' (Payload: {payload})"
+                        user_content = Content(role="user", parts=[Part.from_text(user_input_text)])
+                        logging.info(f"    Postback: Payload='{payload}', Tytuł='{title}' (stan={current_state})")
+                        if payload == "CANCEL_SCHEDULING":
+                             msg_result = "Proces umawiania anulowany."; action = 'send_info'; next_state = STATE_GENERAL
+                             context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
+                        elif current_state == STATE_SCHEDULING_ACTIVE: action = 'handle_scheduling'
+                        elif current_state == STATE_GATHERING_INFO: action = 'handle_gathering'
+                        else: action = 'handle_general'
+                    elif event.get("read"): logging.debug(f"    Potwierdzenie odczytania (PSID: {sender_id})."); continue
+                    elif event.get("delivery"): logging.debug(f"    Potwierdzenie dostarczenia (PSID: {sender_id})."); continue
+                    else: logging.warning(f"    Nieobsługiwany typ zdarzenia: {json.dumps(event)}"); continue
 
-            elif current_action_in_loop == 'handle_scheduling':
-                # ... (Twoja logika dla handle_scheduling, która ustawia msg_result, next_state i ewentualnie action)
-                action = None # Załóżmy, że kończy po jednym wywołaniu lub ustawia nową akcję
+                    loop_guard = 0; max_loops = 3
+                    while action and loop_guard < max_loops:
+                        loop_guard += 1
+                        effective_subject_for_action = context_data_to_save.get('required_subject', current_subject)
+                        logging.debug(f"  >> Pętla {loop_guard}/{max_loops} | Akcja: {action} | Stan: {current_state} -> {next_state} | Przedmiot: {effective_subject_for_action}")
+                        current_action_in_loop = action # Zapisz bieżącą akcję pętli
+                        action = None # Resetuj na początku każdej iteracji
 
-            elif current_action_in_loop == 'handle_gathering':
-                # ... (Twoja logika dla handle_gathering, która ustawia msg_result, next_state i ewentualnie action)
-                action = None # Załóżmy, że kończy po jednym wywołaniu lub ustawia nową akcję
+                        if current_action_in_loop == 'handle_general':
+                            is_initial_general_entry = (current_state != STATE_GENERAL) or (not history_for_gemini) or (context_data_to_save.get('_just_reset', False))
+                            context_data_to_save.pop('_just_reset', None)
+                            user_message_text_for_ai = user_content.parts[0].text if user_content and user_content.parts else None
 
-            elif current_action_in_loop == 'send_info':
-                # Ta akcja głównie służy do wysłania wiadomości ustawionej w poprzedniej iteracji.
-                # msg_result powinien już być ustawiony.
-                print(f"    BG_LOOP {loop_guard}: Akcja send_info, msg_result='{msg_result}', next_state='{next_state}'")
-                action = None # Zawsze kończ pętlę po send_info
-            
-            print(f"  << BG_LOOP {loop_guard} END --- Action(post-proc): {action}, NextState(post-proc): {next_state}, MsgResult(in-loop): '{msg_result}'")
-            current_state = next_state
-        
-        print(f"--- BG_AFTER_LOOP --- MsgResult(final): '{msg_result}', Final NextState: {next_state}")
-        
-        final_context_to_save = context_data_to_save.copy(); final_context_to_save['type'] = next_state
-        if 'required_subject' not in final_context_to_save: final_context_to_save['required_subject'] = current_subject
-        if next_state != STATE_GENERAL or 'return_to_state' not in final_context_to_save:
-             final_context_to_save.pop('return_to_state', None); final_context_to_save.pop('return_to_context', None)
-        
-        model_resp_api_fmt = None 
-        if msg_result: 
-            print(f"--- BG_FINAL_SEND --- Wysyłanie wiadomości: '{msg_result[:100]}...' ---")
-            send_message(sender_id, msg_result, current_page_token)
-            if ai_response_text_raw and msg_result == ai_response_text_raw:
-                 model_resp_api_fmt = {"role": "model", "parts": [{"text": ai_response_text_raw}]}
-            elif msg_result:
-                 model_resp_api_fmt = {"role": "model", "parts": [{"text": msg_result}]}
-        
-        original_context_no_return_keys = context.copy()
-        original_context_no_return_keys.pop('return_to_state', None); original_context_no_return_keys.pop('return_to_context', None)
-        should_save_history_flag = (bool(user_content_api_fmt) or bool(model_resp_api_fmt) or (original_context_no_return_keys != final_context_to_save))
+                            if is_initial_general_entry and not user_message_text_for_ai:
+                                other_subjects_links_parts = [f"- {s}: {l}" for s, l in ALL_SUBJECT_LINKS.items() if s.lower() != current_subject.lower()]
+                                links_text_for_user = "\n\nUdzielamy również korepetycji z:\n" + "\n".join(other_subjects_links_parts) if other_subjects_links_parts else ""
+                                msg_result = f"Dzień dobry! Kontakt w sprawie korepetycji z **{current_subject}**. W czym pomóc? Aby umówić termin, proszę dać znać." + links_text_for_user
+                                model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                next_state = STATE_GENERAL; context_data_to_save.update({'type': STATE_GENERAL, 'required_subject': current_subject})
+                                action = 'send_info'; current_state = next_state; continue
+                            elif user_message_text_for_ai:
+                                was_temporary = 'return_to_state' in context
+                                formatted_links_for_ai_prompt = "\n".join([f"{s}: {l}" for s, l in ALL_SUBJECT_LINKS.items()])
+                                final_system_instruction_general = SYSTEM_INSTRUCTION_GENERAL.format(
+                                    all_subject_links_formatted_for_ai=formatted_links_for_ai_prompt,
+                                    current_subject_from_page=current_subject,
+                                    intent_marker=INTENT_SCHEDULE_MARKER, return_marker=RETURN_TO_PREVIOUS
+                                )
+                                model_ack = f"Rozumiem. Rozmawiamy o '{current_subject}'. W razie potrzeby poinformuję o innych ({formatted_links_for_ai_prompt})."
+                                if was_temporary: model_ack += f" W trybie tymczasowym dodam {RETURN_TO_PREVIOUS}."
+                                initial_prompt_for_general = [Content(role="user", parts=[Part.from_text(final_system_instruction_general)]), Content(role="model", parts=[Part.from_text(model_ack)])]
+                                history_for_this_gemini_call = initial_prompt_for_general + history_for_gemini
+                                ai_response_text_raw = _call_gemini(sender_id, history_for_this_gemini_call, GENERATION_CONFIG_DEFAULT,
+                                    f"General (Strona: {current_page_name})", current_page_token, user_message=user_message_text_for_ai)
+                                if ai_response_text_raw:
+                                    model_resp_content = Content(role="model", parts=[Part.from_text(ai_response_text_raw)])
+                                    if RETURN_TO_PREVIOUS in ai_response_text_raw and was_temporary:
+                                        msg_result = ai_response_text_raw.split(RETURN_TO_PREVIOUS, 1)[0].strip()
+                                        next_state = context.get('return_to_state', STATE_GENERAL)
+                                        context_data_to_save = context.get('return_to_context', {}).copy()
+                                        context_data_to_save['type'] = next_state
+                                        if next_state == STATE_SCHEDULING_ACTIVE: action = 'handle_scheduling'
+                                        elif next_state == STATE_GATHERING_INFO: action = 'handle_gathering'; trigger_gathering_ai_immediately = True
+                                        else: action = 'handle_general'
+                                        if action: current_state = next_state; continue
+                                    elif INTENT_SCHEDULE_MARKER in ai_response_text_raw:
+                                        msg_result = ai_response_text_raw.split(INTENT_SCHEDULE_MARKER, 1)[0].strip()
+                                        confirmed_subject_by_ai = effective_subject_for_action
+                                        match_subj = re.search(r'\b(polski|matematyka|angielski)\b', msg_result, re.IGNORECASE)
+                                        if match_subj: confirmed_subject_by_ai = match_subj.group(1).capitalize()
+                                        if confirmed_subject_by_ai in AVAILABLE_SUBJECTS:
+                                            next_state = STATE_SCHEDULING_ACTIVE
+                                            context_data_to_save = {'type': STATE_SCHEDULING_ACTIVE, 'required_subject': confirmed_subject_by_ai}
+                                            action = 'handle_scheduling'; current_state = next_state; continue
+                                        else:
+                                            msg_result = (msg_result + "\n\n" if msg_result else "") + f"Proszę sprecyzować przedmiot ({', '.join(AVAILABLE_SUBJECTS)})?"
+                                            model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                            next_state = STATE_GENERAL; context_data_to_save.update({'type': STATE_GENERAL, 'required_subject': current_subject}); action = None
+                                    else: # Normalna odpowiedź AI General
+                                        msg_result = ai_response_text_raw; next_state = STATE_GENERAL
+                                        context_data_to_save.update({'type': STATE_GENERAL, 'required_subject': effective_subject_for_action})
+                                        if was_temporary: context_data_to_save.update({'return_to_state': context.get('return_to_state'), 'return_to_context': context.get('return_to_context', {})})
+                                        action = None
+                                else: # Błąd AI General
+                                    msg_result = "Problem z przetworzeniem. Spróbuj ponownie."; next_state = STATE_GENERAL
+                                    model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                    context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}; action = None
+                            else: action = None # Brak user_message i nie jest to initial entry
 
-        if should_save_history_flag:
-            history_for_saving = list(history_api_format) 
-            if user_content_api_fmt: history_for_saving.append(user_content_api_fmt)
-            if model_resp_api_fmt: history_for_saving.append(model_resp_api_fmt)
-            history_for_saving = history_for_saving[-(MAX_HISTORY_TURNS*2):]
-            print(f"--- BG_SAVE_HISTORY --- Stan: {final_context_to_save.get('type')}")
-            save_history(sender_id, history_for_saving, context_to_save=final_context_to_save)
+                        elif current_action_in_loop == 'handle_scheduling':
+                            if not effective_subject_for_action or effective_subject_for_action not in AVAILABLE_SUBJECTS:
+                                msg_result = f"Błąd: Nieznany przedmiot '{effective_subject_for_action}'."; next_state = STATE_GENERAL
+                                context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}; action = 'send_info'; current_state = next_state; continue
+                            subject_calendars_config = SUBJECT_TO_CALENDARS.get(effective_subject_for_action.lower(), [])
+                            if not subject_calendars_config:
+                                msg_result = f"Brak kalendarzy dla '{effective_subject_for_action}'."; next_state = STATE_GENERAL
+                                context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}; action = 'send_info'; current_state = next_state; continue
+                            try:
+                                tz = _get_calendar_timezone(); now_cal_tz = datetime.datetime.now(tz)
+                                search_end = tz.localize(datetime.datetime.combine((now_cal_tz + datetime.timedelta(days=MAX_SEARCH_DAYS)).date(), datetime.time(WORK_END_HOUR, 0)))
+                                _simulate_typing(sender_id, MAX_TYPING_DELAY_SECONDS * 0.7, current_page_token)
+                                free_ranges = get_free_time_ranges(subject_calendars_config, now_cal_tz, search_end)
+                                if free_ranges:
+                                    user_msg_for_ai = user_content.parts[0].text if user_content and user_content.parts else None
+                                    if slot_verification_failed: user_msg_for_ai = (user_msg_for_ai or "") + f"\n[System: Poprzedni termin zajęty. Zaproponuj inny dla {effective_subject_for_action}.]"; slot_verification_failed = False
+                                    ai_response_text_raw = get_gemini_scheduling_response(sender_id, history_for_gemini, user_msg_for_ai, free_ranges, effective_subject_for_action, current_page_token)
+                                    if ai_response_text_raw:
+                                        model_resp_content = Content(role="model", parts=[Part.from_text(ai_response_text_raw)])
+                                        if ai_response_text_raw.strip() == SWITCH_TO_GENERAL:
+                                            context_data_to_save.update({'return_to_state': STATE_SCHEDULING_ACTIVE, 'return_to_context': {'required_subject': effective_subject_for_action}, 'type': STATE_GENERAL})
+                                            next_state = STATE_GENERAL; action = 'handle_general'; msg_result = None; current_state = next_state; continue
+                                        iso_match = re.search(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}(.*?){re.escape(SLOT_ISO_MARKER_SUFFIX)}", ai_response_text_raw)
+                                        if iso_match:
+                                            extracted_iso = iso_match.group(1).strip()
+                                            text_for_user = re.sub(r'\s+', ' ', re.sub(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}.*?{re.escape(SLOT_ISO_MARKER_SUFFIX)}", "", ai_response_text_raw).strip()).strip()
+                                            try:
+                                                proposed_start = datetime.datetime.fromisoformat(extracted_iso); proposed_start = proposed_start.astimezone(tz) if proposed_start.tzinfo else tz.localize(proposed_start)
+                                                proposed_slot_fmt = format_slot_for_user(proposed_start); _simulate_typing(sender_id, MIN_TYPING_DELAY_SECONDS, current_page_token)
+                                                chosen_cal_id, chosen_cal_name, sheet_blocks = None, None, False
+                                                proposed_end = proposed_start + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+                                                if any(max(proposed_start, b['start']) < min(proposed_end, b['end']) for b in get_sheet_booked_slots(SPREADSHEET_ID, MAIN_SHEET_NAME, proposed_start, proposed_end)): sheet_blocks = True
+                                                if not sheet_blocks:
+                                                    for cal_conf in subject_calendars_config:
+                                                        if is_slot_actually_free(proposed_start, cal_conf['id']): chosen_cal_id, chosen_cal_name = cal_conf['id'], cal_conf['name']; break
+                                                if chosen_cal_id:
+                                                    write_ok, write_msg_or_row = write_to_sheet_phase1(sender_id, proposed_start, chosen_cal_name) # log_statistic('booking') jest w tej funkcji
+                                                    if write_ok:
+                                                        pf = get_user_profile(sender_id, current_page_token)
+                                                        msg_result = (text_for_user or f"Potwierdzam: {proposed_slot_fmt} ({effective_subject_for_action}).") + " Poproszę o dane ucznia."
+                                                        model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                                        next_state = STATE_GATHERING_INFO
+                                                        context_data_to_save = {'type': STATE_GATHERING_INFO, 'proposed_slot_iso': proposed_start.isoformat(), 'proposed_slot_formatted': proposed_slot_fmt,
+                                                                                'chosen_calendar_id': chosen_cal_id, 'chosen_calendar_name': chosen_cal_name, 'required_subject': effective_subject_for_action,
+                                                                                'known_parent_first_name': pf.get('first_name', '') if pf else '', 'known_parent_last_name': pf.get('last_name', '') if pf else '',
+                                                                                'known_student_first_name': '', 'known_student_last_name': '', 'known_grade': '', 'known_level': '',
+                                                                                'sheet_row_index': write_msg_or_row if isinstance(write_msg_or_row, int) else None}
+                                                        action = 'handle_gathering'; trigger_gathering_ai_immediately = True; current_state = next_state; continue
+                                                    else: msg_result = f"Błąd zapisu ({write_msg_or_row}). Wybierzmy termin ponownie."; next_state = STATE_SCHEDULING_ACTIVE
+                                                else: msg_result = f"Termin {proposed_slot_fmt} zajęty. Spróbujmy inny."; next_state = STATE_SCHEDULING_ACTIVE; slot_verification_failed = True
+                                                model_resp_content = Content(role="model", parts=[Part.from_text(ai_response_text_raw if next_state == STATE_SCHEDULING_ACTIVE and slot_verification_failed else msg_result)])
+                                                context_data_to_save.update({'type': next_state, 'required_subject': effective_subject_for_action}); action = None
+                                            except ValueError: msg_result = "Błąd formatu terminu. Wybierzmy ponownie."; next_state = STATE_SCHEDULING_ACTIVE
+                                            except Exception as verif_err: logging.error(f"Krytyczny błąd weryfikacji: {verif_err}", exc_info=True); msg_result = "Błąd systemu."; next_state = STATE_GENERAL
+                                            if next_state != STATE_GATHERING_INFO: # Jeśli nie przeszliśmy do gathering, ustaw odpowiedź i kontekst
+                                                model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                                context_data_to_save.update({'type': next_state, 'required_subject': current_subject if next_state == STATE_GENERAL else effective_subject_for_action})
+                                                if next_state == STATE_GENERAL: context_data_to_save['_just_reset'] = True
+                                                action = None
+                                        else: # AI kontynuuje rozmowę planującą
+                                            msg_result = ai_response_text_raw; next_state = STATE_SCHEDULING_ACTIVE
+                                            context_data_to_save.update({'type': STATE_SCHEDULING_ACTIVE, 'required_subject': effective_subject_for_action}); action = None
+                                    else: # Błąd AI Scheduling
+                                        msg_result = f"Problem z systemem planowania dla {effective_subject_for_action}."; next_state = STATE_GENERAL
+                                        model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                        context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}; action = None
+                                else: # Brak wolnych zakresów
+                                    msg_result = f"Brak wolnych terminów na {effective_subject_for_action}."; next_state = STATE_GENERAL
+                                    model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                    context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}; action = None
+                            except Exception as schedule_err_final:
+                                logging.error(f"Krytyczny błąd 'handle_scheduling': {schedule_err_final}", exc_info=True); msg_result = "Błąd systemu planowania."; next_state = STATE_GENERAL
+                                model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}; action = None
+
+                        elif current_action_in_loop == 'handle_gathering':
+                            try:
+                                user_msg_for_ai = user_content.parts[0].text if user_content and user_content.parts else None
+                                if trigger_gathering_ai_immediately: logging.info("      Inicjuję AI zbierające dane."); trigger_gathering_ai_immediately = False
+                                ai_response_text_raw = get_gemini_gathering_response(sender_id, history_for_gemini, user_msg_for_ai, context_data_to_save.copy(), current_page_token)
+                                if ai_response_text_raw:
+                                    model_resp_content = Content(role="model", parts=[Part.from_text(ai_response_text_raw)])
+                                    if ai_response_text_raw.strip() == SWITCH_TO_GENERAL:
+                                        context_data_to_save.update({'return_to_state': STATE_GATHERING_INFO, 'return_to_context': context_data_to_save.copy(), 'type': STATE_GENERAL})
+                                        next_state = STATE_GENERAL; action = 'handle_general'; msg_result = None; current_state = next_state; continue
+                                    if INFO_GATHERED_MARKER in ai_response_text_raw:
+                                        resp_parts = ai_response_text_raw.split(INFO_GATHERED_MARKER, 1); ai_resp_before_marker = resp_parts[0].strip(); final_msg = ""
+                                        data_match = re.search(r"ZEBRANE_DANE_UCZNIA:\s*\[Imię:\s*(.*?),?\s*Nazwisko:\s*(.*?),?\s*KlasaInfo:\s*(.*?),?\s*Poziom:\s*(.*?)\]", ai_resp_before_marker, re.I | re.S)
+                                        parsed_data = {k: data_match.group(i+1).strip() if data_match and data_match.group(i+1) else "Brak" for i, k in enumerate(['student_first_name', 'student_last_name', 'grade_info', 'level_info'])}
+                                        if data_match: final_msg = ai_resp_before_marker[data_match.end():].strip()
+                                        else: final_msg = ai_resp_before_marker # Fallback
+                                        if not final_msg: final_msg = "Dziękujemy. Prosimy o potwierdzenie rezerwacji wiadomością \"POTWIERDZAM\" na profilu: https://www.facebook.com/profile.php?id=61576135251276"
+                                        try:
+                                            pfn, pln, s_row_idx = context_data_to_save.get('known_parent_first_name',''), context_data_to_save.get('known_parent_last_name',''), context_data_to_save.get('sheet_row_index')
+                                            # Poprawka dla find_row_and_update_sheet - przekazujemy poprawny sheet_row_index
+                                            valid_s_row_idx = s_row_idx if isinstance(s_row_idx, int) and s_row_idx >=2 else None
+                                            logging.info(f"[{sender_id}] Przekazywany sheet_row_index do find_row_and_update_sheet: {valid_s_row_idx} (oryginalny z kontekstu: {s_row_idx})")
+
+                                            update_ok, update_msg = find_row_and_update_sheet(sender_id, None, {'parent_first_name':pfn, 'parent_last_name':pln, **parsed_data}, valid_s_row_idx)
+                                            if update_ok: msg_result = final_msg; next_state = STATE_GENERAL
+                                            else: msg_result = f"Błąd zapisu danych ({update_msg})."; next_state = STATE_GENERAL
+                                            context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}; action = None
+                                        except Exception as sheet_err: logging.error(f"Krytyczny błąd Fazy 2: {sheet_err}", exc_info=True); msg_result = "Błąd systemu zapisu."; next_state = STATE_GENERAL
+                                        if next_state == STATE_GENERAL: context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}; action = None
+                                    else: # AI kontynuuje zbieranie
+                                        msg_result = ai_response_text_raw; next_state = STATE_GATHERING_INFO
+                                        context_data_to_save['type'] = STATE_GATHERING_INFO; action = None # required_subject już jest
+                                else: # Błąd AI Gathering
+                                    msg_result = "Błąd systemu zbierania info."; next_state = STATE_GATHERING_INFO
+                                    model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                    context_data_to_save['type'] = STATE_GATHERING_INFO; action = None
+                            except Exception as gather_err: logging.error(f"Krytyczny błąd 'handle_gathering': {gather_err}", exc_info=True); msg_result = "Błąd systemu danych ucznia."; next_state = STATE_GENERAL
+                            if next_state == STATE_GENERAL: context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}; action = None
+
+                        elif current_action_in_loop == 'send_info':
+                            if msg_result and not model_resp_content: model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                            if 'type' not in context_data_to_save: context_data_to_save['type'] = next_state
+                            if 'required_subject' not in context_data_to_save: context_data_to_save['required_subject'] = current_subject
+                            action = None
+                        else: logging.error(f"Nieznana akcja '{current_action_in_loop}'. PSID: {sender_id}"); action = None
+
+                    final_context_to_save_dict = context_data_to_save.copy()
+                    final_context_to_save_dict['type'] = next_state
+                    if 'required_subject' not in final_context_to_save_dict: final_context_to_save_dict['required_subject'] = current_subject
+                    if next_state != STATE_GENERAL or 'return_to_state' not in final_context_to_save_dict:
+                         final_context_to_save_dict.pop('return_to_state', None); final_context_to_save_dict.pop('return_to_context', None)
+
+                    if msg_result: send_message(sender_id, msg_result, current_page_token)
+                    elif current_action_in_loop : logging.debug(f"Akcja '{current_action_in_loop}' zakończona bez wiadomości (PSID: {sender_id}).")
+
+                    original_context_no_return = context.copy()
+                    original_context_no_return.pop('return_to_state', None); original_context_no_return.pop('return_to_context', None)
+                    should_save = (bool(user_content) or bool(model_resp_content) or (original_context_no_return != final_context_to_save_dict))
+
+                    if should_save:
+                        history_to_save = [h for h in history_for_gemini if isinstance(h, Content)] # Upewnij się, że to Content
+                        if user_content: history_to_save.append(user_content)
+                        if model_resp_content: history_to_save.append(model_resp_content)
+                        history_to_save = history_to_save[-(MAX_HISTORY_TURNS * 2):]
+                        logging.info(f"Zapisywanie historii ({len(history_to_save)} wiad.). Stan: {final_context_to_save_dict.get('type')}, Przedmiot: {final_context_to_save_dict.get('required_subject')}")
+                        save_history(sender_id, history_to_save, context_to_save=final_context_to_save_dict)
+                    else: logging.debug(f"Brak zmian w historii/kontekście - pomijanie zapisu (PSID: {sender_id}).")
+                    logging.info(f"--- Zakończono przetwarzanie eventu dla Strony: '{current_page_name}', Sender: {sender_id} ---")
+                logging.info(f"--- Zakończono wszystkie eventy dla page_id: {page_id_from_entry} w tym entry ---")
+            return Response("EVENT_RECEIVED", status=200)
         else:
-            print(f"--- BG_NO_SAVE --- Brak zmian do zapisu. PSID: {sender_id}")
-            
-        print(f"--- BG_THREAD_END --- Zakończono przetwarzanie eventu dla Sender: {sender_id} ---")
+            logging.warning(f"POST na /webhook, ale obiekt != 'page'. Typ: {type(data)}. Dane: {raw_data[:200]}...")
+            return Response("OK", status=200)
+    except json.JSONDecodeError as e:
+        logging.error(f"BŁĄD dekodowania JSON: {e}", exc_info=True); logging.error(f"Dane: {raw_data[:500]}...")
+        return Response("Invalid JSON", status=400)
+    except Exception as e:
+        logging.critical(f"KRYTYCZNY BŁĄD POST /webhook: {e}", exc_info=True)
+        return Response("Internal Server Error Occurred", status=200)
 
-    except Exception as e_bg_thread:
-        print(f"!!! BG_THREAD_CRITICAL_ERROR w process_single_event_in_background dla sender {sender_id}: {e_bg_thread} !!!")
-        import traceback
-        traceback.print_exc()
 
 # =====================================================================
 # === URUCHOMIENIE SERWERA ============================================
@@ -2622,16 +2642,12 @@ if __name__ == '__main__':
     else:
         print("!!! KRYTYCZNE: Brak skonfigurowanych stron w PAGE_CONFIG !!!")
     print("-" * 60)
-    print("  Konfiguracja Gemini API:") # Zmieniony nagłówek
-    # Sprawdzenie klucza API i modelu, które już robisz na początku pliku,
-    # ale można tu powtórzyć dla podsumowania przy starcie.
-    if not GEMINI_API_KEY or len(GEMINI_API_KEY) < 30:
-        print("!!! KRYTYCZNE: Klucz Gemini API NIE jest poprawnie skonfigurowany (brak lub za krótki) !!!")
-        print("!!!             Funkcjonalność AI będzie niedostępna. !!!")
+    print("  Konfiguracja Vertex AI:")
+    print(f"    Projekt: {PROJECT_ID}, Lokalizacja: {LOCATION}, Model: {MODEL_ID}")
+    if not gemini_model:
+        print("!!! KRYTYCZNE: Model Gemini NIE załadowany! AI będzie niedostępne. !!!")
     else:
-        print(f"    Klucz API: OK (ustawiony, długość: {len(GEMINI_API_KEY)})")
-    print(f"    Model używany: {MODEL_FOR_API}") # Loguje poprawny model dla Gemini API
-    print("-" * 60)
+        print(f"    Model Gemini ({MODEL_ID}): Załadowany (OK)")
     print("-" * 60)
     print("  Konfiguracja Google Calendar:")
     print(f"    Dostępne przedmioty: {', '.join(AVAILABLE_SUBJECTS)}")
