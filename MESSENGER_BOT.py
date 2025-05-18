@@ -30,21 +30,21 @@ from googleapiclient.errors import HttpError
 PAGE_CONFIG = {
     # Polski: Zakrzeczone Korepetycje - Polski (ID: 661857023673365)
     "661857023673365": {
-        "token": "EACNAHFzEhkUBO5y1aIKOaYcZCKRz2fS6PpPUwPrdqaYgrJGL8KmAVJtXtwbZAzfzSZAREL67A0Go2xcnYgXy4rwZBwmlrraoQZASwZBZAJFEzzZCwL2vsX8lgodNtr2TiAAN4obiESu4TqLU3OwRbCnHgdDX8dRpaUl1lmO9ZAB8TTfkJ0OVQ9QaQJG7njwhugnHMrgZDZD",
+        "token": "EAAJUltDBrJQBO8GS4zZA2JtJ2NGAk041BbNyXZCfNo9phFozOCwSMt4q1xksHUpN4fZBtZAQkh69W1eZCGdD5WiMMuvuIg3HclDaczZBYpLUeuS67zoadbBCX1nZCLvWE4NnLKkeOGKZBUJElzeMglfcqp13wz5r3eNgepsVJxr5W023fOO5nv84G6G6XqI9YKWz2AZDZD",
         "subject": "Polski",
         "name": "Zakręcone Korepetycje - Polski",
         "link": "https://tiny.pl/0xnsgbt2" # Link do strony z Polskim
     },
     # Matematyka: ZakrzeczoneKorepetycje - MATEMATYKA... (ID: 638454406015018)
     "638454406015018": {
-        "token": "EACNAHFzEhkUBO3hU8CvarZBMqnOeXFZC8v0haCt1fcWIwhiXGQpx98ZBEEGBmoZBwQZADqSSmeb9Py45ie7gXrh5yPCtvVi4aTZBwbggPgjaZCPzRo8dNndqfavc2ZCBZCCtkvVOkPOTs6c9lxmCIdvN1TCzeBszpr3i7n8uUoFme81bZBfm7y5LmwCDYZBy8xMllIy8AZDZD",
+        "token": "EAAJUltDBrJQBOZCXJC3oqbBV9dv44pCX5swZASCBkZBlZCDUZCl4J2xwqxB4qt1IEDGUUKkuqfg1pkpHPU037M3W6kMNOebrLWiMTQsM7ZCjTdS9o2JieUWte2puuPil4uZAE89z2vxixtwdvuXpuMDxPe5QbiE4EOnu3AwOBIZAJbXJdPNJrUaKpXQ8Ux3VynlmVAZDZD",
         "subject": "Matematyka",
         "name": "Zakręcone Korepetycje - MATEMATYKA",
         "link": "https://tiny.pl/f7xz5n0g" # Link do strony z Matematyką
     },
      # Angielski: English Zone: Zakrzeczone Korepetycje (ID: 653018101222547)
     "653018101222547": {
-        "token": "EACNAHFzEhkUBOZC2RxQhFkPJOh4H9vMKZCt0KOCFPBscZCGurYZANYFEOkPyaKcsr88PeP36idt6UiXN2fzBKFdqWSxnaqF1WeZAJU3g6wYOVPTHLNjNl6HcW9GHRgTxEdjQdAMDRnnIgkCtGJCe4pSVEIk7yYRXrcfEam5XY6mXabBvqrlDzZBCLHonZCFRyIuuAZDZD",
+        "token": "EAAJUltDBrJQBO5DZBpzZAPjR2GSVetLzuolDkZBhu2uB7MBLnxhSb0B13JeFZB6gLZBX4CN3sByk7iGS6PDVfAm8tpsWMk5wUGkdWTEBn5AA1lZAR2ZCraoOGbjVAiLLlfTzjqjNRbAZADNvDAavDjV0pBcKltyVI0wAdQ6w0C2owI1lLW1jkXQ9IVpwlewzZBt0GZAgZDZD",
         "subject": "Angielski",
         "name": "English Zone: Zakręcone Korepetycje",
         "link": "https://tiny.pl/prrr7qf1" # Link do strony z Angielskim
@@ -61,8 +61,8 @@ app = Flask(__name__)
 
 # --- Konfiguracja Ogólna ---
 VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "KOLAGEN") # Używane tylko do weryfikacji webhooka
-PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "linear-booth-450221-k1")
-LOCATION = os.environ.get("GCP_LOCATION", "us-central1")
+PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "singular-carver-459118-g5")
+LOCATION = os.environ.get("GCP_LOCATION", "us-central1-f")
 MODEL_ID = os.environ.get("VERTEX_MODEL_ID", "gemini-2.0-flash-001")
 
 FACEBOOK_GRAPH_API_URL = "https://graph.facebook.com/v19.0/me/messages"
@@ -78,11 +78,11 @@ MAX_TYPING_DELAY_SECONDS = 3.0
 TYPING_CHARS_PER_SECOND = 35
 
 # --- Konfiguracja Kalendarza (ODCZYT/WERYFIKACJA) ---
-CALENDAR_SERVICE_ACCOUNT_FILE = 'kalendarzklucz.json'
+CALENDAR_SERVICE_ACCOUNT_FILE = 'KALENDARZ_KLUCZ.json'
 CALENDAR_SCOPES = ['https://www.googleapis.com/auth/calendar.readonly']
 CALENDAR_TIMEZONE = 'Europe/Warsaw'
 APPOINTMENT_DURATION_MINUTES = 60
-WORK_START_HOUR = 7
+WORK_START_HOUR = 8
 WORK_END_HOUR = 22
 
 # --- NOWOŚĆ: Lista przedmiotów (automatycznie z PAGE_CONFIG) ---
@@ -124,7 +124,7 @@ MAX_SEARCH_DAYS = 14
 MIN_BOOKING_LEAD_HOURS = 24
 
 # --- Konfiguracja Google Sheets (ZAPIS + ODCZYT) ---
-SHEETS_SERVICE_ACCOUNT_FILE = 'arkuszklucz.json'
+SHEETS_SERVICE_ACCOUNT_FILE = 'ARKUSZ_KLUCZ.json'
 SHEET_SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 SPREADSHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "1vpsIAEkqtY3ZJ5Mr67Dda45aZ55V1O-Ux9ODjwk13qw")
 MAIN_SHEET_NAME = os.environ.get("GOOGLE_SHEET_NAME", 'Arkusz1') # Główne rezerwacje
