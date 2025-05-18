@@ -38,7 +38,7 @@ PAGE_CONFIG = {
     },
     # Matematyka: ZakrzeczoneKorepetycje - MATEMATYKA... (ID: 638454406015018)
     "638454406015018": {
-        "token": "EAAJUltDBrJQBOZCXJC3oqbBV9dv44pCX5swZASCBkZBlZCDUZCl4J2xwqxB4qt1IEDGUUKkuqfg1pkpHPU037M3W6kMNOebrLWiMTQsM7ZCjTdS9o2JieUWte2puuPil4uZAE89z2vxixtwdvuXpuMDxPe5QbiE4EOnu3AwOBIZAJbXJdPNJrUaKpXQ8Ux3VynlmVAZDZD",
+        "token": "EAAJUltDBrJQBO657w69hfYnqgIGBbRwWNFJvZCagiXF3KX6gSmjcVqjTTULfZApnvOJJb6wqrZCy8AeMP0Wy0fUxOvFZBvL7qvDYrdaVGZBDgoJApTT5hCAr24rtZC3dh23elLWh2ZBuoCIh3YEqLdKmUKe4aXh2bJMSkKw4FZCgjaay9lZAQ2bZCWMDePjCxLZAfweDAZDZD",
         "subject": "Matematyka",
         "name": "Zakręcone Korepetycje - MATEMATYKA",
         "link": "https://tiny.pl/f7xz5n0g" # Link do strony z Matematyką
