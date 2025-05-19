@@ -462,6 +462,7 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
         actual_user_psid = event_sender_id
         page_being_contacted_id = event_recipient_id
         print("====================")
+        print(f"DEBUG PRINT GATHERING AI [{user_psid}]: History: {history_for_gathering_ai}, Current User Msg: '{current_user_message_text}', Context Info: {context_info}")
         print(actual_user_psid)
         print("====================")
         page_config_for_event = PAGE_CONFIG.get(page_being_contacted_id)
