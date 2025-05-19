@@ -416,6 +416,494 @@ def save_history(user_psid, history, context_to_save=None):
             except OSError as remove_e:
                 logging.error(f"    Nie można usunąć pliku tymczasowego {temp_filepath} po błędzie zapisu: {remove_e}")
 
+
+
+# =====================================================================
+# === FUNKCJA PRZETWARZANIA POJEDYNCZEGO ZDARZENIA W TLE ==============
+# =====================================================================
+def process_single_event(event_payload, page_id_from_entry_info): # page_id_from_entry_info to ID strony, która FAKTYCZNIE otrzymała webhook
+    """
+    Przetwarza pojedyncze zdarzenie 'messaging' od Facebooka.
+    Ta funkcja będzie uruchamiana w osobnym wątku.
+    """
+    try:
+        # --- KROK 1: Ostrożna identyfikacja ról i konfiguracji strony ---
+        actual_user_psid = None
+        page_config_for_event = None # Konfiguracja strony, z którą użytkownik rozmawia
+
+        event_sender_id = event_payload.get("sender", {}).get("id")
+        event_recipient_id = event_payload.get("recipient", {}).get("id") # Dla wiadomości przychodzącej, to ID naszej strony; dla echa, to PSID usera
+
+        if not event_sender_id or not event_recipient_id:
+            logging.warning(f"(Wątek) Zdarzenie bez sender.id lub recipient.id. Event: {event_payload}")
+            return
+
+        message_data_for_echo_check = event_payload.get("message")
+        is_echo = message_data_for_echo_check and message_data_for_echo_check.get("is_echo")
+
+        if is_echo:
+            # Dla echa:
+            # event_sender_id to ID strony, która wysłała (JEDNA Z NASZYCH skonfigurowanych)
+            # event_recipient_id to PSID użytkownika, do którego echo zostało wysłane
+            # page_id_from_entry_info to ID strony, której dotyczy subskrypcja webhooka (powinno być to samo co event_sender_id)
+            
+            # Logujemy i wychodzimy, nie przetwarzamy echa dalej
+            echoing_page_config = PAGE_CONFIG.get(event_sender_id) # Użyj event_sender_id jako ID strony, która wysłała
+            echoing_page_name_for_log = echoing_page_config.get('name', event_sender_id) if echoing_page_config else event_sender_id
+            logging.debug(f"    (Wątek) Pominięto echo. Strona wysyłająca: '{echoing_page_name_for_log}' ({event_sender_id}). Odbiorca echa (user): {event_recipient_id}.")
+            return
+        
+        # Jeśli to nie echo, to jest to zdarzenie OD UŻYTKOWNIKA DO STRONY lub inne (read, delivery)
+        # W takim przypadku:
+        # event_sender_id to PSID użytkownika
+        # event_recipient_id to ID strony, która otrzymała wiadomość/zdarzenie (powinno być w PAGE_CONFIG)
+        actual_user_psid = event_sender_id
+        page_being_contacted_id = event_recipient_id
+
+        page_config_for_event = PAGE_CONFIG.get(page_being_contacted_id)
+
+        if not page_config_for_event:
+            # Jeśli strona, do której przyszła wiadomość, nie jest w naszej konfiguracji
+            logging.error(f"!!! (Wątek) Otrzymano zdarzenie dla nieskonfigurowanej strony ID: {page_being_contacted_id} (Użytkownik PSID: {actual_user_psid}). Pomijam.")
+            return
+
+        # Od tego momentu używamy actual_user_psid i page_config_for_event
+        current_page_token = page_config_for_event['token']
+        current_subject = page_config_for_event['subject']
+        current_page_name = page_config_for_event['name']
+
+        logging.info(f"--- (Wątek) Przetwarzanie zdarzenia dla Strony: '{current_page_name}' ({page_being_contacted_id}) | Przedmiot Główny: {current_subject} | User PSID: {actual_user_psid} ---")
+
+        if not current_page_token or len(current_page_token) < 50:
+            logging.error(f"!!! KRYTYCZNY BŁĄD (Wątek): Brak lub nieprawidłowy token dostępu dla strony '{current_page_name}' ({page_being_contacted_id}).")
+            return
+
+        # --- KROK 2: Ładowanie historii i dalsze przetwarzanie używając actual_user_psid ---
+        history, context, is_new_contact = load_history(actual_user_psid) # Użyj poprawnego PSID użytkownika
+        history_for_gemini = [h for h in history if isinstance(h, Content) and h.role in ('user', 'model')]
+        current_state = context.get('type', STATE_GENERAL)
+
+        if is_new_contact:
+            logging.info(f"[{actual_user_psid}] (Wątek) Wykryto nowy kontakt dla strony '{current_page_name}'. Logowanie statystyki.")
+            log_statistic("new_contact")
+
+        logging.info(f"    (Wątek) [{actual_user_psid}] Aktualny stan: {current_state}")
+        logging.debug(f"    (Wątek) [{actual_user_psid}] Kontekst wejściowy (klucze): {list(context.keys())}")
+
+        action = None
+        msg_result = None
+        ai_response_text_raw = None
+        next_state = current_state
+        model_resp_content = None
+        user_content = None
+        context_data_to_save = context.copy()
+        context_data_to_save.pop('return_to_state', None)
+        context_data_to_save.pop('return_to_context', None)
+
+        if context_data_to_save.get('required_subject') != current_subject or 'required_subject' not in context_data_to_save:
+            context_data_to_save['required_subject'] = current_subject
+            logging.debug(f"    (Wątek) [{actual_user_psid}] Ustawiono/zaktualizowano 'required_subject' w kontekście na: {current_subject} (na podstawie strony)")
+
+        trigger_gathering_ai_immediately = False
+        slot_verification_failed = False
+        is_temporary_general_state = 'return_to_state' in context
+
+        # --- Logika odczytu wiadomości/postbacku z event_payload ---
+        # UWAGA: 'is_echo' już obsłużone wyżej
+        if message_data := event_payload.get("message"): # message_data_for_echo_check było tylko do sprawdzenia echa
+            user_input_text = message_data.get("text", "").strip()
+            if user_input_text:
+                user_content = Content(role="user", parts=[Part.from_text(user_input_text)])
+                logging.info(f"    (Wątek) [{actual_user_psid}] Odebrano wiadomość (stan={current_state}): '{user_input_text[:100]}{'...' if len(user_input_text)>100 else ''}'")
+                if ENABLE_TYPING_DELAY: time.sleep(MIN_TYPING_DELAY_SECONDS * 0.3)
+
+                if current_state == STATE_SCHEDULING_ACTIVE: action = 'handle_scheduling'
+                elif current_state == STATE_GATHERING_INFO: action = 'handle_gathering'
+                else: action = 'handle_general'
+            elif attachments := message_data.get("attachments"):
+                att_type = attachments[0].get('type', 'nieznany')
+                user_content = Content(role="user", parts=[Part.from_text(f"[Załącznik: {att_type}]")])
+                msg_result = "Mogę przetwarzać tylko wiadomości tekstowe."
+                action = 'send_info'
+                next_state = current_state
+            else:
+                logging.info(f"      (Wątek) [{actual_user_psid}] Odebrano pustą wiadomość lub nieobsługiwany typ komunikatu (brak tekstu i załączników).")
+                return
+        elif postback := event_payload.get("postback"):
+            payload = postback.get("payload")
+            title = postback.get("title", "")
+            user_input_text = f"Kliknięto: '{title}' (Payload: {payload})"
+            user_content = Content(role="user", parts=[Part.from_text(user_input_text)])
+            logging.info(f"    (Wątek) [{actual_user_psid}] Odebrano postback: Payload='{payload}', Tytuł='{title}' (stan={current_state})")
+
+            if payload == "CANCEL_SCHEDULING":
+                    msg_result = "Proces umawiania został anulowany."
+                    action = 'send_info'
+                    next_state = STATE_GENERAL
+                    context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
+            elif current_state == STATE_SCHEDULING_ACTIVE: action = 'handle_scheduling'
+            elif current_state == STATE_GATHERING_INFO: action = 'handle_gathering'
+            else: action = 'handle_general'
+        elif event_payload.get("read"):
+            logging.debug(f"    (Wątek) Potwierdzenie odczytania wiadomości przez użytkownika {actual_user_psid}.")
+            return
+        elif event_payload.get("delivery"):
+            logging.debug(f"    (Wątek) Potwierdzenie dostarczenia wiadomości do użytkownika {actual_user_psid}.")
+            return
+        else:
+            logging.warning(f"    (Wątek) Nieobsługiwany typ zdarzenia dla PSID {actual_user_psid}: {json.dumps(event_payload)}")
+            return
+
+        if not action and not msg_result:
+            logging.debug(f"    (Wątek) [{actual_user_psid}] Brak akcji lub wiadomości do przetworzenia. Kończenie.")
+            return
+
+        # --- Główna pętla logiki stanów ---
+        loop_guard = 0
+        max_loops = 3
+        while (action or msg_result) and loop_guard < max_loops:
+            loop_guard += 1
+            effective_subject_for_action = context_data_to_save.get('required_subject', current_subject)
+            logging.debug(f"  >> (Wątek) [{actual_user_psid}] Pętla {loop_guard}/{max_loops} | Akcja: {action} | Stan: {current_state} -> {next_state} | Przedmiot: {effective_subject_for_action}")
+
+            current_action_in_loop = action
+            action = None
+
+            # --- handle_general ---
+            if current_action_in_loop == 'handle_general':
+                is_initial_general_entry = (current_state != STATE_GENERAL) or \
+                                        (not history_for_gemini and not user_content) or \
+                                        (context_data_to_save.get('_just_reset', False))
+                context_data_to_save.pop('_just_reset', None)
+                user_message_text_for_ai = user_content.parts[0].text if user_content and user_content.parts else None
+                if is_initial_general_entry and not user_message_text_for_ai:
+                    other_subjects_links_parts = []
+                    for subj, link in ALL_SUBJECT_LINKS.items():
+                        if subj.lower() != current_subject.lower():
+                            other_subjects_links_parts.append(f"- {subj}: {link}")
+                    links_text_for_user = ""
+                    if other_subjects_links_parts:
+                        links_text_for_user = "\n\nUdzielamy również korepetycji z:\n" + "\n".join(other_subjects_links_parts)
+                    msg_result = f"Dzień dobry! Dziękujemy za kontakt w sprawie korepetycji z przedmiotu **{current_subject}**. W czym mogę pomóc? Jeśli chcą Państwo umówić termin, proszę dać znać, a ja sprawdzę dostępne opcje." + links_text_for_user
+                    model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                    next_state = STATE_GENERAL
+                    context_data_to_save.update({'type': STATE_GENERAL, 'required_subject': current_subject})
+                elif user_message_text_for_ai:
+                    was_temporary = 'return_to_state' in context
+                    formatted_links_for_ai_prompt_list = []
+                    for subj, link_val in ALL_SUBJECT_LINKS.items():
+                        if subj.lower() != current_subject.lower():
+                            formatted_links_for_ai_prompt_list.append(f"{subj}: {link_val}")
+                    formatted_links_for_ai_prompt = "\n".join(formatted_links_for_ai_prompt_list) if formatted_links_for_ai_prompt_list else "Brak innych przedmiotów do zaoferowania."
+                    final_system_instruction_general = SYSTEM_INSTRUCTION_GENERAL.format(
+                        all_subject_links_formatted_for_ai=formatted_links_for_ai_prompt,
+                        current_subject_from_page=current_subject,
+                        available_subjects_list=", ".join(AVAILABLE_SUBJECTS),
+                        intent_marker=INTENT_SCHEDULE_MARKER,
+                        return_marker=RETURN_TO_PREVIOUS
+                    )
+                    model_ack = f"Rozumiem. Rozmawiamy o '{current_subject}'."
+                    if formatted_links_for_ai_prompt_list:
+                        model_ack += f" W razie potrzeby poinformuję o innych przedmiotach i ich linkach: {formatted_links_for_ai_prompt}."
+                    if was_temporary: model_ack += f" Będąc w trybie tymczasowym, jeśli użytkownik nie zada kolejnego pytania ogólnego, zakończę odpowiedź znacznikiem {RETURN_TO_PREVIOUS}."
+                    initial_prompt_for_general = [
+                        Content(role="user", parts=[Part.from_text(final_system_instruction_general)]),
+                        Content(role="model", parts=[Part.from_text(model_ack)])
+                    ]
+                    history_for_this_gemini_call = initial_prompt_for_general + history_for_gemini
+                    ai_response_text_raw = _call_gemini(actual_user_psid, history_for_this_gemini_call, GENERATION_CONFIG_DEFAULT,
+                        f"General (Strona: {current_page_name})", current_page_token, user_message=user_message_text_for_ai) # Użyj actual_user_psid
+                    if ai_response_text_raw:
+                        model_resp_content = Content(role="model", parts=[Part.from_text(ai_response_text_raw)])
+                        if RETURN_TO_PREVIOUS in ai_response_text_raw and was_temporary:
+                            msg_result = ai_response_text_raw.split(RETURN_TO_PREVIOUS, 1)[0].strip()
+                            next_state = context.get('return_to_state', STATE_GENERAL)
+                            context_data_to_save = context.get('return_to_context', {}).copy()
+                            context_data_to_save['type'] = next_state
+                            if next_state == STATE_SCHEDULING_ACTIVE: action = 'handle_scheduling'
+                            elif next_state == STATE_GATHERING_INFO: action = 'handle_gathering'; trigger_gathering_ai_immediately = True
+                            else: action = 'handle_general'
+                            current_state = next_state
+                        elif INTENT_SCHEDULE_MARKER in ai_response_text_raw:
+                            msg_result = ai_response_text_raw.split(INTENT_SCHEDULE_MARKER, 1)[0].strip()
+                            confirmed_subject_by_ai = effective_subject_for_action
+                            if confirmed_subject_by_ai in AVAILABLE_SUBJECTS:
+                                next_state = STATE_SCHEDULING_ACTIVE
+                                context_data_to_save = {'type': STATE_SCHEDULING_ACTIVE, 'required_subject': confirmed_subject_by_ai}
+                                action = 'handle_scheduling'
+                                current_state = next_state
+                            else:
+                                msg_result = (msg_result + "\n\n" if msg_result else "") + f"Nie jestem pewien, dla którego przedmiotu chcą Państwo umówić termin. Dostępne przedmioty to: {', '.join(AVAILABLE_SUBJECTS)}. Proszę sprecyzować."
+                                model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                next_state = STATE_GENERAL
+                                context_data_to_save.update({'type': STATE_GENERAL, 'required_subject': current_subject})
+                        else:
+                            msg_result = ai_response_text_raw
+                            next_state = STATE_GENERAL
+                            context_data_to_save.update({'type': STATE_GENERAL, 'required_subject': effective_subject_for_action})
+                            if was_temporary:
+                                context_data_to_save.update({
+                                    'return_to_state': context.get('return_to_state'),
+                                    'return_to_context': context.get('return_to_context', {})
+                                    })
+                    else:
+                        msg_result = "Przepraszam, mam chwilowy problem z przetworzeniem Twojej wiadomości. Spróbuj ponownie za chwilę."
+                        model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                        next_state = STATE_GENERAL
+                        context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
+
+            # --- handle_scheduling ---
+            elif current_action_in_loop == 'handle_scheduling':
+                if not effective_subject_for_action or effective_subject_for_action not in AVAILABLE_SUBJECTS:
+                    msg_result = f"Przepraszam, wystąpił błąd. Nie wiem, dla jakiego przedmiotu ('{effective_subject_for_action}') próbujemy umówić termin. Proszę zacząć od nowa, np. pisząc 'Chcę umówić {current_subject}'."
+                    model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                    next_state = STATE_GENERAL
+                    context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
+                else:
+                    subject_calendars_config = SUBJECT_TO_CALENDARS.get(effective_subject_for_action.lower(), [])
+                    if not subject_calendars_config:
+                        msg_result = f"Przepraszam, obecnie nie mam skonfigurowanych kalendarzy dla przedmiotu '{effective_subject_for_action}'. Skontaktuj się z nami inną drogą w sprawie tego przedmiotu."
+                        model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                        next_state = STATE_GENERAL
+                        context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
+                    else:
+                        try:
+                            tz_cal = _get_calendar_timezone()
+                            now_cal_tz = datetime.datetime.now(tz_cal)
+                            search_start_dt = now_cal_tz
+                            search_end_dt = tz_cal.localize(datetime.datetime.combine(
+                                (now_cal_tz + datetime.timedelta(days=MAX_SEARCH_DAYS)).date(),
+                                datetime.time(WORK_END_HOUR, 0)
+                            ))
+                            _simulate_typing(actual_user_psid, MAX_TYPING_DELAY_SECONDS * 0.7, current_page_token) # Użyj actual_user_psid
+                            free_ranges = get_free_time_ranges(subject_calendars_config, search_start_dt, search_end_dt)
+                            user_msg_for_ai = user_content.parts[0].text if user_content and user_content.parts else None
+                            if slot_verification_failed:
+                                user_msg_for_ai = (user_msg_for_ai or "") + \
+                                                  f"\n[Informacja systemowa: Poprzednio proponowany termin okazał się zajęty. Zaproponuj proszę inny termin dla przedmiotu {effective_subject_for_action}, biorąc pod uwagę preferencje użytkownika i dostępne zakresy.]"
+                                slot_verification_failed = False
+                            ai_response_text_raw = get_gemini_scheduling_response(
+                                actual_user_psid, history_for_gemini, user_msg_for_ai, # Użyj actual_user_psid
+                                free_ranges, effective_subject_for_action, current_page_token
+                            )
+                            if ai_response_text_raw:
+                                model_resp_content = Content(role="model", parts=[Part.from_text(ai_response_text_raw)])
+                                if ai_response_text_raw.strip() == SWITCH_TO_GENERAL:
+                                    context_data_to_save.update({
+                                        'return_to_state': STATE_SCHEDULING_ACTIVE,
+                                        'return_to_context': {'type': STATE_SCHEDULING_ACTIVE, 'required_subject': effective_subject_for_action},
+                                        'type': STATE_GENERAL
+                                    })
+                                    next_state = STATE_GENERAL
+                                    action = 'handle_general'
+                                    current_state = next_state
+                                    msg_result = None
+                                else:
+                                    iso_match = re.search(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}(.*?){re.escape(SLOT_ISO_MARKER_SUFFIX)}", ai_response_text_raw)
+                                    if iso_match:
+                                        extracted_iso = iso_match.group(1).strip()
+                                        text_for_user = re.sub(r'\s+', ' ', re.sub(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}.*?{re.escape(SLOT_ISO_MARKER_SUFFIX)}", "", ai_response_text_raw).strip()).strip()
+                                        try:
+                                            proposed_start_dt = datetime.datetime.fromisoformat(extracted_iso)
+                                            proposed_start_dt = proposed_start_dt.astimezone(tz_cal) if proposed_start_dt.tzinfo else tz_cal.localize(proposed_start_dt)
+                                            proposed_slot_formatted = format_slot_for_user(proposed_start_dt)
+                                            _simulate_typing(actual_user_psid, MIN_TYPING_DELAY_SECONDS, current_page_token) # Użyj actual_user_psid
+                                            chosen_calendar_id = None; chosen_calendar_name = None
+                                            is_blocked_in_sheet = False
+                                            slot_end_dt = proposed_start_dt + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+                                            sheet_busy_for_slot = get_sheet_booked_slots(SPREADSHEET_ID, MAIN_SHEET_NAME, proposed_start_dt, slot_end_dt)
+                                            for sheet_slot in sheet_busy_for_slot:
+                                                for cal_conf_iter in subject_calendars_config:
+                                                    if sheet_slot.get('calendar_name','').strip().lower() == cal_conf_iter.get('name','').strip().lower():
+                                                        if max(proposed_start_dt, sheet_slot['start']) < min(slot_end_dt, sheet_slot['end']):
+                                                            is_blocked_in_sheet = True; break
+                                                if is_blocked_in_sheet: break
+                                            if not is_blocked_in_sheet:
+                                                for cal_conf_iter in subject_calendars_config:
+                                                    if is_slot_actually_free(proposed_start_dt, cal_conf_iter['id']):
+                                                        chosen_calendar_id, chosen_calendar_name = cal_conf_iter['id'], cal_conf_iter['name']; break
+                                            if chosen_calendar_id and chosen_calendar_name:
+                                                write_ok, write_msg_or_row_idx = write_to_sheet_phase1(actual_user_psid, proposed_start_dt, chosen_calendar_name) # Użyj actual_user_psid
+                                                if write_ok:
+                                                    user_profile_fb = get_user_profile(actual_user_psid, current_page_token) # Użyj actual_user_psid
+                                                    parent_fn = user_profile_fb.get('first_name', '') if user_profile_fb else ''
+                                                    parent_ln = user_profile_fb.get('last_name', '') if user_profile_fb else ''
+                                                    msg_result = (text_for_user if text_for_user else f"Świetnie, proponowany termin na {effective_subject_for_action} to {proposed_slot_formatted}.")
+                                                    model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                                    next_state = STATE_GATHERING_INFO
+                                                    context_data_to_save = {
+                                                        'type': STATE_GATHERING_INFO,
+                                                        'proposed_slot_iso': proposed_start_dt.isoformat(),
+                                                        'proposed_slot_formatted': proposed_slot_formatted,
+                                                        'chosen_calendar_id': chosen_calendar_id,
+                                                        'chosen_calendar_name': chosen_calendar_name,
+                                                        'required_subject': effective_subject_for_action,
+                                                        'known_parent_first_name': parent_fn, 'known_parent_last_name': parent_ln,
+                                                        'known_student_first_name': '', 'known_student_last_name': '',
+                                                        'known_grade': '', 'known_level': '',
+                                                        'sheet_row_index': write_msg_or_row_idx if isinstance(write_msg_or_row_idx, int) else None
+                                                    }
+                                                    action = 'handle_gathering'; trigger_gathering_ai_immediately = True
+                                                    current_state = next_state
+                                                else:
+                                                    msg_result = f"Przepraszam, wystąpił błąd podczas rezerwacji ({write_msg_or_row_idx}). Proszę wybrać termin ponownie."
+                                                    model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                                    next_state = STATE_SCHEDULING_ACTIVE
+                                                    context_data_to_save.update({'type': STATE_SCHEDULING_ACTIVE, 'required_subject': effective_subject_for_action})
+                                                    slot_verification_failed = True
+                                            else:
+                                                msg_result = (text_for_user if text_for_user else "") + \
+                                                            (("\n" if text_for_user else "") + f"Niestety, termin {proposed_slot_formatted} właśnie został zajęty. Proszę, wybierzmy inny.")
+                                                model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                                next_state = STATE_SCHEDULING_ACTIVE
+                                                context_data_to_save.update({'type': STATE_SCHEDULING_ACTIVE, 'required_subject': effective_subject_for_action})
+                                                slot_verification_failed = True
+                                        except ValueError as ve:
+                                            logging.error(f"(Wątek) [{actual_user_psid}] Błąd parsowania daty ISO '{extracted_iso}': {ve}")
+                                            msg_result = "Wystąpił błąd z formatem proponowanego terminu. Spróbujmy wybrać ponownie."
+                                            model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                            next_state = STATE_SCHEDULING_ACTIVE
+                                            context_data_to_save.update({'type': STATE_SCHEDULING_ACTIVE, 'required_subject': effective_subject_for_action})
+                                        except Exception as verif_err:
+                                            logging.error(f"(Wątek) [{actual_user_psid}] Krytyczny błąd weryfikacji/zapisu slotu: {verif_err}", exc_info=True)
+                                            msg_result = "Przepraszam, wystąpił wewnętrzny błąd systemu. Spróbuj ponownie później."
+                                            model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                            next_state = STATE_GENERAL
+                                            context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
+                                    else:
+                                        msg_result = ai_response_text_raw
+                                        next_state = STATE_SCHEDULING_ACTIVE
+                                        context_data_to_save.update({'type': STATE_SCHEDULING_ACTIVE, 'required_subject': effective_subject_for_action})
+                            else:
+                                msg_result = ai_response_text_raw or f"Przepraszam, mam problem z systemem planowania dla przedmiotu {effective_subject_for_action}. Spróbujmy za chwilę."
+                                if "Brak dostępnych terminów" in msg_result or not free_ranges:
+                                    msg_result = f"Przepraszam, ale obecnie nie mam dostępnych wolnych terminów dla przedmiotu {effective_subject_for_action} w najbliższym czasie. Proszę spróbować później lub skontaktować się z nami inną drogą."
+                                model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                                next_state = STATE_GENERAL
+                                context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
+                        except Exception as schedule_err_final:
+                            logging.error(f"(Wątek) [{actual_user_psid}] Krytyczny błąd w logice 'handle_scheduling': {schedule_err_final}", exc_info=True)
+                            msg_result = "Przepraszam, wystąpił poważny błąd systemu planowania. Spróbuj ponownie później."
+                            model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                            next_state = STATE_GENERAL
+                            context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
+
+            # --- handle_gathering ---
+            elif current_action_in_loop == 'handle_gathering':
+                try:
+                    user_msg_for_ai = user_content.parts[0].text if user_content and user_content.parts else None
+                    if trigger_gathering_ai_immediately:
+                        logging.info(f"    (Wątek) [{actual_user_psid}] Inicjuję AI zbierające dane ucznia (trigger_gathering_ai_immediately=True).")
+                        user_msg_for_ai = None
+                        trigger_gathering_ai_immediately = False
+                    context_for_gathering_ai = context_data_to_save.copy()
+                    ai_response_text_raw = get_gemini_gathering_response(actual_user_psid, history_for_gemini, user_msg_for_ai, context_for_gathering_ai, current_page_token) # Użyj actual_user_psid
+                    if ai_response_text_raw:
+                        model_resp_content = Content(role="model", parts=[Part.from_text(ai_response_text_raw)])
+                        if ai_response_text_raw.strip() == SWITCH_TO_GENERAL:
+                            context_data_to_save.update({
+                                'return_to_state': STATE_GATHERING_INFO,
+                                'return_to_context': context_for_gathering_ai,
+                                'type': STATE_GENERAL
+                            })
+                            next_state = STATE_GENERAL; action = 'handle_general'
+                            current_state = next_state; msg_result = None
+                        elif INFO_GATHERED_MARKER in ai_response_text_raw:
+                            response_parts = ai_response_text_raw.split(INFO_GATHERED_MARKER, 1)
+                            ai_response_before_marker = response_parts[0].strip()
+                            final_message_to_user = ""
+                            data_match = re.search(
+                                r"ZEBRANE_DANE_UCZNIA:\s*\[Imię:\s*(.*?),?\s*Nazwisko:\s*(.*?),?\s*KlasaInfo:\s*(.*?),?\s*Poziom:\s*(.*?)\]",
+                                ai_response_before_marker, re.IGNORECASE | re.DOTALL
+                            )
+                            parsed_student_data = {}
+                            if data_match:
+                                parsed_student_data['student_first_name'] = data_match.group(1).strip()
+                                parsed_student_data['student_last_name'] = data_match.group(2).strip()
+                                parsed_student_data['grade_info'] = data_match.group(3).strip()
+                                parsed_student_data['level_info'] = data_match.group(4).strip()
+                                final_message_to_user = ai_response_before_marker[data_match.end():].strip()
+                            else:
+                                logging.warning(f"    (Wątek) [{actual_user_psid}] Nie znaleziono ZEBRANE_DANE_UCZNIA w: '{ai_response_before_marker}'. Używam kontekstu.")
+                                final_message_to_user = ai_response_before_marker
+                                parsed_student_data['student_first_name'] = context_data_to_save.get('known_student_first_name', 'Brak')
+                                parsed_student_data['student_last_name'] = context_data_to_save.get('known_student_last_name', 'Brak')
+                                parsed_student_data['grade_info'] = context_data_to_save.get('known_grade', 'Brak')
+                                parsed_student_data['level_info'] = context_data_to_save.get('known_level', 'Brak')
+                            if not final_message_to_user:
+                                final_message_to_user = "Dziękujemy za podanie informacji. Rezerwacja została wstępnie przyjęta. Prosimy o ostateczne potwierdzenie zajęć poprzez wysłanie wiadomości \"POTWIERDZAM\" na profil Facebook: https://www.facebook.com/profile.php?id=61576135251276. Ten profil służy również do dalszego kontaktu w sprawie zajęć."
+                            msg_result = final_message_to_user
+                            parsed_student_data['parent_first_name'] = context_data_to_save.get('known_parent_first_name', '')
+                            parsed_student_data['parent_last_name'] = context_data_to_save.get('known_parent_last_name', '')
+                            sheet_row_idx_for_update = context_data_to_save.get('sheet_row_index')
+                            valid_sheet_row_idx = sheet_row_idx_for_update if isinstance(sheet_row_idx_for_update, int) and sheet_row_idx_for_update >=2 else None
+                            logging.info(f"    (Wątek) [{actual_user_psid}] Faza 2 - Arkusz: Przekazywany sheet_row_index: {valid_sheet_row_idx} (oryginalny: {sheet_row_idx_for_update})")
+                            update_ok, update_message = find_row_and_update_sheet(actual_user_psid, None, parsed_student_data, valid_sheet_row_idx) # Użyj actual_user_psid
+                            if not update_ok: logging.error(f"    (Wątek) [{actual_user_psid}] Błąd Fazy 2 w arkuszu: {update_message}")
+                            next_state = STATE_GENERAL
+                            context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
+                        else:
+                            msg_result = ai_response_text_raw
+                            next_state = STATE_GATHERING_INFO
+                            context_data_to_save['type'] = STATE_GATHERING_INFO
+                    else:
+                        msg_result = "Przepraszam, mam chwilowy problem z systemem zbierania informacji. Spróbujmy jeszcze raz."
+                        model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                        next_state = STATE_GATHERING_INFO
+                        context_data_to_save['type'] = STATE_GATHERING_INFO
+                except Exception as gather_err:
+                    logging.error(f"(Wątek) [{actual_user_psid}] Krytyczny błąd w logice 'handle_gathering': {gather_err}", exc_info=True)
+                    msg_result = "Przepraszam, wystąpił poważny błąd systemu zbierania danych. Spróbuj ponownie później."
+                    model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                    next_state = STATE_GENERAL
+                    context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
+
+            # --- send_info ---
+            elif current_action_in_loop == 'send_info':
+                if msg_result and not model_resp_content:
+                    model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                if 'type' not in context_data_to_save: context_data_to_save['type'] = next_state
+                if 'required_subject' not in context_data_to_save: context_data_to_save['required_subject'] = current_subject
+            else:
+                if current_action_in_loop:
+                    logging.error(f"    (Wątek) [{actual_user_psid}] Nieznana akcja '{current_action_in_loop}' w pętli.")
+                pass
+
+        # --- Koniec pętli while ---
+        final_context_to_save_dict = context_data_to_save.copy()
+        final_context_to_save_dict['type'] = next_state
+        if 'required_subject' not in final_context_to_save_dict:
+            final_context_to_save_dict['required_subject'] = current_subject
+        if next_state != STATE_GENERAL or 'return_to_state' not in final_context_to_save_dict:
+                final_context_to_save_dict.pop('return_to_state', None)
+                final_context_to_save_dict.pop('return_to_context', None)
+
+        if msg_result:
+            send_message(actual_user_psid, msg_result, current_page_token) # Użyj actual_user_psid
+        elif current_action_in_loop and not action:
+            logging.debug(f"    (Wątek) [{actual_user_psid}] Ostatnia akcja '{current_action_in_loop}' zakończona bez bezpośredniej wiadomości do wysłania.")
+
+        original_context_no_return = context.copy()
+        original_context_no_return.pop('return_to_state', None)
+        original_context_no_return.pop('return_to_context', None)
+        should_save = (bool(user_content) or bool(model_resp_content) or
+                       (original_context_no_return != final_context_to_save_dict))
+        if should_save:
+            history_to_save_final = [h for h in history_for_gemini if isinstance(h, Content) and h.role in ('user', 'model')]
+            if user_content: history_to_save_final.append(user_content)
+            if model_resp_content: history_to_save_final.append(model_resp_content)
+            history_to_save_final = history_to_save_final[-(MAX_HISTORY_TURNS * 2):]
+            logging.info(f"    (Wątek) [{actual_user_psid}] Zapisywanie historii ({len(history_to_save_final)} wiad.). Stan: {final_context_to_save_dict.get('type')}, Przedmiot: {final_context_to_save_dict.get('required_subject')}")
+            save_history(actual_user_psid, history_to_save_final, context_to_save=final_context_to_save_dict) # Użyj actual_user_psid
+        else:
+            logging.debug(f"    (Wątek) [{actual_user_psid}] Brak zmian w historii lub kontekście - pomijanie zapisu.")
+
+        logging.info(f"--- (Wątek) Zakończono przetwarzanie eventu dla Strony: '{current_page_name}', User PSID: {actual_user_psid} ---")
+
+    except Exception as e_thread:
+        event_mid = event_payload.get('message', {}).get('mid', 'N/A') if isinstance(event_payload, dict) else 'N/A_event_payload_not_dict'
+        logging.critical(f"KRYTYCZNY BŁĄD W WĄTKU PRZETWARZANIA ZDARZENIA (event MID: {event_mid}): {e_thread}", exc_info=True)
+
 def _get_calendar_timezone():
     """Pobiera (i cachuje) obiekt strefy czasowej dla Kalendarza."""
     global _cal_tz
