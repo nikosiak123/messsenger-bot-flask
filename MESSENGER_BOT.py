@@ -2749,7 +2749,7 @@ def get_gemini_gathering_response(user_psid, history_for_gathering_ai, current_u
     except Exception as format_e:
          logging.error(f"!!! BŁĄD formatowania instrukcji (Gathering): {format_e}")
          return "Błąd wewnętrzny asystenta zbierania danych."
-        print(f"DEBUG PRINT GATHERING AI [{user_psid}]: History: {history_for_gathering_ai}, Current User Msg: '{current_user_message_text}', Context Info: {context_info}")
+    print(f"DEBUG PRINT GATHERING AI [{user_psid}]: History: {history_for_gathering_ai}, Current User Msg: '{current_user_message_text}', Context Info: {context_info}")
     # Zbuduj prompt
     initial_prompt = [
         Content(role="user", parts=[Part.from_text(system_instruction)]),
