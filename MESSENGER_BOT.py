@@ -2725,7 +2725,7 @@ def get_gemini_gathering_response(user_psid, history_for_gathering_ai, current_u
     if not gemini_model:
         logging.error(f"!!! [{user_psid}] Model Gemini niedostępny (Gathering)!")
         return None
-
+    print(f"DEBUG PRINT GATHERING AI [{user_psid}]: History: {history_for_gathering_ai}, Current User Msg: '{current_user_message_text}', Context Info: {context_info}")
     # Pobierz dane z kontekstu do sformatowania instrukcji
     proposed_slot_str = context_info.get("proposed_slot_formatted", "nie ustalono")
     student_first_name = context_info.get("known_student_first_name", "")
@@ -2749,7 +2749,6 @@ def get_gemini_gathering_response(user_psid, history_for_gathering_ai, current_u
     except Exception as format_e:
          logging.error(f"!!! BŁĄD formatowania instrukcji (Gathering): {format_e}")
          return "Błąd wewnętrzny asystenta zbierania danych."
-    print(f"DEBUG PRINT GATHERING AI [{user_psid}]: History: {history_for_gathering_ai}, Current User Msg: '{current_user_message_text}', Context Info: {context_info}")
     # Zbuduj prompt
     initial_prompt = [
         Content(role="user", parts=[Part.from_text(system_instruction)]),
