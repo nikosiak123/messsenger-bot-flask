@@ -838,21 +838,14 @@ def get_free_time_ranges(calendar_config_list, start_datetime, end_datetime):
     min_duration_delta = datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
 
     # --- Krok 1: Pobierz WSZYSTKIE zajęte sloty z Arkusza1 w danym zakresie ---
-    # Pobieramy raz, aby uniknąć wielokrotnych zapytań do API Sheets
     all_sheet_bookings = get_sheet_booked_slots(SPREADSHEET_ID, MAIN_SHEET_NAME, search_start_unfiltered, end_datetime)
     all_sheet_bookings.sort(key=lambda x: x['start'])
     logging.debug(f"--- Zajęte sloty z Arkusza '{MAIN_SHEET_NAME}' (łącznie {len(all_sheet_bookings)} w zakresie) ---")
-    # (Opcjonalne logowanie pierwszych slotów z arkusza)
-    # if all_sheet_bookings:
-    #     for i, s in enumerate(all_sheet_bookings[:5]):
-    #         logging.debug(f"  Arkusz Slot {i+1}: {s['start']:%H:%M}-{s['end']:%H:%M} (Kal: '{s.get('calendar_name', 'Brak')}')")
-    #     if len(all_sheet_bookings) > 5: logging.debug("  ...")
 
     # --- Krok 2: Dla każdego kalendarza z listy wejściowej, oblicz jego wolne sloty po filtracji ---
     all_individually_filtered_free_ranges = []
     calendar_ids_to_check_gcal = [c['id'] for c in calendar_config_list if 'id' in c]
 
-    # Pobierz zajęte sloty z Google Calendar dla WSZYSTKICH kalendarzy z listy za jednym razem
     busy_times_gcal_all = get_calendar_busy_slots(calendar_ids_to_check_gcal, search_start_unfiltered, end_datetime)
     busy_times_gcal_by_id = defaultdict(list)
     for busy_slot in busy_times_gcal_all:
@@ -867,78 +860,43 @@ def get_free_time_ranges(calendar_config_list, start_datetime, end_datetime):
 
         logging.debug(f"--- Przetwarzanie kalendarza: '{cal_name}' ({cal_id}) ---")
 
-        # 2a: Użyj już pobranych zajętych z Google Calendar dla TEGO kalendarza
         busy_times_cal = sorted(busy_times_gcal_by_id.get(cal_id, []), key=lambda x: x['start'])
-
-        # Scal nakładające się lub stykające zajęte sloty TYLKO z Google Calendar dla tego kalendarza
         merged_busy_cal = []
         for busy in busy_times_cal:
             if not merged_busy_cal or busy['start'] > merged_busy_cal[-1]['end']:
-                 # Dodaj nowy, jeśli lista jest pusta lub jest przerwa
                  merged_busy_cal.append(busy.copy())
             else:
-                 # Scal, jeśli się stykają lub nachodzą
                  merged_busy_cal[-1]['end'] = max(merged_busy_cal[-1]['end'], busy['end'])
 
-
-        # 2b: Oblicz "surowe" wolne dla TEGO kalendarza (na podstawie jego zajętości w GCal)
         raw_calendar_free_ranges = []
-        current_time = search_start_unfiltered # Zacznij od początku efektywnego zakresu
+        current_time = search_start_unfiltered
         for busy_slot in merged_busy_cal:
             if current_time < busy_slot['start']:
-                # Jest przerwa między obecnym czasem a początkiem zajętości -> to jest wolny zakres
                 raw_calendar_free_ranges.append({'start': current_time, 'end': busy_slot['start']})
-            # Przesuń obecny czas na koniec bieżącego zajętego slotu (lub dalej, jeśli już tam był)
             current_time = max(current_time, busy_slot['end'])
-
-        # Sprawdź, czy jest wolny zakres od końca ostatniego zajętego slotu do końca zakresu wyszukiwania
         if current_time < end_datetime:
             raw_calendar_free_ranges.append({'start': current_time, 'end': end_datetime})
 
-
-        # Zastosuj filtr godzin pracy do "surowych" wolnych zakresów
         raw_calendar_free_ranges_workhours = []
         work_start_time = datetime.time(WORK_START_HOUR, 0)
         work_end_time = datetime.time(WORK_END_HOUR, 0)
-
         for free_range in raw_calendar_free_ranges:
             range_start = free_range['start']
             range_end = free_range['end']
-
-            # Iteruj przez dni w zakresie wolnego czasu
             current_day_start = range_start
             while current_day_start < range_end:
                 day_date = current_day_start.date()
-                # Początek i koniec dnia pracy w strefie czasowej kalendarza
                 work_day_start_dt = tz.localize(datetime.datetime.combine(day_date, work_start_time))
                 work_day_end_dt = tz.localize(datetime.datetime.combine(day_date, work_end_time))
-
-                # Znajdź część wspólną [range_start, range_end) oraz [work_day_start_dt, work_day_end_dt)
-                effective_start = max(current_day_start, work_day_start_dt)
-                effective_end = min(range_end, work_day_end_dt)
-
-                # Dodaj tylko jeśli jest to prawidłowy zakres i wystarczająco długi
-                if effective_start < effective_end and (effective_end - effective_start) >= min_duration_delta:
-                    raw_calendar_free_ranges_workhours.append({'start': effective_start, 'end': effective_end})
-
-                # Przejdź do następnego dnia LUB do końca obecnego zakresu, jeśli był krótszy niż dzień pracy
-                # Ważne: Następny punkt startowy to albo koniec pracy tego dnia, albo początek następnego dnia
+                effective_start_work = max(current_day_start, work_day_start_dt) # Zmieniono nazwę zmiennej
+                effective_end_work = min(range_end, work_day_end_dt) # Zmieniono nazwę zmiennej
+                if effective_start_work < effective_end_work and (effective_end_work - effective_start_work) >= min_duration_delta:
+                    raw_calendar_free_ranges_workhours.append({'start': effective_start_work, 'end': effective_end_work})
                 next_day_start_dt = tz.localize(datetime.datetime.combine(day_date + datetime.timedelta(days=1), datetime.time.min))
-                # Przesuń wskaźnik na początek następnego dnia lub na koniec obecnego przedziału pracy, cokolwiek jest pierwsze po effective_end
-                current_day_start = min(range_end, max(effective_end, next_day_start_dt))
-                # Upewnij się, że nie cofamy się przed początek oryginalnego zakresu free_range
+                current_day_start = min(range_end, max(effective_end_work, next_day_start_dt))
                 current_day_start = max(current_day_start, range_start)
-
-
         logging.debug(f"    Surowe wolne dla '{cal_name}' (po filtrze GCal i godzin pracy): {len(raw_calendar_free_ranges_workhours)}")
-        # (Opcjonalne logowanie surowych slotów)
-        # if raw_calendar_free_ranges_workhours:
-        #     for i, s in enumerate(raw_calendar_free_ranges_workhours[:3]): logging.debug(f"      Surowy Slot {i+1}: {s['start']:%H:%M}-{s['end']:%H:%M}")
-        #     if len(raw_calendar_free_ranges_workhours) > 3: logging.debug("      ...")
 
-
-        # 2c: Odfiltruj surowe wolne używając TYLKO rezerwacji z arkusza przypisanych do TEGO kalendarza
-        # Porównujemy nazwy bez uwzględniania wielkości liter i białych znaków
         cal_name_normalized = cal_name.strip().lower()
         sheet_bookings_for_this_cal = [
             b for b in all_sheet_bookings
@@ -946,110 +904,90 @@ def get_free_time_ranges(calendar_config_list, start_datetime, end_datetime):
         ]
         logging.debug(f"    Znaleziono {len(sheet_bookings_for_this_cal)} pasujących rezerwacji w arkuszu '{MAIN_SHEET_NAME}' dla '{cal_name_normalized}'.")
 
-        # Lista kandydatów na wolne sloty = początkowo wszystkie wolne po filtrze GCal i godzin pracy
         candidate_ranges = raw_calendar_free_ranges_workhours
         if sheet_bookings_for_this_cal:
             logging.debug(f"    Filtrowanie wg {len(sheet_bookings_for_this_cal)} rezerwacji z arkusza...")
-            # Iterujemy przez KAŻDĄ rezerwację z arkusza dla tego kalendarza
             for sheet_busy in sheet_bookings_for_this_cal:
-                # logging.debug(f"      Filtr arkusza: {sheet_busy['start']:%H:%M}-{sheet_busy['end']:%H:%M}")
-                next_candidate_ranges = [] # Nowa lista po zastosowaniu bieżącego filtra arkusza
-                # Iterujemy przez aktualną listę kandydatów na wolne sloty
+                next_candidate_ranges = []
                 for calendar_free in candidate_ranges:
-                    # Sprawdź nakładanie się: [cal_start, cal_end) vs [sheet_start, sheet_end)
                     overlap_start = max(calendar_free['start'], sheet_busy['start'])
                     overlap_end = min(calendar_free['end'], sheet_busy['end'])
-
-                    if overlap_start < overlap_end: # Jest nakładanie
-                        # logging.debug(f"        Nakładanie z {calendar_free['start']:%H:%M}-{calendar_free['end']:%H:%M}")
-                        # Podziel wolny zakres na części przed i po zajętym slocie z arkusza
-                        # Część przed: [cal_start, sheet_start)
+                    if overlap_start < overlap_end:
                         if calendar_free['start'] < sheet_busy['start'] and (sheet_busy['start'] - calendar_free['start']) >= min_duration_delta:
                             next_candidate_ranges.append({'start': calendar_free['start'], 'end': sheet_busy['start']})
-                            # logging.debug(f"          -> Zachowano PRZED: {calendar_free['start']:%H:%M}-{sheet_busy['start']:%H:%M}")
-                        # Część po: [sheet_end, cal_end)
                         if calendar_free['end'] > sheet_busy['end'] and (calendar_free['end'] - sheet_busy['end']) >= min_duration_delta:
                             next_candidate_ranges.append({'start': sheet_busy['end'], 'end': calendar_free['end']})
-                            # logging.debug(f"          -> Zachowano PO: {sheet_busy['end']:%H:%M}-{calendar_free['end']:%H:%M}")
-                    else: # Brak nakładania
-                        # Zachowaj ten wolny zakres bez zmian
+                    else:
                         next_candidate_ranges.append(calendar_free)
-                # Zaktualizuj listę kandydatów na wolne sloty przed kolejnym filtrem z arkusza
                 candidate_ranges = sorted(next_candidate_ranges, key=lambda x: x['start'])
-
             filtered_calendar_free_ranges = candidate_ranges
             logging.debug(f"    Sloty dla '{cal_name}' PO filtracji arkuszem: {len(filtered_calendar_free_ranges)}")
-        else: # Brak rezerwacji w arkuszu dla tego kalendarza
+        else:
             filtered_calendar_free_ranges = raw_calendar_free_ranges_workhours
             logging.debug(f"    Brak rezerwacji w arkuszu '{MAIN_SHEET_NAME}' do filtrowania dla '{cal_name}'. Używam slotów po filtrze GCal/godzin.")
-
-        # Dodaj przefiltrowane wolne zakresy dla tego kalendarza do łącznej listy
         all_individually_filtered_free_ranges.extend(filtered_calendar_free_ranges)
-        # (Opcjonalne logowanie wynikowych slotów dla tego kalendarza)
-        # if filtered_calendar_free_ranges:
-        #     for i, s in enumerate(filtered_calendar_free_ranges[:3]): logging.debug(f"      Wynikowy slot dla {cal_name} {i+1}: {s['start']:%H:%M}-{s['end']:%H:%M}")
-        #     if len(filtered_calendar_free_ranges) > 3: logging.debug("      ...")
 
-
-    # --- Krok 3: Połącz wszystkie indywidualnie przefiltrowane wolne zakresy ---
     if not all_individually_filtered_free_ranges:
         logging.info("Brak wolnych zakresów w żadnym z wybranych kalendarzy po indywidualnej filtracji.")
         return []
-    # Sortuj wszystkie znalezione wolne zakresy (z różnych kalendarzy) po czasie rozpoczęcia
     sorted_filtered_free = sorted(all_individually_filtered_free_ranges, key=lambda x: x['start'])
     logging.debug(f"--- Łączenie {len(sorted_filtered_free)} indywidualnie przefiltrowanych wolnych slotów (Logika 'OR') ---")
 
-    # --- Krok 4: Scal połączone zakresy (Logika 'OR') ---
-    # Scal nakładające się lub stykające wolne zakresy z RÓŻNYCH kalendarzy
     merged_all_free_ranges = []
     if sorted_filtered_free:
-        # Zacznij od pierwszego zakresu
         current_merged_slot = sorted_filtered_free[0].copy()
-
         for next_slot in sorted_filtered_free[1:]:
-            # Jeśli następny slot zaczyna się przed końcem bieżącego scalonego slotu (lub dokładnie na końcu)
             if next_slot['start'] <= current_merged_slot['end']:
-                # Rozszerz koniec bieżącego scalonego slotu, jeśli następny kończy się później
                 current_merged_slot['end'] = max(current_merged_slot['end'], next_slot['end'])
             else:
-                # Jest przerwa, zakończ bieżący scalony slot i zacznij nowy
-                # Dodaj tylko jeśli jest wystarczająco długi
                 if (current_merged_slot['end'] - current_merged_slot['start']) >= min_duration_delta:
                      merged_all_free_ranges.append(current_merged_slot)
                 current_merged_slot = next_slot.copy()
-
-        # Dodaj ostatni scalony slot (jeśli jest wystarczająco długi)
         if (current_merged_slot['end'] - current_merged_slot['start']) >= min_duration_delta:
             merged_all_free_ranges.append(current_merged_slot)
-
     logging.debug(f"--- Scalone wolne zakresy ('OR') PRZED filtrem wyprzedzenia ({len(merged_all_free_ranges)}) ---")
-    # (Opcjonalne logowanie scalonych slotów)
-    # if merged_all_free_ranges:
-    #     for i, s in enumerate(merged_all_free_ranges[:5]): logging.debug(f"  Scalony Slot {i+1}: {s['start']:%H:%M}-{s['end']:%H:%M}")
-    #     if len(merged_all_free_ranges) > 5: logging.debug("  ...")
 
     # --- Krok 5: Zastosuj filtr MIN_BOOKING_LEAD_HOURS ---
     final_filtered_slots = []
     min_start_time = now + datetime.timedelta(hours=MIN_BOOKING_LEAD_HOURS)
-    logging.debug(f"Minimalny czas startu (filtr {MIN_BOOKING_LEAD_HOURS}h): {min_start_time:%Y-%m-%d %H:%M %Z}")
+    logging.info(f"[DEBUG SLOTS] get_free_time_ranges: 'now' is {now.strftime('%Y-%m-%d %H:%M:%S %Z')}, min_start_time (lead filter) is {min_start_time.strftime('%Y-%m-%d %H:%M:%S %Z')}, MIN_BOOKING_LEAD_HOURS is {MIN_BOOKING_LEAD_HOURS}")
 
     for slot in merged_all_free_ranges:
-        # Efektywny początek to późniejszy z: początku slotu LUB minimalnego czasu rezerwacji
-        effective_start = max(slot['start'], min_start_time)
-        # Koniec slotu pozostaje bez zmian
-        effective_end = slot['end']
+        original_slot_start = slot['start']
+        original_slot_end = slot['end']
 
-        # Dodaj slot tylko jeśli po zastosowaniu filtra wyprzedzenia nadal jest poprawny i wystarczająco długi
-        if effective_start < effective_end and (effective_end - effective_start) >= min_duration_delta:
-            final_filtered_slots.append({'start': effective_start, 'end': effective_end})
-            # if effective_start != slot['start']: # Loguj jeśli filtr wyprzedzenia zmienił start
-            #     logging.debug(f"  Zmodyfikowano start slotu {slot['start']:%H:%M}-{slot['end']:%H:%M} na {effective_start:%H:%M} (filtr {MIN_BOOKING_LEAD_HOURS}h)")
+        # Efektywny początek to późniejszy z: początku slotu LUB minimalnego czasu rezerwacji
+        effective_start_lead = max(slot['start'], min_start_time) # Zmieniono nazwę zmiennej
+        effective_end_lead = slot['end'] # Koniec slotu nie jest modyfikowany przez min_start_time
+
+        passes_filter = False
+        reason = ""
+
+        if effective_start_lead < effective_end_lead:
+            if (effective_end_lead - effective_start_lead) >= min_duration_delta:
+                final_filtered_slots.append({'start': effective_start_lead, 'end': effective_end_lead})
+                passes_filter = True
+            else:
+                reason = f"Too short after lead filter (duration: {(effective_end_lead - effective_start_lead).total_seconds()/60:.1f} min)"
+        else:
+            reason = f"Start ({effective_start_lead.strftime('%H:%M')}) not before end ({effective_end_lead.strftime('%H:%M')}) after lead filter"
+
+        # Loguj tylko sloty, które są odrzucane LUB te, które są z dzisiaj (dla lepszej widoczności)
+        if not passes_filter or (original_slot_start.date() == now.date() and passes_filter):
+            logging.info(
+                f"[DEBUG SLOTS] Slot Eval: Original [{original_slot_start.strftime('%Y-%m-%d %H:%M')}-{original_slot_end.strftime('%Y-%m-%d %H:%M')}] "
+                f"Effective after lead: [{effective_start_lead.strftime('%Y-%m-%d %H:%M')}-{effective_end_lead.strftime('%Y-%m-%d %H:%M')}] "
+                f"Passes Lead Filter: {passes_filter}. Reason (if failed): {reason}"
+            )
 
     logging.info(f"Znaleziono {len(final_filtered_slots)} ostatecznych wolnych zakresów (Logika 'OR', Filtr Arkusza Per Kalendarz, po wszystkich filtrach).")
-    # (Opcjonalne logowanie finalnych slotów)
-    # if final_filtered_slots:
-    #     for i, slot in enumerate(final_filtered_slots[:5]): logging.debug(f"  Finalny Slot {i+1}: {slot['start']:%Y-%m-%d %H:%M} - {slot['end']:%Y-%m-%d %H:%M}")
-    #     if len(final_filtered_slots) > 5: logging.debug("  ...")
+    if final_filtered_slots:
+        for i, s_debug in enumerate(final_filtered_slots[:5]): # Zmieniono nazwę zmiennej
+             logging.info(f"[DEBUG SLOTS] Final slot {i+1} for AI: {s_debug['start'].strftime('%Y-%m-%d %H:%M:%S %Z')} - {s_debug['end'].strftime('%Y-%m-%d %H:%M:%S %Z')}")
+        if len(final_filtered_slots) > 5:
+             logging.info("[DEBUG SLOTS] ... and possibly more.")
+    else:
+        logging.info("[DEBUG SLOTS] No final slots available after all filters.")
 
     return final_filtered_slots
 
