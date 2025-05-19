@@ -462,7 +462,7 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
         actual_user_psid = event_sender_id
         page_being_contacted_id = event_recipient_id
         print("====================")
-        logging.info(f"    (Wątek) [{actual_user_psid}] Inicjuję AI zbierające dane ucznia (trigger_gathering_ai_immediately=True).")
+        print(actual_user_psid)
         print("====================")
         page_config_for_event = PAGE_CONFIG.get(page_being_contacted_id)
 
