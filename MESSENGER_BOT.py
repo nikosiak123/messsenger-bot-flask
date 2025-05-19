@@ -427,6 +427,8 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
     Ta funkcja będzie uruchamiana w osobnym wątku.
     """
     try:
+        logging.info(f"(Wątek) RAW EVENT PAYLOAD: {json.dumps(event_payload)}") # DODANY LOG
+
         # --- KROK 1: Ostrożna identyfikacja ról i konfiguracji strony ---
         actual_user_psid = None
         page_config_for_event = None # Konfiguracja strony, z którą użytkownik rozmawia
@@ -466,6 +468,13 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
             # Jeśli strona, do której przyszła wiadomość, nie jest w naszej konfiguracji
             logging.error(f"!!! (Wątek) Otrzymano zdarzenie dla nieskonfigurowanej strony ID: {page_being_contacted_id} (Użytkownik PSID: {actual_user_psid}). Pomijam.")
             return
+
+        # DODATKOWE SPRAWDZENIE: Czy actual_user_psid to nie jest ID jednej z naszych stron?
+        # (Może być potrzebne, jeśli Facebook wysyła jakieś dziwne zdarzenia systemowe)
+        if actual_user_psid in PAGE_CONFIG:
+            logging.warning(f"!!! (Wątek) Potencjalny problem: actual_user_psid ('{actual_user_psid}') jest taki sam jak ID jednej ze skonfigurowanych stron. Strona kontaktu: {page_being_contacted_id}. Sprawdź log RAW EVENT PAYLOAD dla tego zdarzenia. Pomijam to zdarzenie dla bezpieczeństwa.")
+            # Zazwyczaj PSID użytkownika nie powinien być ID strony. Jeśli tak się dzieje, coś jest nie tak ze zdarzeniem.
+            return 
 
         # Od tego momentu używamy actual_user_psid i page_config_for_event
         current_page_token = page_config_for_event['token']
@@ -551,11 +560,14 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
             logging.debug(f"    (Wątek) Potwierdzenie dostarczenia wiadomości do użytkownika {actual_user_psid}.")
             return
         else:
-            logging.warning(f"    (Wątek) Nieobsługiwany typ zdarzenia dla PSID {actual_user_psid}: {json.dumps(event_payload)}")
+            # Jeśli to nie jest ani message, ani postback, ani read, ani delivery, a przeszło przez echo check
+            # to może być inne zdarzenie, które obecnie nie jest obsługiwane jawnie.
+            # Zaloguj je i zakończ, aby uniknąć nieoczekiwanego zachowania.
+            logging.warning(f"    (Wątek) Otrzymano nieobsługiwany typ zdarzenia (poza message/postback/read/delivery/echo) dla PSID {actual_user_psid}. Event: {json.dumps(event_payload)}")
             return
 
         if not action and not msg_result:
-            logging.debug(f"    (Wątek) [{actual_user_psid}] Brak akcji lub wiadomości do przetworzenia. Kończenie.")
+            logging.debug(f"    (Wątek) [{actual_user_psid}] Brak akcji lub wiadomości do przetworzenia po analizie typu zdarzenia. Kończenie.")
             return
 
         # --- Główna pętla logiki stanów ---
@@ -612,7 +624,7 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
                     ]
                     history_for_this_gemini_call = initial_prompt_for_general + history_for_gemini
                     ai_response_text_raw = _call_gemini(actual_user_psid, history_for_this_gemini_call, GENERATION_CONFIG_DEFAULT,
-                        f"General (Strona: {current_page_name})", current_page_token, user_message=user_message_text_for_ai) # Użyj actual_user_psid
+                        f"General (Strona: {current_page_name})", current_page_token, user_message=user_message_text_for_ai) 
                     if ai_response_text_raw:
                         model_resp_content = Content(role="model", parts=[Part.from_text(ai_response_text_raw)])
                         if RETURN_TO_PREVIOUS in ai_response_text_raw and was_temporary:
@@ -675,7 +687,7 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
                                 (now_cal_tz + datetime.timedelta(days=MAX_SEARCH_DAYS)).date(),
                                 datetime.time(WORK_END_HOUR, 0)
                             ))
-                            _simulate_typing(actual_user_psid, MAX_TYPING_DELAY_SECONDS * 0.7, current_page_token) # Użyj actual_user_psid
+                            _simulate_typing(actual_user_psid, MAX_TYPING_DELAY_SECONDS * 0.7, current_page_token) 
                             free_ranges = get_free_time_ranges(subject_calendars_config, search_start_dt, search_end_dt)
                             user_msg_for_ai = user_content.parts[0].text if user_content and user_content.parts else None
                             if slot_verification_failed:
@@ -683,7 +695,7 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
                                                   f"\n[Informacja systemowa: Poprzednio proponowany termin okazał się zajęty. Zaproponuj proszę inny termin dla przedmiotu {effective_subject_for_action}, biorąc pod uwagę preferencje użytkownika i dostępne zakresy.]"
                                 slot_verification_failed = False
                             ai_response_text_raw = get_gemini_scheduling_response(
-                                actual_user_psid, history_for_gemini, user_msg_for_ai, # Użyj actual_user_psid
+                                actual_user_psid, history_for_gemini, user_msg_for_ai, 
                                 free_ranges, effective_subject_for_action, current_page_token
                             )
                             if ai_response_text_raw:
@@ -707,7 +719,7 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
                                             proposed_start_dt = datetime.datetime.fromisoformat(extracted_iso)
                                             proposed_start_dt = proposed_start_dt.astimezone(tz_cal) if proposed_start_dt.tzinfo else tz_cal.localize(proposed_start_dt)
                                             proposed_slot_formatted = format_slot_for_user(proposed_start_dt)
-                                            _simulate_typing(actual_user_psid, MIN_TYPING_DELAY_SECONDS, current_page_token) # Użyj actual_user_psid
+                                            _simulate_typing(actual_user_psid, MIN_TYPING_DELAY_SECONDS, current_page_token) 
                                             chosen_calendar_id = None; chosen_calendar_name = None
                                             is_blocked_in_sheet = False
                                             slot_end_dt = proposed_start_dt + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
@@ -723,9 +735,9 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
                                                     if is_slot_actually_free(proposed_start_dt, cal_conf_iter['id']):
                                                         chosen_calendar_id, chosen_calendar_name = cal_conf_iter['id'], cal_conf_iter['name']; break
                                             if chosen_calendar_id and chosen_calendar_name:
-                                                write_ok, write_msg_or_row_idx = write_to_sheet_phase1(actual_user_psid, proposed_start_dt, chosen_calendar_name) # Użyj actual_user_psid
+                                                write_ok, write_msg_or_row_idx = write_to_sheet_phase1(actual_user_psid, proposed_start_dt, chosen_calendar_name) 
                                                 if write_ok:
-                                                    user_profile_fb = get_user_profile(actual_user_psid, current_page_token) # Użyj actual_user_psid
+                                                    user_profile_fb = get_user_profile(actual_user_psid, current_page_token) 
                                                     parent_fn = user_profile_fb.get('first_name', '') if user_profile_fb else ''
                                                     parent_ln = user_profile_fb.get('last_name', '') if user_profile_fb else ''
                                                     msg_result = (text_for_user if text_for_user else f"Świetnie, proponowany termin na {effective_subject_for_action} to {proposed_slot_formatted}.")
@@ -797,7 +809,7 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
                         user_msg_for_ai = None
                         trigger_gathering_ai_immediately = False
                     context_for_gathering_ai = context_data_to_save.copy()
-                    ai_response_text_raw = get_gemini_gathering_response(actual_user_psid, history_for_gemini, user_msg_for_ai, context_for_gathering_ai, current_page_token) # Użyj actual_user_psid
+                    ai_response_text_raw = get_gemini_gathering_response(actual_user_psid, history_for_gemini, user_msg_for_ai, context_for_gathering_ai, current_page_token) 
                     if ai_response_text_raw:
                         model_resp_content = Content(role="model", parts=[Part.from_text(ai_response_text_raw)])
                         if ai_response_text_raw.strip() == SWITCH_TO_GENERAL:
@@ -838,7 +850,7 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
                             sheet_row_idx_for_update = context_data_to_save.get('sheet_row_index')
                             valid_sheet_row_idx = sheet_row_idx_for_update if isinstance(sheet_row_idx_for_update, int) and sheet_row_idx_for_update >=2 else None
                             logging.info(f"    (Wątek) [{actual_user_psid}] Faza 2 - Arkusz: Przekazywany sheet_row_index: {valid_sheet_row_idx} (oryginalny: {sheet_row_idx_for_update})")
-                            update_ok, update_message = find_row_and_update_sheet(actual_user_psid, None, parsed_student_data, valid_sheet_row_idx) # Użyj actual_user_psid
+                            update_ok, update_message = find_row_and_update_sheet(actual_user_psid, None, parsed_student_data, valid_sheet_row_idx) 
                             if not update_ok: logging.error(f"    (Wątek) [{actual_user_psid}] Błąd Fazy 2 w arkuszu: {update_message}")
                             next_state = STATE_GENERAL
                             context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
@@ -879,7 +891,7 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
                 final_context_to_save_dict.pop('return_to_context', None)
 
         if msg_result:
-            send_message(actual_user_psid, msg_result, current_page_token) # Użyj actual_user_psid
+            send_message(actual_user_psid, msg_result, current_page_token) 
         elif current_action_in_loop and not action:
             logging.debug(f"    (Wątek) [{actual_user_psid}] Ostatnia akcja '{current_action_in_loop}' zakończona bez bezpośredniej wiadomości do wysłania.")
 
@@ -894,7 +906,7 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
             if model_resp_content: history_to_save_final.append(model_resp_content)
             history_to_save_final = history_to_save_final[-(MAX_HISTORY_TURNS * 2):]
             logging.info(f"    (Wątek) [{actual_user_psid}] Zapisywanie historii ({len(history_to_save_final)} wiad.). Stan: {final_context_to_save_dict.get('type')}, Przedmiot: {final_context_to_save_dict.get('required_subject')}")
-            save_history(actual_user_psid, history_to_save_final, context_to_save=final_context_to_save_dict) # Użyj actual_user_psid
+            save_history(actual_user_psid, history_to_save_final, context_to_save=final_context_to_save_dict) 
         else:
             logging.debug(f"    (Wątek) [{actual_user_psid}] Brak zmian w historii lub kontekście - pomijanie zapisu.")
 
