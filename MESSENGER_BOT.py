@@ -434,7 +434,7 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
 
         # --- KROK 1: Ostrożna identyfikacja ról i konfiguracji strony ---
         actual_user_psid = None
-        page_config_for_event = None # Konfiguracja strony, z którą użytkownik rozmawia
+        page_config_for_event = None 
 
         event_sender_id = event_payload.get("sender", {}).get("id")
         event_recipient_id = event_payload.get("recipient", {}).get("id")
@@ -465,7 +465,7 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
             return 
 
         current_page_token = page_config_for_event['token']
-        current_subject = page_config_for_event.get('subject', "nieznany przedmiot") # Bezpieczne pobieranie
+        current_subject = page_config_for_event.get('subject', "nieznany przedmiot") 
         current_page_name = page_config_for_event['name']
 
         logging.info(f"--- (Wątek) Przetwarzanie zdarzenia dla Strony: '{current_page_name}' ({page_being_contacted_id}) | Przedmiot Główny Strony: {current_subject} | User PSID: {actual_user_psid} ---")
@@ -474,7 +474,6 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
             logging.error(f"!!! KRYTYCZNY BŁĄD (Wątek): Brak lub nieprawidłowy token dostępu dla strony '{current_page_name}' ({page_being_contacted_id}).")
             return
 
-        # --- KROK 2: Ładowanie historii i kontekstu ---
         history, context, is_new_contact = load_history(actual_user_psid)
         history_for_gemini = [h for h in history if isinstance(h, Content) and h.role in ('user', 'model')]
         current_state = context.get('type', STATE_GENERAL)
@@ -484,7 +483,6 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
             log_statistic("new_contact")
 
         logging.info(f"    (Wątek) [{actual_user_psid}] Aktualny stan: {current_state}")
-        logging.debug(f"    (Wątek) [{actual_user_psid}] Kontekst wejściowy (klucze): {list(context.keys())}")
 
         action = None
         msg_result = None
@@ -500,10 +498,8 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
         if context_data_to_save.get('required_subject') != current_subject or 'required_subject' not in context_data_to_save:
             if current_state == STATE_GENERAL or context_data_to_save.get('_just_reset', False):
                 context_data_to_save['required_subject'] = current_subject
-                logging.debug(f"    (Wątek) [{actual_user_psid}] Ustawiono/zaktualizowano 'required_subject' w kontekście na domyślny przedmiot strony: {current_subject}")
             elif 'required_subject' not in context_data_to_save or not context_data_to_save.get('required_subject'):
                  context_data_to_save['required_subject'] = current_subject 
-                 logging.warning(f"    (Wątek) [{actual_user_psid}] 'required_subject' był pusty w stanie {current_state}. Ustawiono na domyślny przedmiot strony: {current_subject}.")
 
         trigger_gathering_ai_immediately = False
         slot_verification_failed = False 
@@ -513,7 +509,6 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
             user_input_text = message_data.get("text", "").strip()
             if user_input_text:
                 user_content = Content(role="user", parts=[Part.from_text(user_input_text)])
-                logging.info(f"    (Wątek) [{actual_user_psid}] Odebrano wiadomość (stan={current_state}): '{user_input_text[:100]}{'...' if len(user_input_text)>100 else ''}'")
                 if ENABLE_TYPING_DELAY: time.sleep(MIN_TYPING_DELAY_SECONDS * 0.3)
                 if current_state == STATE_SCHEDULING_ACTIVE: action = 'handle_scheduling'
                 elif current_state == STATE_GATHERING_INFO: action = 'handle_gathering'
@@ -525,14 +520,12 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
                 action = 'send_info' 
                 next_state = current_state 
             else:
-                logging.info(f"      (Wątek) [{actual_user_psid}] Odebrano pustą wiadomość lub nieobsługiwany typ komunikatu. Kończenie.")
                 return 
         elif postback := event_payload.get("postback"):
             payload = postback.get("payload")
             title = postback.get("title", "")
             user_input_text = f"Kliknięto: '{title}' (Payload: {payload})" 
             user_content = Content(role="user", parts=[Part.from_text(user_input_text)])
-            logging.info(f"    (Wątek) [{actual_user_psid}] Odebrano postback: Payload='{payload}', Tytuł='{title}' (stan={current_state})")
             if payload == "CANCEL_SCHEDULING":
                 msg_result = "Proces umawiania został anulowany."
                 action = 'send_info'
@@ -541,19 +534,11 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
             elif current_state == STATE_SCHEDULING_ACTIVE: action = 'handle_scheduling'
             elif current_state == STATE_GATHERING_INFO: action = 'handle_gathering'
             else: action = 'handle_general'
-        elif event_payload.get("read"):
-            logging.debug(f"    (Wątek) Potwierdzenie odczytania wiadomości przez użytkownika {actual_user_psid}.")
-            return
-        elif event_payload.get("delivery"):
-            logging.debug(f"    (Wątek) Potwierdzenie dostarczenia wiadomości do użytkownika {actual_user_psid}.")
-            return
-        else:
-            logging.warning(f"    (Wątek) Otrzymano nieobsługiwany typ zdarzenia dla PSID {actual_user_psid}. Event: {json.dumps(event_payload)}")
-            return
+        elif event_payload.get("read"): return
+        elif event_payload.get("delivery"): return
+        else: return
 
-        if not action and not msg_result: 
-            logging.debug(f"    (Wątek) [{actual_user_psid}] Brak akcji lub wiadomości do przetworzenia po analizie typu zdarzenia. Kończenie.")
-            return
+        if not action and not msg_result: return
 
         loop_guard = 0
         max_loops = 3
@@ -573,40 +558,22 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
                 user_message_text_for_ai = user_content.parts[0].text if user_content and user_content.parts else None
                 
                 if is_initial_general_entry and not user_message_text_for_ai: 
-                    logging.debug(f"    (Wątek) [{actual_user_psid}] Generowanie wiadomości powitalnej. Bieżący przedmiot strony: '{current_subject}'")
+                    # --- GENEROWANIE WIADOMOŚCI POWITALNEJ ---
+                    # Używamy ALL_SUBJECT_LINKS, tak jak w oryginalnej (STAREJ) wersji,
+                    # zakładając, że ALL_SUBJECT_LINKS jest poprawnie zdefiniowane globalnie.
                     other_subjects_links_parts = []
-                    
-                    if not PAGE_CONFIG:
-                        logging.warning(f"    (Wątek) [{actual_user_psid}] PAGE_CONFIG jest pusty! Nie można wygenerować linków.")
-                    
-                    for page_id_iter, page_data_entry in PAGE_CONFIG.items(): 
-                        subj_name = page_data_entry.get("subject")
-                        subj_link = page_data_entry.get("link")
-                        page_entry_name_for_log = page_data_entry.get("name", f"ID: {page_id_iter}")
-
-                        logging.debug(f"      Iteracja PAGE_CONFIG dla '{page_entry_name_for_log}': Przedmiot='{subj_name}', Link='{subj_link}'")
-
-                        if subj_name and subj_link:
-                            if current_subject and subj_name.lower() != current_subject.lower(): # Upewnij się, że current_subject nie jest None
-                                other_subjects_links_parts.append(f"- {subj_name}: {subj_link}")
-                                logging.debug(f"        Dodano link: - {subj_name}: {subj_link}")
-                            elif not current_subject: # Jeśli current_subject jest None, to nie ma z czym porównywać, więc dodaj link
-                                other_subjects_links_parts.append(f"- {subj_name}: {subj_link}")
-                                logging.warning(f"        Dodano link (current_subject był pusty/None, więc nie można porównać): - {subj_name}: {subj_link}")
-                            # else: # current_subject istnieje i jest taki sam jak subj_name - nie rób nic (nie dodawaj)
-                        else:
-                            logging.warning(f"        Pominięto wpis dla '{page_entry_name_for_log}' z PAGE_CONFIG - brak 'subject' lub 'link'.")
+                    for subj, link in ALL_SUBJECT_LINKS.items():
+                        if current_subject and subj.lower() != current_subject.lower():
+                            other_subjects_links_parts.append(f"- {subj}: {link}")
+                        elif not current_subject: # Na wszelki wypadek, gdyby current_subject był None
+                            other_subjects_links_parts.append(f"- {subj}: {link}")
                     
                     links_text_for_user = ""
                     if other_subjects_links_parts:
                         links_text_for_user = "\n\nUdzielamy również korepetycji z:\n" + "\n".join(other_subjects_links_parts)
-                        logging.debug(f"    (Wątek) [{actual_user_psid}] Sformatowany tekst linków: {links_text_for_user}")
-                    else:
-                        logging.debug(f"    (Wątek) [{actual_user_psid}] Brak linków do innych przedmiotów do wyświetlenia.")
 
                     display_subject = current_subject if current_subject else "korepetycji"
                     msg_result = f"Dzień dobry! Dziękujemy za kontakt w sprawie korepetycji z przedmiotu **{display_subject}**. W czym mogę pomóc? Jeśli chcą Państwo umówić termin, proszę dać znać, a ja sprawdzę dostępne opcje." + links_text_for_user
-                    logging.info(f"    (Wątek) [{actual_user_psid}] Wiadomość powitalna wygenerowana: '{msg_result[:200]}...'")
                     
                     model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
                     next_state = STATE_GENERAL
@@ -615,16 +582,19 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
                 elif user_message_text_for_ai: 
                     was_temporary = 'return_to_state' in context 
                     
-                    # Wywołanie get_gemini_general_response - upewnij się, że ta funkcja poprawnie
-                    # używa/formatuje SYSTEM_INSTRUCTION_GENERAL z linkami
-                    # (zgodnie z jednym z dwóch podejść, które omawialiśmy)
+                    # WAŻNE: Upewnij się, że funkcja get_gemini_general_response
+                    # używa globalnej SYSTEM_INSTRUCTION_GENERAL, która jest już
+                    # sformatowana przy starcie programu (z placeholderem dla current_subject_from_page)
+                    # i że get_gemini_general_response podmienia ten placeholder.
+                    # To jest zgodne z "prostszym podejściem" z naszej poprzedniej dyskusji.
                     ai_response_text_raw = get_gemini_general_response(
                         actual_user_psid, 
                         user_message_text_for_ai, 
                         history_for_gemini,
                         is_temporary_general_state, 
                         current_page_token,
-                        current_subject_for_context=current_subject # Przekazujemy przedmiot bieżącej strony
+                        current_subject=current_subject # Przekazujemy przedmiot bieżącej strony
+                                                        # get_gemini_general_response musi go użyć do podmiany placeholdera
                     )
                     
                     if ai_response_text_raw:
