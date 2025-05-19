@@ -2711,7 +2711,7 @@ def get_gemini_gathering_response(user_psid, history_for_gathering_ai, current_u
     # Zbuduj prompt
     initial_prompt = [
         Content(role="user", parts=[Part.from_text(system_instruction)]),
-        Content(role="model", parts=[Part.from_text(f"Rozumiem. Sprawdzę znane dane ucznia (Imię: {student_first_name or 'brak'}, Nazwisko: {student_last_name or 'brak'}, Klasa: {grade or 'brak'}, Poziom: {level or 'brak'}). Zapytam o brakujące. Zignoruję dane rodzica. Po zebraniu wszystkich danych zwrócę format ZEBRANE_DANE_UCZNIA i znacznik {INFO_GATHERED_MARKER}. Jeśli użytkownik zapyta o coś innego, zwrócę {SWITCH_TO_GENERAL}.")])
+        Content(role="model", parts=[Part.from_text(f"OK.")])
     ]
     full_prompt = initial_prompt + history_for_gathering_ai
     if current_user_message_text:
