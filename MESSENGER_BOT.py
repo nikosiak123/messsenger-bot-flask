@@ -2671,6 +2671,10 @@ SYSTEM_INSTRUCTION_GENERAL = """Jesteś przyjaznym, proaktywnym i profesjonalnym
     return_marker=RETURN_TO_PREVIOUS
 )
 
+print("--- Wartość SYSTEM_INSTRUCTION_GENERAL po globalnym formacie ---")
+print(SYSTEM_INSTRUCTION_GENERAL)
+print("----------------------------------------------------------------")
+
 # --- Funkcja AI: Planowanie terminu ---
 # Zmodyfikowana, aby przyjmować page_access_token
 def get_gemini_scheduling_response(user_psid, history_for_scheduling_ai, current_user_message_text, available_ranges, required_subject, page_access_token):
