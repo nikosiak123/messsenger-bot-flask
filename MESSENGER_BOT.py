@@ -2809,56 +2809,119 @@ def get_gemini_gathering_response(user_psid, history_for_gathering_ai, current_u
 
 # --- Funkcja AI: Ogólna rozmowa ---
 # Zmodyfikowana, aby przyjmować page_access_token
-def get_gemini_general_response(user_psid, current_user_message_text, history_for_general_ai, is_temporary_general_state, page_access_token, current_subject=None):
+def get_gemini_general_response(user_psid, current_user_message_text, history_for_general_ai, is_temporary_general_state, page_access_token, current_subject_from_page_context=None):
     """Prowadzi ogólną rozmowę z AI."""
     if not gemini_model:
         logging.error(f"!!! [{user_psid}] Model Gemini niedostępny (General)!")
         return None
 
-    # Użyj predefiniowanej instrukcji (już sformatowanej z listą przedmiotów)
-    system_instruction = SYSTEM_INSTRUCTION_GENERAL
-    model_ack_base = "Rozumiem. Będę asystentem klienta."
-    if current_subject:
-         model_ack_base += f" Przedmiot '{current_subject}' jest już znany. Przejdę do pytania o klasę/szkołę."
+    # Przygotuj tekst z informacjami o linkach dla AI
+    # Ta lista powinna zawierać linki do WSZYSTKICH przedmiotów.
+    # AI samo zdecyduje, których użyć (i pominąć bieżący) na podstawie instrukcji.
+    link_data_for_ai_parts = []
+    if PAGE_CONFIG:
+        for page_id, page_data in PAGE_CONFIG.items(): # Iterujemy przez słownik PAGE_CONFIG
+            subj_name = page_data.get("subject")
+            subj_link = page_data.get("link")
+            if subj_name and subj_link:
+                # Formatuj jako "Strona dla 'Przedmiot': Link"
+                link_data_for_ai_parts.append(f"Strona dla '{subj_name}': {subj_link}")
+    
+    link_info_text_for_prompt = ""
+    if link_data_for_ai_parts:
+        link_info_text_for_prompt = "**Informacje o stronach i linkach do poszczególnych przedmiotów:**\n" + "\n".join(link_data_for_ai_parts)
+        logging.debug(f"[{user_psid}] Przygotowano link_info_text_for_prompt dla AI (General):\n{link_info_text_for_prompt}")
     else:
-        model_ack_base += f" Najpierw ustalę przedmiot ({', '.join(AVAILABLE_SUBJECTS)})."
+        link_info_text_for_prompt = "**Informacje o stronach i linkach do poszczególnych przedmiotów:** Brak dostępnych danych."
+        logging.warning(f"[{user_psid}] link_data_for_ai_parts jest pusta. AI (General) otrzyma informację o braku danych o linkach.")
+
+    # Dynamiczne formatowanie instrukcji systemowej
+    # SYSTEM_INSTRUCTION_GENERAL jest już częściowo sformatowany przy starcie (np. available_subjects_list)
+    # Tutaj wstawiamy tylko te części, które zmieniają się dynamicznie per wywołanie.
+    try:
+        system_instruction_formatted_dynamically = SYSTEM_INSTRUCTION_GENERAL.format(
+            dynamic_subject_link_info=link_info_text_for_prompt,
+            current_subject_from_page=(current_subject_from_page_context 
+                                       if current_subject_from_page_context 
+                                       else "nieokreślonego przedmiotu")
+            # Inne placeholdery jak available_subjects_list, intent_marker, return_marker
+            # powinny być już wstawione w globalnie zdefiniowanym SYSTEM_INSTRUCTION_GENERAL
+        )
+    except KeyError as e:
+        logging.error(f"!!! [{user_psid}] Błąd dynamicznego formatowania SYSTEM_INSTRUCTION_GENERAL: Brak klucza {e}. Sprawdź, czy wszystkie placeholdery są obsługiwane.")
+        return "Przepraszam, wystąpił błąd konfiguracji asystenta."
+    except Exception as format_err:
+        logging.error(f"!!! [{user_psid}] Inny błąd formatowania SYSTEM_INSTRUCTION_GENERAL: {format_err}", exc_info=True)
+        return "Przepraszam, wystąpił wewnętrzny błąd konfiguracji asystenta."
+
+    # Przygotowanie potwierdzenia od modelu (model_ack)
+    model_ack_base = "Rozumiem. Będę asystentem klienta."
+    if current_subject_from_page_context:
+        model_ack_base += f" Przedmiot '{current_subject_from_page_context}' jest już znany. Przejdę do pytania o klasę/szkołę."
+    else:
+        # Lista przedmiotów (AVAILABLE_SUBJECTS) jest już wstawiona do system_instruction_formatted_dynamically
+        # poprzez placeholder {available_subjects_list} w globalnej definicji SYSTEM_INSTRUCTION_GENERAL.
+        model_ack_base += f" Najpierw ustalę przedmiot." 
+    
+    model_ack_base += f" Wykorzystam dostarczone informacje o linkach do stron, aby odpowiednio informować użytkownika."
     model_ack = model_ack_base + f" Po zebraniu danych i potwierdzeniu zainteresowania, zwrócę {INTENT_SCHEDULE_MARKER}."
 
     if is_temporary_general_state:
-        model_ack += f" Będąc w trybie tymczasowym, po odpowiedzi na pytanie ogólne, jeśli user nie pyta dalej, dodam {RETURN_TO_PREVIOUS}."
+        model_ack += f" Będąc w trybie tymczasowym, po odpowiedzi na pytanie ogólne, jeśli użytkownik nie pyta dalej, dodam {RETURN_TO_PREVIOUS}."
 
-    # Zbuduj prompt
+    # Zbuduj prompt dla AI
     initial_prompt = [
-        Content(role="user", parts=[Part.from_text(system_instruction)]),
+        Content(role="user", parts=[Part.from_text(system_instruction_formatted_dynamically)]),
         Content(role="model", parts=[Part.from_text(model_ack)])
     ]
+    
     full_prompt = initial_prompt + history_for_general_ai
     if current_user_message_text:
-        full_prompt.append(Content(role="user", parts=[Part.from_text(current_user_message_text)]))
+        # Upewnij się, że current_user_message_text jest stringiem
+        if not isinstance(current_user_message_text, str):
+            logging.warning(f"[{user_psid}] Wiadomość użytkownika nie jest stringiem (typ: {type(current_user_message_text)}), konwertuję na string.")
+            current_user_message_text = str(current_user_message_text)
+        
+        # Dodaj tylko jeśli wiadomość nie jest pusta po usunięciu białych znaków
+        if current_user_message_text.strip():
+            full_prompt.append(Content(role="user", parts=[Part.from_text(current_user_message_text.strip())]))
+        else:
+            logging.debug(f"[{user_psid}] Pusta wiadomość użytkownika po strip(), nie dodaję do promptu AI (General).")
 
-    # Ogranicz historię
-    max_prompt_messages = (MAX_HISTORY_TURNS * 2) + 2
+
+    # Ograniczanie długości historii promptu
+    # Usuwaj najstarsze pary user/model, zachowując instrukcję systemową (indeksy 0) i potwierdzenie modelu (indeks 1)
+    max_prompt_messages = (MAX_HISTORY_TURNS * 2) + 2 # +2 dla system_instruction i model_ack
     while len(full_prompt) > max_prompt_messages:
-         if len(full_prompt) > 3:
-             full_prompt.pop(2)
-             if len(full_prompt) > 2:
-                 full_prompt.pop(2)
-         else:
-             break
+        if len(full_prompt) > 3: # Muszą być co najmniej 4 elementy (system, model, user, model) do usunięcia pary
+             full_prompt.pop(2) # Usuń najstarszą wiadomość użytkownika (po system i model_ack)
+             if len(full_prompt) > 2: # Sprawdź ponownie, czy jest co usuwać (odpowiedź modelu)
+                 full_prompt.pop(2) # Usuń najstarszą odpowiedź modelu
+        else:
+             break # Zabezpieczenie
 
-    # Wywołaj Gemini, przekazując token strony
-    response_text = _call_gemini(user_psid, full_prompt, GENERATION_CONFIG_DEFAULT, "General Conversation", page_access_token)
+    # Wywołaj Gemini
+    response_text = _call_gemini(
+        user_psid, 
+        full_prompt, # Przekaż pełny prompt
+        GENERATION_CONFIG_DEFAULT, 
+        "General Conversation", 
+        page_access_token
+        # user_message=None, bo current_user_message_text został już dodany do full_prompt
+    )
 
     # Przetwarzanie odpowiedzi
     if response_text:
-        # Oczyść z potencjalnych innych znaczników
+        # Oczyść odpowiedź z potencjalnych innych znaczników, które nie powinny tu być
         response_text = re.sub(rf"{re.escape(SLOT_ISO_MARKER_PREFIX)}.*?{re.escape(SLOT_ISO_MARKER_SUFFIX)}", "", response_text).strip()
         response_text = response_text.replace(INFO_GATHERED_MARKER, "").strip()
         response_text = response_text.replace(SWITCH_TO_GENERAL, "").strip() # SWITCH_TO_GENERAL nie powinien tu być, ale na wszelki wypadek
+        # INTENT_SCHEDULE_MARKER i RETURN_TO_PREVIOUS są oczekiwane i obsługiwane przez logikę wywołującą
         return response_text
     else:
-        logging.error(f"!!! [{user_psid}] Nie uzyskano poprawnej odpowiedzi od Gemini (General).")
-        return None
+        logging.error(f"!!! [{user_psid}] Nie uzyskano poprawnej odpowiedzi od Gemini (General). _call_gemini zwróciło None lub pusty string.")
+        # Możesz zwrócić domyślną wiadomość o błędzie lub None, aby obsłużyć to wyżej
+        return "Przepraszam, mam chwilowy problem z przetworzeniem Twojej prośby. Spróbuj ponownie za moment."
 
 
 # =====================================================================
