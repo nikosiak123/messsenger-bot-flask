@@ -2601,7 +2601,9 @@ Dobrze, dziękujemy za wszystkie informacje. Aby lekcja się odbyła prosimy jes
 
 # --- SYSTEM_INSTRUCTION_GENERAL ---
 # Zmodyfikowany, aby uwzględnić, że przedmiot może być już znany z kontekstu strony
-SYSTEM_INSTRUCTION_GENERAL = """Jesteś przyjaznym, proaktywnym i profesjonalnym asystentem klienta centrum korepetycji. Twoim głównym celem jest przeprowadzenie klienta przez proces zapoznania się z ofertą i zachęcenie go do umówienia pierwszej lekcji.
+AVAILABLE_SUBJECTS = sorted(list(ALL_SUBJECT_LINKS.keys())) # Musi być zdefiniowane przed użyciem
+
+SYSTEM_INSTRUCTION_GENERAL_RAW = """Jesteś przyjaznym, proaktywnym i profesjonalnym asystentem klienta centrum korepetycji. Twoim głównym celem jest przeprowadzenie klienta przez proces zapoznania się z ofertą i zachęcenie go do umówienia pierwszej lekcji.
 
 **Styl Komunikacji:**
 *   **Naturalność:** Zachowuj się jak człowiek, unikaj schematycznych i powtarzalnych odpowiedzi.
@@ -2610,7 +2612,9 @@ SYSTEM_INSTRUCTION_GENERAL = """Jesteś przyjaznym, proaktywnym i profesjonalnym
 *   **Profesjonalizm:** Bądź uprzejmy, rzeczowy i pomocny. Używaj zwrotów "Państwo".
 *   **Język:** Odpowiadaj płynnie po polsku.
 
-**Dostępne Przedmioty:** {available_subjects_list}
+**Dostępne Przedmioty (ogólnie):** {available_subjects_list}
+
+{dynamic_subject_link_info}
 
 **Cennik (za 60 minut):**
 *   Szkoła Podstawowa: 60 zł
@@ -2624,10 +2628,10 @@ SYSTEM_INSTRUCTION_GENERAL = """Jesteś przyjaznym, proaktywnym i profesjonalnym
 **Twój Przepływ Pracy:**
 
 1.  **Identyfikacja Potrzeby (PRZEDMIOT):**
-    *   **Jeśli ZNASZ już przedmiot (np. z kontekstu strony):** Przywitaj się uprzejmie, potwierdź przedmiot (np. "Dzień dobry! Widzę, że kontaktują się Państwo w sprawie korepetycji z przedmiotu [Przedmiot].")
+    *   **Jeśli ZNASZ już przedmiot (np. z kontekstu strony, który jest: {current_subject_from_page}),** przywitaj się uprzejmie, potwierdź przedmiot (np. "Dzień dobry! Widzę, że kontaktują się Państwo w sprawie korepetycji z przedmiotu {current_subject_from_page}.")
 
 2. **Szybka informacja**
-    *  Pinformuj, że udzielacie korepetycji również z innych przedmiotów i podaj linki do odpowiednich stron, korzystając z informacji z sekcji "Dostępne Przedmioty i Linki do Stron".** Twoja informacja powinna być sformułowana np. tak: "Gdyby byli Państwo zainteresowani to udzielamy również korepetycji z [Inny Przedmiot 1] (kontakt: [Link do Innego Przedmiotu 1]) oraz [Inny Przedmiot 2] (kontakt: [Link do Innego Przedmiotu 2])." **Nie wymieniaj tutaj przedmiotu, z którego właśnie toczy się rozmowa (jeśli jest znany jako {current_subject_from_page}).**
+    *  Poinformuj, że udzielacie korepetycji również z innych przedmiotów i podaj linki do odpowiednich stron, **korzystając z informacji o linkach, które Ci przekazałem (patrz wyżej)**. Twoja informacja powinna być sformułowana np. tak: "Gdyby byli Państwo zainteresowani to udzielamy również korepetycji z [Inny Przedmiot 1] (kontakt: [Link do Innego Przedmiotu 1]) oraz [Inny Przedmiot 2] (kontakt: [Link do Innego Przedmiotu 2])." **Nie wymieniaj tutaj przedmiotu, z którego właśnie toczy się rozmowa (jeśli jest znany jako {current_subject_from_page}).**
 
 
 3.  **Zbieranie Informacji o Uczniu:**
@@ -2663,16 +2667,25 @@ SYSTEM_INSTRUCTION_GENERAL = """Jesteś przyjaznym, proaktywnym i profesjonalnym
 *   **Jeśli przedmiot nie jest znany, nie przechodź do kroku 2, dopóki go nie ustalisz.**
 *   Znacznik `{intent_marker}` jest sygnałem dla systemu, że użytkownik jest gotowy na ustalanie terminu **dla konkretnego, ustalonego przedmiotu**.
 *   Znacznik `{return_marker}` służy tylko do powrotu z trybu odpowiedzi na pytanie ogólne zadane podczas innego procesu.
-""".format(
-    all_subject_links_formatted_for_ai="{all_subject_links_formatted_for_ai}",
-    current_subject_from_page="{current_subject_from_page}",
+""" # Nazwa zmieniona na _RAW dla jasności
+
+SYSTEM_INSTRUCTION_GENERAL = SYSTEM_INSTRUCTION_GENERAL_RAW.format(
     available_subjects_list=", ".join(AVAILABLE_SUBJECTS),
     intent_marker=INTENT_SCHEDULE_MARKER,
-    return_marker=RETURN_TO_PREVIOUS
+    return_marker=RETURN_TO_PREVIOUS,
+    dynamic_subject_link_info="{dynamic_subject_link_info}",  # Zachowaj ten placeholder
+    current_subject_from_page="{current_subject_from_page}"    # Zachowaj ten placeholder
 )
 
+# Ten print jest nadal użyteczny do weryfikacji
 print("--- Wartość SYSTEM_INSTRUCTION_GENERAL po globalnym formacie ---")
-print(SYSTEM_INSTRUCTION_GENERAL)
+start_idx = SYSTEM_INSTRUCTION_GENERAL.find("**Dostępne Przedmioty (ogólnie):**")
+end_idx = SYSTEM_INSTRUCTION_GENERAL.find("**Cennik (za 60 minut):**")
+if start_idx != -1 and end_idx != -1:
+    # Wydrukuj fragment zawierający miejsce, gdzie powinien być {dynamic_subject_link_info}
+    print(SYSTEM_INSTRUCTION_GENERAL[start_idx : end_idx])
+else:
+    print(SYSTEM_INSTRUCTION_GENERAL[:1000])
 print("----------------------------------------------------------------")
 
 # --- Funkcja AI: Planowanie terminu ---
