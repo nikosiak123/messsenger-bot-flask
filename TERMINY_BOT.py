@@ -329,7 +329,7 @@ def process_message(user_psid, message_text):
         json.dump(historia_konwersacji[-20:], f, indent=2)
 
 # --- WEBHOOK MESSENGERA ---
-@app.route('/webhook', methods=['GET', 'POST'])
+@app.route('/webhook2', methods=['GET', 'POST'])
 def webhook():
     if request.method == 'GET':
         token_sent = request.args.get("hub.verify_token")
