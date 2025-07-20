@@ -3,6 +3,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from flask import Flask, request
+from pyairtable import Api
 import json
 import os
 import random
@@ -23,9 +24,14 @@ except locale.Error:
 # --- KONFIGURACJA ---
 API_KEY = "AIzaSyCJGoODg04hUZ3PpKf5tb7NoIMtT9G9K9I"
 
-# --- KONFIGURACJA MESSENGERA ---
+# --- KONFIGURACJA MESSENGERA (zgodnie z prośbą) ---
 FB_PAGE_ACCESS_TOKEN = os.environ.get("FB_PAGE_ACCESS_TOKEN", "EAAKusF6JViEBPNJiRftrqPmOy6CoZAWZBw3ZBEWl8dd7LtinSSF85JeKYXA3ZB7xlvFG6e5txU1i8RUEiskmZCXXyuIH4x4B4j4zBrOXm0AQyskcKBUaMVgS2o3AMZA2FWF0PNTuusd6nbxGPzGZAWyGoPP9rjDl1COwLk1YhTOsG7eaXa6FIxnXQaGFdB9oh7gdADaq7e4aQZDZD")
 VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "KOLAGEN")
+
+# --- KONFIGURACJA AIRTABLE ---
+AIRTABLE_API_KEY = os.environ.get("AIRTABLE_API_KEY", "patcSdupvwJebjFDo.7e15a93930d15261989844687bcb15ac5c08c84a29920c7646760bc6f416146d")
+AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID", "appTjrMTVhYBZDPw9")
+AIRTABLE_BOOKINGS_TABLE_NAME = "Rezerwacje"
 
 # --- KONFIGURACJA KALENDARZA GOOGLE ---
 GOOGLE_CALENDAR_ID = '2d32166ec3d5e2387c4c411e2bbdb85c702f3b5b85955d1ae18c3bee76c7d8b8@group.calendar.google.com' 
@@ -44,54 +50,69 @@ BREAK_BUFFER_MINUTES = 10
 HELD_SLOTS = {} 
 HOLD_DURATION_HOURS = 24
 HISTORY_DIR = "conversation_history"
+GRAY_COLOR_ID = "8" 
 
 # --- Inicjalizacja API ---
 try:
     genai.configure(api_key=API_KEY)
+    airtable_api = Api(AIRTABLE_API_KEY)
+    print("--- Połączono z Airtable API. ---")
 except Exception as e:
-    print(f"Błąd konfiguracji API Gemini: {e}")
+    print(f"Błąd konfiguracji API: {e}")
     exit()
 
-# --- Inicjalizacja Aplikacji Webowej ---
 app = Flask(__name__)
 
 # --- FUNKCJE POMOCNICZE ---
 
 def send_message(recipient_psid, message_text):
-    """Wysyła wiadomość tekstową do użytkownika na Messengerze."""
     print(f"Wysyłanie do {recipient_psid}: '{message_text[:100]}...'")
     params = {"access_token": FB_PAGE_ACCESS_TOKEN}
     headers = {"Content-Type": "application/json"}
-    # Dzielimy wiadomość na fragmenty, jeśli jest za długa
     chunks = [message_text[i:i + 2000] for i in range(0, len(message_text), 2000)]
-    
     for chunk in chunks:
-        data = json.dumps({
-            "recipient": {"id": recipient_psid},
-            "message": {"text": chunk},
-            "messaging_type": "RESPONSE"
-        })
+        data = json.dumps({"recipient": {"id": recipient_psid}, "message": {"text": chunk}, "messaging_type": "RESPONSE"})
         try:
             r = requests.post("https://graph.facebook.com/v19.0/me/messages", params=params, headers=headers, data=data)
             if r.status_code != 200:
                 print(f"BŁĄD: Nie udało się wysłać wiadomości. Status: {r.status_code}, Odpowiedź: {r.text}")
         except Exception as e:
             print(f"BŁĄD: Wyjątek podczas wysyłania wiadomości: {e}")
-        time.sleep(1) # Mała pauza między fragmentami
+        time.sleep(1)
 
 def get_calendar_service():
     if not os.path.exists(CALENDAR_SERVICE_ACCOUNT_FILE):
         print(f"!!! KRYTYCZNY BŁĄD: Brak pliku klucza '{CALENDAR_SERVICE_ACCOUNT_FILE}' w bieżącym folderze. !!!")
         return None
     try:
-        creds = service_account.Credentials.from_service_account_file(
-            CALENDAR_SERVICE_ACCOUNT_FILE, scopes=CALENDAR_SCOPES)
+        creds = service_account.Credentials.from_service_account_file(CALENDAR_SERVICE_ACCOUNT_FILE, scopes=CALENDAR_SCOPES)
         service = build('calendar', 'v3', credentials=creds)
         print("--- Usługa Google Calendar API połączona (z uprawnieniami do zapisu). ---")
         return service
     except Exception as e:
         print(f"!!! KRYTYCZNY BŁĄD: Nie można połączyć się z Google Calendar API: {e} !!!")
         return None
+
+def check_user_status_in_airtable(psid):
+    if not airtable_api:
+        print("OSTRZEŻENIE: Brak połączenia z Airtable, weryfikacja statusu pominięta.")
+        return "OK_PROCEED"
+    try:
+        table = airtable_api.table(AIRTABLE_BASE_ID, AIRTABLE_BOOKINGS_TABLE_NAME)
+        formula = f"{{PSID}} = '{psid}'"
+        record = table.first(formula=formula)
+        if not record:
+            print(f"--- AIRTABLE CHECK: Użytkownik {psid} nie znaleziony. Status: NOT_FOUND ---")
+            return "NOT_FOUND"
+        status = record.get('fields', {}).get('Status')
+        print(f"--- AIRTABLE CHECK: Użytkownik {psid} znaleziony. Status w bazie: '{status}' ---")
+        if status == "Dane zebrane - oczekiwanie na potwierdzenie":
+            return "AWAITING_CONFIRMATION"
+        else:
+            return "OK_PROCEED"
+    except Exception as e:
+        print(f"BŁĄD: Wystąpił błąd podczas sprawdzania statusu w Airtable dla PSID {psid}: {e}")
+        return "OK_PROCEED"
 
 def cleanup_and_get_active_held_slots():
     global HELD_SLOTS
@@ -209,9 +230,9 @@ def stworz_instrukcje_systemowa(dostepne_sloty_str, aktualne_wydarzenia_str):
     Jesteś systemem AI, który zarządza prawdziwym Kalendarzem Google. Twoja odpowiedź MUSI być jednym, kompletnym obiektem JSON.
 
     --- GŁÓWNE DYREKTYWY ---
-    1.  **ŚWIADOMOŚĆ DANYCH:** Zawsze działasz na prawdziwych danych.
-    2.  **PROAKTYWNE DOPYTYWANIE:** Jesteś proaktywnym asystentem. Dopytuj, jeśli brakuje Ci informacji.
-    3.  **FILTR INTENCJI:** Procedurę rezerwacji (pytanie o typ zajęć) rozpoczynaj TYLKO, gdy wiadomość użytkownika **wyraźnie sugeruje** chęć umówienia terminu (np. "chciałbym umówić zajęcia"). Jeśli wiadomość jest niejasna lub jest zwykłym powitaniem, odpowiedz grzecznie (akcja ROZMOWA dla "small talku").
+    1.  **ŚWIADOMOŚĆ DANYCH:** Zawsze działasz na prawdziwych danych. Twoim źródłem prawdy jest poniższa lista wydarzeń. Odwołując lub przekładając, musisz używać `eventId` z tej listy.
+    2.  **PROAKTYWNE DOPYTYWANIE:** Jesteś proaktywnym asystentem. Gdy użytkownik prosi o umówienie terminu, ale nie precyzuje typu, Twoim **pierwszym i jedynym zadaniem** jest zapytać o to. Użyj do tego akcji "ROZMOWA". NIGDY nie proponuj terminu, dopóki nie poznasz typu zajęć.
+    3.  **DWUSTOPNIOWE UMAWIANIE:** NIGDY nie podawaj całej listy wolnych terminów, chyba że użytkownik o to wyraźnie poprosi. ZAWSZE najpierw zapytaj o ogólne preferencje (dzień, pora dnia). Dopiero potem, na podstawie odpowiedzi, zaproponuj JEDEN konkretny termin z listy.
 
     AKTUALNE WYDARZENIA W KALENDARZU:
     {aktualne_wydarzenia_str}
@@ -219,35 +240,27 @@ def stworz_instrukcje_systemowa(dostepne_sloty_str, aktualne_wydarzenia_str):
     {dostepne_sloty_str}
 
     --- BIBLIOTEKA PRZYKŁADÓW AKCJI ---
-
-    1. Akcja: ROZMOWA (gdy prowadzisz "small talk")
-       - Scenariusz: Użytkownik wysyła zwykłe powitanie lub wiadomość bez konkretnej intencji (np. "hej", "dzień dobry").
-       - Przykład JSON:
-         {{
-           "action": "ROZMOWA",
-           "details": {{}},
-           "user_response": "Cześć! W czym mogę Ci pomóc w sprawie Twoich zajęć?"
-         }}
-
-    2. Akcja: ROZMOWA (gdy inicjujesz proces rezerwacji)
-       - Scenariusz: Użytkownik wyraża ogólną chęć umówienia zajęć. Twoim zadaniem jest dopytać o typ.
+    1. Akcja: ROZMOWA (gdy inicjujesz proces rezerwacji)
        - Przykład JSON: {{ "action": "ROZMOWA", "details": {{}}, "user_response": "Jasne, chętnie pomogę. Czy te zajęcia mają być jednorazowe, czy cykliczne, powtarzające się co tydzień?" }}
-    
+    2. Akcja: ROZMOWA (gdy dopytujesz o preferencje terminu)
+       - Przykład JSON: {{ "action": "ROZMOWA", "details": {{}}, "user_response": "Rozumiem. W takim razie proszę podać preferowany dzień tygodnia lub porę dnia (np. rano, popołudnie, wieczór), a ja znajdę najlepszy termin." }}
     3. Akcja: ZAPROPONUJ_TERMIN
-       - Scenariusz: Użytkownik poprosił o termin w piątek wieczorem. Znalazłeś pasujący slot.
        - Przykład JSON: {{ "action": "ZAPROPONUJ_TERMIN", "details": {{"proponowany_termin_iso": "2024-07-26T18:20:00+02:00"}}, "user_response": "Znalazłem wolny termin w piątek o 18:20. Czy pasuje?"}}
-    
     4. Akcja: DOPISZ_ZAJECIA
-       - Scenariusz: Użytkownik zaakceptował Twoją propozycję na zajęcia jednorazowe.
        - Przykład JSON: {{ "action": "DOPISZ_ZAJECIA", "details": {{ "nowy_termin_iso": "2024-07-26T18:20:00+02:00", "summary": "Korepetycje" }}, "user_response": "Świetnie! Zapisałem korepetycje na ten termin." }}
-    
-    5. Inne akcje (ODWOLAJ_ZAJECIA, PRZELOZ_ZAJECIA, UTWORZ_CYKLICZNE) działają według poprzednich wzorców.
+    5. Akcja: DOPISZ_CYKLICZNE
+       - Przykład JSON: {{ "action": "DOPISZ_CYKLICZNE", "details": {{ "nowy_termin_iso": "2024-07-29T10:00:00+02:00" }}, "user_response": "Dodałem do kalendarza cykliczne, niepotwierdzone zajęcia. Proszę pamiętać o potwierdzeniu każdej lekcji przed jej terminem." }}
     """
 
-
-# --- GŁÓWNA LOGIKA BOTA (przeniesiona z `main` do funkcji) ---
-
 def process_message(user_psid, message_text):
+    user_status = check_user_status_in_airtable(user_psid)
+    if user_status == "NOT_FOUND":
+        send_message(user_psid, "prosze umowic pierszwa lekcje")
+        return
+    if user_status == "AWAITING_CONFIRMATION":
+        send_message(user_psid, "prosze potwierdzic lekcje")
+        return
+    
     calendar_service = get_calendar_service()
     if not calendar_service: 
         send_message(user_psid, "Przepraszam, mam problem z połączeniem z systemem kalendarza. Spróbuj ponownie później.")
@@ -305,7 +318,7 @@ def process_message(user_psid, message_text):
             proposal_verified = False; break
     
     if not proposal_verified:
-        send_message(user_psid, "Przepraszam, mam chwilowy problem z przetworzeniem Twojej prośby. Spróbuj zadać pytanie inaczej.")
+        send_message(user_psid, "Przepraszam, mam chwilowy problem z przetworzeniem Twojej prośby.")
         return
 
     akcja = decyzja_ai.get("action")
@@ -340,22 +353,28 @@ def process_message(user_psid, message_text):
         if event_id:
             success, message = delete_google_event(calendar_service, GOOGLE_CALENDAR_ID, event_id)
             if success: print(f"--- {message} ---")
+    elif akcja == "DOPISZ_CYKLICZNE":
+        nowy_termin_iso = szczegoly.get("nowy_termin_iso")
+        if nowy_termin_iso:
+            create_google_event(calendar_service, GOOGLE_CALENDAR_ID, nowy_termin_iso, 
+                                summary="(NIEPOTWIERDZONE) Zajęcia cykliczne", 
+                                recurrence_rule='RRULE:FREQ=WEEKLY', 
+                                color_id=GRAY_COLOR_ID)
     
     historia_konwersacji.append({'role': 'model', 'parts': [{'text': json.dumps(decyzja_ai, ensure_ascii=False)}]})
     with open(history_file, 'w') as f:
         json.dump(historia_konwersacji[-20:], f, indent=2)
 
-# --- WEBHOOK MESSENGERA ---
-@app.route('/webhook2', methods=['GET', 'POST'])
+@app.route('/webhook', methods=['GET', 'POST'])
 def webhook():
     if request.method == 'GET':
         token_sent = request.args.get("hub.verify_token")
         if token_sent == VERIFY_TOKEN:
             return request.args.get("hub.challenge")
         return 'Invalid verification token', 403
-    
     elif request.method == 'POST':
         data = request.get_json()
+        print(json.dumps(data, indent=2))
         if data.get("object") == "page":
             for entry in data.get("entry", []):
                 for messaging_event in entry.get("messaging", []):
@@ -368,7 +387,6 @@ def webhook():
                             thread.start()
         return "ok", 200
 
-# --- URUCHOMIENIE SERWERA ---
 if __name__ == '__main__':
     print("Uruchamianie serwera Flask na porcie 8081...")
     app.run(host='0.0.0.0', port=8081, debug=True)
