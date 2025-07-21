@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 
-# verify_server.py (Wersja: Wiele Stron FB + Statystyki + Poprawki)
+# verify_server.py (Wersja: Wiele Stron FB + Statystyki + Zapis do Google Calendar)
 from pyairtable import Api 
 from flask import Flask, request, Response
-import threading # <--- DODAJ TEN IMPORT
+import threading
 import os
 import json
 import requests
@@ -23,37 +23,23 @@ import datetime
 import pytz
 import locale
 import re
-from collections import defaultdict # Import defaultdict
-
+from collections import defaultdict
 
 # --- Konfiguracja Stron Facebook ---
-# Zamiast pojedynczego PAGE_ACCESS_TOKEN, używamy słownika
-# Klucz: Page ID (ID strony odbiorcy), Wartość: Słownik {'token': '...', 'subject': '...'}
 PAGE_CONFIG = {
-    # Polski: Zakrzeczone Korepetycje - Polski (ID: 661857023673365)
     "661857023673365": {
         "token": "EAAJUltDBrJQBPOBUTGeEQusJwEZA2CwhD63gy7TXOVcQpnDW2gKtNZASCZBnUZBvhlh5OAe9iaOR8Cn0hrG34wacQHlUCYXBxZBzDg1sHuAjV0IBZAHvc9RT9ZAXbFgn0CMQq00ZCS52RFVwlgM4rDKVwSJrzGKJqvaJOCmTeuE9ZBY6IXYB1rR2iXb3beNo4lGZBF8h0nvRoCmQZDZD",
-        "subject": "Polski",
-        "name": "Zakręcone Korepetycje - Polski",
-        "link": "https://tiny.pl/0xnsgbt2" # Link do strony z Polskim
+        "subject": "Polski", "name": "Zakręcone Korepetycje - Polski", "link": "https://tiny.pl/0xnsgbt2"
     },
-    # Matematyka: ZakrzeczoneKorepetycje - MATEMATYKA... (ID: 638454406015018)
     "638454406015018": {
         "token": "EAAJUltDBrJQBPAZAylC5nVzVG4NjbhPZCtvI40aWuk4y8jm6wLdQqjuhsMMxHATytTF6Awh0LPKI9Rljckk9yC31JKtzgWMGhRoCsah1IRDqV0TBYs9XZAZBvWYBW0rSt95NFOz6nRw5GZAXlT7yIbKUO3tkZCTuZB3eTDX0kaTjRl9I8ueLsZCa9ZBVZCHNb7f5pj8F8ZC9yyehQZDZD",
-        "subject": "Matematyka",
-        "name": "Zakręcone Korepetycje - MATEMATYKA",
-        "link": "https://tiny.pl/f7xz5n0g" # Link do strony z Matematyką
+        "subject": "Matematyka", "name": "Zakręcone Korepetycje - MATEMATYKA", "link": "https://tiny.pl/f7xz5n0g"
     },
-     # Angielski: English Zone: Zakrzeczone Korepetycje (ID: 653018101222547)
     "653018101222547": {
         "token": "EAAJUltDBrJQBPOkydccFPcQ1SDZBhYFBFZCMTohk1hgtLbHNmwdA0ylZCZBMTDeDG2OOmbhYaN5KJTJV5N4pX1LLR60G9ye8btGM1hfCfXoLsz1qSw7YUqZCrzeLQqrKQ5uEOn19VGGg7zfEDuLy6TZAPBtf5kQK7ZBKGnrZBaWcmfGofVoAQ5R2stUyG6bGCnPWpx1CZBzzlZAgZDZD",
-        "subject": "Angielski",
-        "name": "English Zone: Zakręcone Korepetycje",
-        "link": "https://tiny.pl/prrr7qf1" # Link do strony z Angielskim
+        "subject": "Angielski", "name": "English Zone: Zakręcone Korepetycje", "link": "https://tiny.pl/prrr7qf1"
     },
-    # Możesz dodać więcej stron tutaj, jeśli będzie potrzeba
 }
-# Utwórz listę linków do innych przedmiotów
 ALL_SUBJECT_LINKS = {
     page_data["subject"]: page_data["link"]
     for page_data in PAGE_CONFIG.values() if "subject" in page_data and "link" in page_data
@@ -62,77 +48,36 @@ ALL_SUBJECT_LINKS = {
 app = Flask(__name__)
 
 # --- Konfiguracja Ogólna ---
-VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "KOLAGEN") # Używane tylko do weryfikacji webhooka
+VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "KOLAGEN")
 PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "singular-carver-459118-g5")
 LOCATION = os.environ.get("GCP_LOCATION", "us-central1")
 MODEL_ID = os.environ.get("VERTEX_MODEL_ID", "gemini-2.0-flash-001")
-
 FACEBOOK_GRAPH_API_URL = "https://graph.facebook.com/v19.0/me/messages"
-
 HISTORY_DIR = "conversation_store"
-MAX_HISTORY_TURNS = 15
-MESSAGE_CHAR_LIMIT = 1990
-MESSAGE_DELAY_SECONDS = 1.2
 
-ENABLE_TYPING_DELAY = True
-MIN_TYPING_DELAY_SECONDS = 0.7
-MAX_TYPING_DELAY_SECONDS = 3.0
-TYPING_CHARS_PER_SECOND = 35
-
-# --- Konfiguracja Kalendarza (ODCZYT/WERYFIKACJA) ---
+# --- Konfiguracja Kalendarza ---
 CALENDAR_SERVICE_ACCOUNT_FILE = 'KALENDARZ_KLUCZ.json'
-CALENDAR_SCOPES = ['https://www.googleapis.com/auth/calendar.readonly']
+# === ZMIANA: ROZSZERZENIE UPRAWNIEŃ DO ZAPISU ===
+CALENDAR_SCOPES = ['https://www.googleapis.com/auth/calendar'] 
 CALENDAR_TIMEZONE = 'Europe/Warsaw'
 APPOINTMENT_DURATION_MINUTES = 60
-WORK_START_HOUR = 8
-WORK_END_HOUR = 22
 
-# --- NOWOŚĆ: Lista przedmiotów (automatycznie z PAGE_CONFIG) ---
 AVAILABLE_SUBJECTS = sorted(list(ALL_SUBJECT_LINKS.keys()))
-
-# Lista kalendarzy do sprawdzania Z PRZEDMIOTAMI
 CALENDARS = [
-    {
-        'id': 'f19e189826b9d6e36950da347ac84d5501ecbd6bed0d76c8641be61a67749c67@group.calendar.google.com',
-        'name': 'Kalendarz Główny Polski', # Zaktualizuj nazwę dla jasności
-        'subject': 'Polski' # Przypisanie przedmiotu
-    },
-    {
-        'id': '3762cdf9ca674ed1e5dd87ff406dc92f365121aab827cea4d9a02085d31d15fb@group.calendar.google.com',
-        'name': 'Kalendarz Dodatkowy Matematyka', # Zaktualizuj nazwę
-        'subject': 'Matematyka' # Przypisanie przedmiotu
-    },
-    # DODAJ TUTAJ Kalendarz dla Angielskiego, jeśli istnieje
-    # Przykład:
-    # {
-    #     'id': 'TWOJ_KALENDARZ_ID_ANGIELSKI@group.calendar.google.com',
-    #     'name': 'Kalendarz Angielski',
-    #     'subject': 'Angielski'
-    # },
+    {'id': 'f19e189826b9d6e36950da347ac84d5501ecbd6bed0d76c8641be61a67749c67@group.calendar.google.com', 'name': 'Kalendarz Główny Polski', 'subject': 'Polski'},
+    {'id': '3762cdf9ca674ed1e5dd87ff406dc92f365121aab827cea4d9a02085d31d15fb@group.calendar.google.com', 'name': 'Kalendarz Dodatkowy Matematyka', 'subject': 'Matematyka'},
 ]
-# --- Mapowanie Przedmiot -> Lista Kalendarzy ---
 SUBJECT_TO_CALENDARS = defaultdict(list)
 for cal_config in CALENDARS:
     if 'subject' in cal_config and cal_config['subject'] in AVAILABLE_SUBJECTS:
         SUBJECT_TO_CALENDARS[cal_config['subject'].lower()].append(cal_config)
-    else:
-        logging.warning(f"Kalendarz '{cal_config['name']}' nie ma przypisanego poprawnego przedmiotu lub brak klucza 'subject'. Pomijanie.")
-
-# Stare zmienne - zachowane dla kompatybilności tam, gdzie nie potrzeba filtrowania po przedmiocie
-ALL_CALENDAR_IDS = [cal['id'] for cal in CALENDARS]
-ALL_CALENDAR_ID_TO_NAME = {cal['id']: cal['name'] for cal in CALENDARS}
-
-MAX_SEARCH_DAYS = 14
-MIN_BOOKING_LEAD_HOURS = 24
 
 # --- Konfiguracja Airtable ---
 AIRTABLE_API_KEY = os.environ.get("AIRTABLE_API_KEY", "patcSdupvwJebjFDo.7e15a93930d15261989844687bcb15ac5c08c84a29920c7646760bc6f416146d")
 AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID", "appTjrMTVhYBZDPw9")
-AIRTABLE_BOOKINGS_TABLE_NAME = "Rezerwacje"  # Nazwa Twojej tabeli rezerwacji
-AIRTABLE_STATS_TABLE_NAME = "Statystyki"      # Nazwa Twojej tabeli statystyk
-AIRTABLE_TIMEZONE = 'Europe/Warsaw'          # Ważne dla spójności dat
+AIRTABLE_BOOKINGS_TABLE_NAME = "Rezerwacje"
+AIRTABLE_STATS_TABLE_NAME = "Statystyki"
 
-# Inicjalizacja klienta Airtable (zastępuje get_sheets_service)
 try:
     airtable_api = Api(AIRTABLE_API_KEY)
     logging.info("Utworzono połączenie z Airtable API.")
@@ -204,6 +149,72 @@ except Exception as e:
 # =====================================================================
 # === FUNKCJE POMOCNICZE (Ogólne) =====================================
 # =====================================================================
+
+def create_google_event_from_airtable(calendar_service, airtable_record_fields):
+    """Tworzy wydarzenie w Google Calendar na podstawie danych z rekordu Airtable."""
+    if not calendar_service:
+        logging.error("[GCAL CREATE] Usługa kalendarza niedostępna.")
+        return
+    
+    # Krok 1: Wyodrębnij potrzebne dane z Airtable
+    subject = airtable_record_fields.get('Przedmiot')
+    start_time_iso = airtable_record_fields.get('Date')
+    student_first_name = airtable_record_fields.get('Imię Ucznia', 'Nieznany')
+    student_last_name = airtable_record_fields.get('Nazwisko Ucznia', 'Uczeń')
+    parent_first_name = airtable_record_fields.get('Imię Rodzica', 'Brak')
+    parent_last_name = airtable_record_fields.get('Nazwisko Rodzica', 'Brak')
+    grade = airtable_record_fields.get('Klasa', 'Brak')
+    level = airtable_record_fields.get('Poziom', 'Brak')
+
+    if not subject or not start_time_iso:
+        logging.error(f"[GCAL CREATE] Brak przedmiotu lub daty w danych z Airtable: {airtable_record_fields}")
+        return
+
+    # Krok 2: Znajdź odpowiedni kalendarz dla danego przedmiotu
+    calendars_for_subject = SUBJECT_TO_CALENDARS.get(subject.lower())
+    if not calendars_for_subject:
+        logging.error(f"[GCAL CREATE] Nie znaleziono skonfigurowanego kalendarza dla przedmiotu: {subject}")
+        return
+    
+    # Bierzemy pierwszy pasujący kalendarz z listy
+    target_calendar_id = calendars_for_subject[0]['id']
+    
+    # Krok 3: Przygotuj obiekt wydarzenia zgodnie z Twoimi wytycznymi
+    try:
+        tz = pytz.timezone(CALENDAR_TIMEZONE)
+        start_dt = datetime.datetime.fromisoformat(start_time_iso.replace('Z', '+00:00')).astimezone(tz)
+        end_dt = start_dt + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+
+        # === TWOJA LOGIKA NAZEWNICTWA ===
+        summary = f"(NIEPOTWIERDZONE) {student_first_name} {student_last_name}"
+        
+        description = (
+            f"Automatyczna rezerwacja z bota Messengera.\n\n"
+            f"Przedmiot: {subject}\n"
+            f"Uczeń: {student_first_name} {student_last_name}\n"
+            f"Rodzic: {parent_first_name} {parent_last_name}\n"
+            f"Klasa: {grade}\n"
+            f"Poziom: {level}\n\n"
+            f"Status: Oczekuje na ostateczne potwierdzenie."
+        )
+        
+        event_body = {
+            'summary': summary,
+            'description': description,
+            'start': {'dateTime': start_dt.isoformat(), 'timeZone': CALENDAR_TIMEZONE},
+            'end': {'dateTime': end_dt.isoformat(), 'timeZone': CALENDAR_TIMEZONE},
+        }
+
+        # Krok 4: Wyślij zapytanie do API Google Calendar
+        created_event = calendar_service.events().insert(
+            calendarId=target_calendar_id,
+            body=event_body
+        ).execute()
+        
+        logging.info(f"[GCAL CREATE] Pomyślnie utworzono wydarzenie w kalendarzu '{target_calendar_id}'. Link: {created_event.get('htmlLink')}")
+        
+    except Exception as e:
+        logging.error(f"[GCAL CREATE] Wystąpił błąd podczas tworzenia wydarzenia w Google Calendar: {e}", exc_info=True)
 
 def ensure_dir(directory):
     """Tworzy katalog, jeśli nie istnieje."""
@@ -1523,7 +1534,7 @@ def create_airtable_record_phase1(psid, start_time, calendar_name, subject):
         return False, "Błąd systemu podczas zapisu do bazy danych."
 
 def update_airtable_record_phase2(record_id, student_data):
-    """Aktualizuje rekord w Airtable danymi Fazy 2."""
+    """Aktualizuje rekord w Airtable i jeśli się uda, tworzy wydarzenie w GCal."""
     if not airtable_api:
         return False, "Błąd połączenia z Airtable (Faza 2)."
     if not record_id:
@@ -1532,25 +1543,14 @@ def update_airtable_record_phase2(record_id, student_data):
     try:
         table = airtable_api.table(AIRTABLE_BASE_ID, AIRTABLE_BOOKINGS_TABLE_NAME)
         
-        parent_fn = student_data.get('parent_first_name', '')
-        parent_ln = student_data.get('parent_last_name', '')
-        student_fn = student_data.get('student_first_name', '')
-        student_ln = student_data.get('student_last_name', '')
-        grade_info = student_data.get('grade_info', '')
-        level_info = student_data.get('level_info', '')
-        
-        # Użyj swojej istniejącej funkcji do ekstrakcji danych
-        numerical_grade, _, school_type = extract_school_type(grade_info)
-        
-        # Upewnij się, że nazwy pól odpowiadają DOKŁADNIE nazwom kolumn w Airtable
+        # Przygotuj dane do aktualizacji
         update_data = {
-            'Imię Rodzica': parent_fn,
-            'Nazwisko Rodzica': parent_ln,
-            'Imię Ucznia': student_fn,
-            'Nazwisko Ucznia': student_ln,
-            'Klasa': numerical_grade, # Zapisujemy tylko numer
-            'Typ Szkoły': school_type,
-            'Poziom': level_info if level_info != 'Brak' else '',
+            'Imię Rodzica': student_data.get('parent_first_name', ''),
+            'Nazwisko Rodzica': student_data.get('parent_last_name', ''),
+            'Imię Ucznia': student_data.get('student_first_name', ''),
+            'Nazwisko Ucznia': student_data.get('student_last_name', ''),
+            'Klasa': student_data.get('grade_info', ''), # Zapisujemy pełną informację
+            'Poziom': student_data.get('level_info', ''),
             'Status': 'Dane zebrane - oczekiwanie na potwierdzenie'
         }
         
@@ -1558,10 +1558,19 @@ def update_airtable_record_phase2(record_id, student_data):
         table.update(record_id, update_data)
         logging.info(f"Zaktualizowano rekord {record_id} pomyślnie.")
         
-        return True, None # Sukces
+        # --- NOWY KROK: PO SUKCESIE W AIRTABLE, TWORZYMY WYDARZENIE W GOOGLE CALENDAR ---
+        # Pobieramy pełny, zaktualizowany rekord, aby mieć wszystkie dane
+        full_updated_record = table.get(record_id)
+        if full_updated_record and 'fields' in full_updated_record:
+            calendar_service = get_calendar_service()
+            create_google_event_from_airtable(calendar_service, full_updated_record['fields'])
+        else:
+            logging.error(f"Nie udało się pobrać zaktualizowanych danych rekordu {record_id} do utworzenia wydarzenia w GCal.")
+            
+        return True, None
         
     except Exception as e:
-        logging.error(f"Błąd podczas aktualizacji Fazy 2 w Airtable: {e}", exc_info=True)
+        logging.error(f"Błąd podczas aktualizacji Fazy 2 w Airtable lub tworzenia w GCal: {e}", exc_info=True)
         return False, "Błąd systemu podczas aktualizacji w bazie danych."
 
 def log_statistic(event_type):
