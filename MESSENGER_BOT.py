@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 # verify_server.py (Wersja: Wiele Stron FB + Statystyki + Poprawki)
-
+from pyairtable import Api 
 from flask import Flask, request, Response
 import threading # <--- DODAJ TEN IMPORT
 import os
@@ -14,6 +14,9 @@ from vertexai.generative_models import (
     GenerativeModel, Part, Content, GenerationConfig,
     SafetySetting, HarmCategory, HarmBlockThreshold
 )
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 import errno
 import logging
 import datetime
@@ -21,9 +24,7 @@ import pytz
 import locale
 import re
 from collections import defaultdict # Import defaultdict
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
+
 
 # --- Konfiguracja Stron Facebook ---
 # Zamiast pojedynczego PAGE_ACCESS_TOKEN, używamy słownika
@@ -31,21 +32,21 @@ from googleapiclient.errors import HttpError
 PAGE_CONFIG = {
     # Polski: Zakrzeczone Korepetycje - Polski (ID: 661857023673365)
     "661857023673365": {
-        "token": "EAAJUltDBrJQBO8GS4zZA2JtJ2NGAk041BbNyXZCfNo9phFozOCwSMt4q1xksHUpN4fZBtZAQkh69W1eZCGdD5WiMMuvuIg3HclDaczZBYpLUeuS67zoadbBCX1nZCLvWE4NnLKkeOGKZBUJElzeMglfcqp13wz5r3eNgepsVJxr5W023fOO5nv84G6G6XqI9YKWz2AZDZD",
+        "token": "EAAJUltDBrJQBPOBUTGeEQusJwEZA2CwhD63gy7TXOVcQpnDW2gKtNZASCZBnUZBvhlh5OAe9iaOR8Cn0hrG34wacQHlUCYXBxZBzDg1sHuAjV0IBZAHvc9RT9ZAXbFgn0CMQq00ZCS52RFVwlgM4rDKVwSJrzGKJqvaJOCmTeuE9ZBY6IXYB1rR2iXb3beNo4lGZBF8h0nvRoCmQZDZD",
         "subject": "Polski",
         "name": "Zakręcone Korepetycje - Polski",
         "link": "https://tiny.pl/0xnsgbt2" # Link do strony z Polskim
     },
     # Matematyka: ZakrzeczoneKorepetycje - MATEMATYKA... (ID: 638454406015018)
     "638454406015018": {
-        "token": "EAAJUltDBrJQBO657w69hfYnqgIGBbRwWNFJvZCagiXF3KX6gSmjcVqjTTULfZApnvOJJb6wqrZCy8AeMP0Wy0fUxOvFZBvL7qvDYrdaVGZBDgoJApTT5hCAr24rtZC3dh23elLWh2ZBuoCIh3YEqLdKmUKe4aXh2bJMSkKw4FZCgjaay9lZAQ2bZCWMDePjCxLZAfweDAZDZD",
+        "token": "EAAJUltDBrJQBPAZAylC5nVzVG4NjbhPZCtvI40aWuk4y8jm6wLdQqjuhsMMxHATytTF6Awh0LPKI9Rljckk9yC31JKtzgWMGhRoCsah1IRDqV0TBYs9XZAZBvWYBW0rSt95NFOz6nRw5GZAXlT7yIbKUO3tkZCTuZB3eTDX0kaTjRl9I8ueLsZCa9ZBVZCHNb7f5pj8F8ZC9yyehQZDZD",
         "subject": "Matematyka",
         "name": "Zakręcone Korepetycje - MATEMATYKA",
         "link": "https://tiny.pl/f7xz5n0g" # Link do strony z Matematyką
     },
      # Angielski: English Zone: Zakrzeczone Korepetycje (ID: 653018101222547)
     "653018101222547": {
-        "token": "EAAJUltDBrJQBO5DZBpzZAPjR2GSVetLzuolDkZBhu2uB7MBLnxhSb0B13JeFZB6gLZBX4CN3sByk7iGS6PDVfAm8tpsWMk5wUGkdWTEBn5AA1lZAR2ZCraoOGbjVAiLLlfTzjqjNRbAZADNvDAavDjV0pBcKltyVI0wAdQ6w0C2owI1lLW1jkXQ9IVpwlewzZBt0GZAgZDZD",
+        "token": "EAAJUltDBrJQBPOkydccFPcQ1SDZBhYFBFZCMTohk1hgtLbHNmwdA0ylZCZBMTDeDG2OOmbhYaN5KJTJV5N4pX1LLR60G9ye8btGM1hfCfXoLsz1qSw7YUqZCrzeLQqrKQ5uEOn19VGGg7zfEDuLy6TZAPBtf5kQK7ZBKGnrZBaWcmfGofVoAQ5R2stUyG6bGCnPWpx1CZBzzlZAgZDZD",
         "subject": "Angielski",
         "name": "English Zone: Zakręcone Korepetycje",
         "link": "https://tiny.pl/prrr7qf1" # Link do strony z Angielskim
@@ -124,34 +125,20 @@ ALL_CALENDAR_ID_TO_NAME = {cal['id']: cal['name'] for cal in CALENDARS}
 MAX_SEARCH_DAYS = 14
 MIN_BOOKING_LEAD_HOURS = 24
 
-# --- Konfiguracja Google Sheets (ZAPIS + ODCZYT) ---
-SHEETS_SERVICE_ACCOUNT_FILE = 'ARKUSZ_KLUCZ.json'
-SHEET_SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-SPREADSHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "1vpsIAEkqtY3ZJ5Mr67Dda45aZ55V1O-Ux9ODjwk13qw")
-MAIN_SHEET_NAME = os.environ.get("GOOGLE_SHEET_NAME", 'Arkusz1') # Główne rezerwacje
-STATS_SHEET_NAME = 'Arkusz2' # Nazwa arkusza statystyk
-SHEET_TIMEZONE = 'Europe/Warsaw'
+# --- Konfiguracja Airtable ---
+AIRTABLE_API_KEY = os.environ.get("AIRTABLE_API_KEY", "patcSdupvwJebjFDo.7e15a93930d15261989844687bcb15ac5c08c84a29920c7646760bc6f416146d")
+AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID", "appTjrMTVhYBZDPw9")
+AIRTABLE_BOOKINGS_TABLE_NAME = "Rezerwacje"  # Nazwa Twojej tabeli rezerwacji
+AIRTABLE_STATS_TABLE_NAME = "Statystyki"      # Nazwa Twojej tabeli statystyk
+AIRTABLE_TIMEZONE = 'Europe/Warsaw'          # Ważne dla spójności dat
 
-# Definicja kolumn (zaczynając od 1) dla Arkusz1
-SHEET_PSID_COLUMN_INDEX = 1      # A
-SHEET_PARENT_FN_COLUMN_INDEX = 2 # B
-SHEET_PARENT_LN_COLUMN_INDEX = 3 # C
-SHEET_STUDENT_FN_COLUMN_INDEX = 4# D
-SHEET_STUDENT_LN_COLUMN_INDEX = 5# E
-SHEET_DATE_COLUMN_INDEX = 6      # F
-SHEET_TIME_COLUMN_INDEX = 7      # G
-SHEET_GRADE_COLUMN_INDEX = 8     # H - Numer Klasy (TYLKO LICZBA)
-SHEET_SCHOOL_TYPE_COLUMN_INDEX = 9 # I - Typ szkoły
-SHEET_LEVEL_COLUMN_INDEX = 10    # J - Poziom
-SHEET_CALENDAR_NAME_COLUMN_INDEX = 11 # K - Nazwa Kalendarza
-SHEET_READ_RANGE_FOR_PSID_SEARCH = f"{MAIN_SHEET_NAME}!A2:A"
-SHEET_READ_RANGE_FOR_BUSY_SLOTS = f"{MAIN_SHEET_NAME}!F2:K" # Odczyt od F do K, zaczynając od wiersza 2
-
-# Definicje dla Arkusz2 (Statystyki)
-STATS_DATE_HEADER_ROW = 1 # Wiersz z datami
-STATS_NEW_CONTACT_ROW_LABEL = "Nowe kontakty" # Etykieta w kolumnie A
-STATS_BOOKING_ROW_LABEL = "Umówione terminy" # Etykieta w kolumnie A
-STATS_DATA_START_COLUMN = 'B' # Pierwsza kolumna z danymi (np. 5.5.2025)
+# Inicjalizacja klienta Airtable (zastępuje get_sheets_service)
+try:
+    airtable_api = Api(AIRTABLE_API_KEY)
+    logging.info("Utworzono połączenie z Airtable API.")
+except Exception as e:
+    airtable_api = None
+    logging.critical(f"KRYTYCZNY BŁĄD inicjalizacji Airtable API: {e}", exc_info=True)
 
 
 # --- Znaczniki i Stany ---
@@ -181,9 +168,7 @@ SAFETY_SETTINGS = [
 
 # --- Inicjalizacja Zmiennych Globalnych ---
 _calendar_service = None
-_sheets_service = None
 _cal_tz = None
-_sheet_tz = None
 POLISH_WEEKDAYS = ["Poniedziałek", "Wtorek", "Środa", "Czwartek", "Piątek", "Sobota", "Niedziela"]
 
 # --- Ustawienia Lokalizacji ---
@@ -639,18 +624,42 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
                             else: action = 'handle_general' 
                             current_state = next_state 
                         elif INTENT_SCHEDULE_MARKER in ai_response_text_raw:
+                            # 1. Najpierw wyciągnij dane o uczniu, jeśli AI je podało
+                            student_data_match = re.search(
+                                r"\[DANE_UCZNIA_OGOLNE:\s*KlasaInfo:\s*(.*?),?\s*Poziom:\s*(.*?)\]",
+                                ai_response_text_raw, re.IGNORECASE | re.DOTALL
+                            )
+                            
+                            grade_info_from_ai = ""
+                            level_info_from_ai = ""
+                            
+                            if student_data_match:
+                                grade_info_from_ai = student_data_match.group(1).strip()
+                                level_info_from_ai = student_data_match.group(2).strip()
+                                logging.info(f"    (Wątek) [{actual_user_psid}] AI (General) zidentyfikowało dane ucznia: Klasa='{grade_info_from_ai}', Poziom='{level_info_from_ai}'")
+                                # Usuń znacznik z odpowiedzi, żeby użytkownik go nie widział
+                                ai_response_text_raw = re.sub(r"\[DANE_UCZNIA_OGOLNE:.*?\]", "", ai_response_text_raw).strip()
+
+                            # 2. Teraz przetwórz intencję umówienia wizyty
                             msg_result = ai_response_text_raw.split(INTENT_SCHEDULE_MARKER, 1)[0].strip()
                             confirmed_subject_by_ai = effective_subject_for_action 
+                            
                             if confirmed_subject_by_ai and confirmed_subject_by_ai in AVAILABLE_SUBJECTS:
                                 next_state = STATE_SCHEDULING_ACTIVE
-                                context_data_to_save = {'type': STATE_SCHEDULING_ACTIVE, 'required_subject': confirmed_subject_by_ai}
+                                # Tworzymy nowy kontekst i od razu wstawiamy dane o uczniu!
+                                context_data_to_save = {
+                                    'type': STATE_SCHEDULING_ACTIVE, 
+                                    'required_subject': confirmed_subject_by_ai,
+                                    'known_grade': grade_info_from_ai,
+                                    'known_level': level_info_from_ai
+                                }
                                 action = 'handle_scheduling' 
                                 current_state = next_state
                             else:
                                 msg_result = (msg_result + "\n\n" if msg_result else "") + f"Nie jestem pewien, dla którego przedmiotu chcą Państwo umówić termin. Dostępne przedmioty to: {', '.join(AVAILABLE_SUBJECTS)}. Proszę sprecyzować."
                                 model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)]) 
                                 next_state = STATE_GENERAL
-                                context_data_to_save.update({'type': STATE_GENERAL, 'required_subject': current_subject}) 
+                                context_data_to_save.update({'type': STATE_GENERAL, 'required_subject': current_subject})
                         else: 
                             msg_result = ai_response_text_raw
                             next_state = STATE_GENERAL
@@ -724,27 +733,19 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
                                             _simulate_typing(actual_user_psid, MIN_TYPING_DELAY_SECONDS, current_page_token) 
                                             chosen_calendar_id = None
                                             chosen_calendar_name = None
-                                            is_blocked_in_sheet = False
-                                            slot_end_dt = proposed_start_dt + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
-                                            sheet_busy_for_slot = get_sheet_booked_slots(SPREADSHEET_ID, MAIN_SHEET_NAME, proposed_start_dt, slot_end_dt)
-                                            for sheet_slot in sheet_busy_for_slot:
-                                                for cal_conf_iter in subject_calendars_config:
-                                                    if sheet_slot.get('calendar_name','').strip().lower() == cal_conf_iter.get('name','').strip().lower():
-                                                        if max(proposed_start_dt, sheet_slot['start']) < min(slot_end_dt, sheet_slot['end']):
-                                                            is_blocked_in_sheet = True
-                                                            logging.warning(f"    (Wątek) [{actual_user_psid}] Proponowany slot {proposed_slot_formatted} jest już ZAJĘTY W ARKUSZU w kalendarzu '{cal_conf_iter.get('name')}'.")
-                                                            break 
-                                                if is_blocked_in_sheet: break
-                                            if not is_blocked_in_sheet:
-                                                for cal_conf_iter in subject_calendars_config:
-                                                    if is_slot_actually_free(proposed_start_dt, cal_conf_iter['id']):
-                                                        chosen_calendar_id = cal_conf_iter['id']
-                                                        chosen_calendar_name = cal_conf_iter['name']
-                                                        logging.info(f"    (Wątek) [{actual_user_psid}] Slot {proposed_slot_formatted} jest WOLNY w kalendarzu Google '{chosen_calendar_name}'.")
-                                                        break 
+                                            # Weryfikujemy ostatecznie dostępność w kalendarzach Google
+                                            for cal_conf_iter in subject_calendars_config:
+                                                if is_slot_actually_free(proposed_start_dt, cal_conf_iter['id']):
+                                                    chosen_calendar_id = cal_conf_iter['id']
+                                                    chosen_calendar_name = cal_conf_iter['name']
+                                                    logging.info(f"    (Wątek) [{actual_user_psid}] Slot {proposed_slot_formatted} jest WOLNY w kalendarzu Google '{chosen_calendar_name}'.")
+                                                    break
+                                            
                                             if chosen_calendar_id and chosen_calendar_name: 
-                                                write_ok, write_msg_or_row_idx = write_to_sheet_phase1(actual_user_psid, proposed_start_dt, chosen_calendar_name)
+                                                # Faza 1: Tworzenie rekordu w Airtable
+                                                write_ok, record_id_or_error_msg = create_airtable_record_phase1(actual_user_psid, proposed_start_dt, chosen_calendar_name, effective_subject_for_action)
                                                 if write_ok:
+                                                    record_id = record_id_or_error_msg
                                                     user_profile_fb = get_user_profile(actual_user_psid, current_page_token)
                                                     parent_fn = user_profile_fb.get('first_name', '') if user_profile_fb else ''
                                                     parent_ln = user_profile_fb.get('last_name', '') if user_profile_fb else ''
@@ -758,23 +759,25 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
                                                         'proposed_slot_formatted': proposed_slot_formatted,
                                                         'chosen_calendar_id': chosen_calendar_id,
                                                         'chosen_calendar_name': chosen_calendar_name,
-                                                        'required_subject': effective_subject_for_action, 
-                                                        'known_parent_first_name': parent_fn, 
+                                                        'required_subject': effective_subject_for_action,
+                                                        'known_parent_first_name': parent_fn,
                                                         'known_parent_last_name': parent_ln,
-                                                        'known_student_first_name': '', 
+                                                        'known_student_first_name': '',
                                                         'known_student_last_name': '',
                                                         'known_grade': '', 'known_level': '',
-                                                        'sheet_row_index': write_msg_or_row_idx if isinstance(write_msg_or_row_idx, int) else None,
-                                                        'last_model_message_before_gathering': model_confirmation_content_for_history 
+                                                        'airtable_record_id': record_id,  # Zapisujemy ID z Airtable
+                                                        'last_model_message_before_gathering': model_confirmation_content_for_history
                                                     }
-                                                    action = 'handle_gathering' 
-                                                    trigger_gathering_ai_immediately = True 
+                                                    action = 'handle_gathering'
+                                                    trigger_gathering_ai_immediately = True
                                                     current_state = next_state
-                                                else: 
-                                                    msg_result = f"Przepraszam, wystąpił błąd podczas wstępnej rezerwacji terminu ({write_msg_or_row_idx}). Proszę wybrać termin ponownie."
-                                                    next_state = STATE_SCHEDULING_ACTIVE 
+                                                else:
+                                                    error_message = record_id_or_error_msg
+                                                    msg_result = f"Przepraszam, wystąpił błąd podczas wstępnej rezerwacji terminu ({error_message}). Proszę wybrać termin ponownie."
+                                                    next_state = STATE_SCHEDULING_ACTIVE
                                                     context_data_to_save.update({'type': STATE_SCHEDULING_ACTIVE, 'required_subject': effective_subject_for_action})
-                                                    slot_verification_failed = True 
+                                                    slot_verification_failed = True
+                                    
                                             else: 
                                                 reason_for_failure = "właśnie został zajęty lub jest zablokowany" if not chosen_calendar_id else "jest już zajęty w naszym systemie rezerwacji"
                                                 msg_result = (text_for_user if text_for_user else "") + \
@@ -869,10 +872,8 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
                             msg_result = final_message_to_user
                             parsed_student_data['parent_first_name'] = context_data_to_save.get('known_parent_first_name', '')
                             parsed_student_data['parent_last_name'] = context_data_to_save.get('known_parent_last_name', '')
-                            sheet_row_idx_for_update = context_data_to_save.get('sheet_row_index')
-                            valid_sheet_row_idx = sheet_row_idx_for_update if isinstance(sheet_row_idx_for_update, int) and sheet_row_idx_for_update >=2 else None
-                            logging.info(f"    (Wątek) [{actual_user_psid}] Faza 2 - Arkusz: Przekazywany sheet_row_index: {valid_sheet_row_idx} (oryginalny: {sheet_row_idx_for_update})")
-                            update_ok, update_message = find_row_and_update_sheet(actual_user_psid, None, parsed_student_data, valid_sheet_row_idx) 
+                            record_id_for_update = context_data_to_save.get('airtable_record_id')
+                            update_ok, update_message = update_airtable_record_phase2(record_id_for_update, parsed_student_data)
                             if not update_ok: 
                                 logging.error(f"    (Wątek) [{actual_user_psid}] Błąd Fazy 2 w arkuszu: {update_message}")
                             next_state = STATE_GENERAL
@@ -953,16 +954,7 @@ def _get_calendar_timezone():
             _cal_tz = pytz.utc
     return _cal_tz
 
-def _get_sheet_timezone():
-    """Pobiera (i cachuje) obiekt strefy czasowej dla Arkusza."""
-    global _sheet_tz
-    if _sheet_tz is None:
-        try:
-            _sheet_tz = pytz.timezone(SHEET_TIMEZONE)
-        except pytz.exceptions.UnknownTimeZoneError:
-            logging.error(f"BŁĄD: Strefa arkusza '{SHEET_TIMEZONE}' nieznana. Używam UTC.")
-            _sheet_tz = pytz.utc
-    return _sheet_tz
+
 
 def format_slot_for_user(slot_start):
     """Formatuje pojedynczy slot (datetime) na czytelny tekst dla użytkownika."""
@@ -1218,331 +1210,143 @@ def get_calendar_busy_slots(calendar_ids_to_check, start_datetime, end_datetime)
     logging.info(f"Pobrano {len(busy_times_calendar)} zajętych slotów z kalendarzy Google: {calendar_ids_to_check}.")
     return busy_times_calendar
 
-def get_sheet_booked_slots(spreadsheet_id, sheet_name, start_datetime, end_datetime):
-    """
-    Pobiera zajęte sloty z arkusza Google (Arkusz1), włącznie z nazwą kalendarza.
-    Zwraca listę słowników: {'start': dt_aware_cal_tz, 'end': dt_aware_cal_tz, 'calendar_name': str}.
-    Daty zwracane są w strefie czasowej KALENDARZA.
-    """
-    service = get_sheets_service()
-    sheet_busy_slots = []
-    if not service:
-        logging.error("Błąd: Usługa arkuszy niedostępna.")
-        return sheet_busy_slots
-
-    tz_sheet = _get_sheet_timezone()
-    tz_cal = _get_calendar_timezone() # Potrzebne do konwersji na końcu
-
-    # Konwersja granic do strefy czasowej KALENDARZA (bo dane z freeBusy są w tej strefie)
-    if start_datetime.tzinfo is None:
-        start_datetime_aware_cal = tz_cal.localize(start_datetime)
-    else:
-        start_datetime_aware_cal = start_datetime.astimezone(tz_cal)
-    if end_datetime.tzinfo is None:
-        end_datetime_aware_cal = tz_cal.localize(end_datetime)
-    else:
-        end_datetime_aware_cal = end_datetime.astimezone(tz_cal)
-
+def get_airtable_booked_slots(start_datetime, end_datetime):
+    """Pobiera zajęte sloty z tabeli Rezerwacje w Airtable."""
+    if not airtable_api:
+        logging.error("Airtable API jest niedostępne. Nie można pobrać zajętych slotów.")
+        return []
+        
     try:
-        # Używamy teraz poprawionego zakresu SHEET_READ_RANGE_FOR_BUSY_SLOTS
-        read_range = SHEET_READ_RANGE_FOR_BUSY_SLOTS # np. Arkusz1!F2:K
-        logging.debug(f"Odczyt arkusza '{sheet_name}' zakres '{read_range}' dla zajętych slotów.")
-        result = service.spreadsheets().values().get(
-            spreadsheetId=spreadsheet_id, range=read_range
-        ).execute()
-        values = result.get('values', [])
-        if not values:
-            logging.debug(f"Arkusz '{sheet_name}' pusty/brak danych w zakresie F2:K.")
-            return sheet_busy_slots
+        table = airtable_api.table(AIRTABLE_BASE_ID, AIRTABLE_BOOKINGS_TABLE_NAME)
+        tz_cal = _get_calendar_timezone()
+        tz_airtable = pytz.timezone(AIRTABLE_TIMEZONE)
 
+        start_dt_airtable_tz = start_datetime.astimezone(tz_airtable)
+        end_dt_airtable_tz = end_datetime.astimezone(tz_airtable)
+        
+        # POPRAWKA: Użyj nazwy kolumny 'Date' i prawidłowej formuły dla Airtable
+        formula = f"AND(IS_AFTER({{Date}}, DATETIME_PARSE('{start_dt_airtable_tz.isoformat()}')), IS_BEFORE({{Date}}, DATETIME_PARSE('{end_dt_airtable_tz.isoformat()}')))"
+        
+        logging.debug(f"Airtable: Odczyt z '{AIRTABLE_BOOKINGS_TABLE_NAME}' z formułą: {formula}")
+        # POPRAWKA: nazwy pól muszą odpowiadać Airtable
+        records = table.all(formula=formula, fields=['Date', 'Nazwa Kalendarza'])
+        
+        airtable_busy_slots = []
         duration_delta = datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
 
-        # Indeksy względem początku zakresu odczytu (F=0, G=1, ..., K=5)
-        date_idx = SHEET_DATE_COLUMN_INDEX - SHEET_DATE_COLUMN_INDEX # Zawsze 0
-        time_idx = SHEET_TIME_COLUMN_INDEX - SHEET_DATE_COLUMN_INDEX # G - F = 7 - 6 = 1
-        cal_name_idx = SHEET_CALENDAR_NAME_COLUMN_INDEX - SHEET_DATE_COLUMN_INDEX # K - F = 11 - 6 = 5
-        expected_row_length = cal_name_idx + 1 # Oczekujemy co najmniej 6 kolumn (F do K)
+        for record in records:
+            fields = record.get('fields', {})
+            datetime_str = fields.get('Date') # POPRAWKA
+            calendar_name_str = fields.get('Nazwa Kalendarza', '')
 
-        for i, row in enumerate(values):
-            row_num = i + 2 # Numer wiersza w arkuszu (zaczynamy odczyt od 2)
-            if len(row) >= expected_row_length:
-                date_str = row[date_idx].strip() if date_idx < len(row) else ""
-                time_str = row[time_idx].strip() if time_idx < len(row) else ""
-                calendar_name_str = row[cal_name_idx].strip() if cal_name_idx < len(row) else ""
+            if not datetime_str or not calendar_name_str:
+                continue
 
-                if not date_str or not time_str:
-                    # logging.debug(f"Pominięto wiersz {row_num} z arkusza: brak daty lub czasu.")
-                    continue
-                # Nazwa kalendarza jest teraz kluczowa dla filtrowania per kalendarz
-                if not calendar_name_str:
-                    logging.warning(f"Wiersz {row_num} w arkuszu '{sheet_name}' nie ma nazwy kalendarza w kol. K. Pomijanie tego wpisu z arkusza.")
-                    continue
+            try:
+                slot_start_utc = datetime.datetime.fromisoformat(datetime_str.replace('Z', '+00:00'))
+                slot_start_cal_tz = slot_start_utc.astimezone(tz_cal)
+                slot_end_cal_tz = slot_start_cal_tz + duration_delta
+                
+                airtable_busy_slots.append({
+                    'start': slot_start_cal_tz,
+                    'end': slot_end_cal_tz,
+                    'calendar_name': calendar_name_str
+                })
+            except (ValueError, TypeError) as e:
+                logging.warning(f"Airtable: Błąd parsowania daty z rekordu {record['id']}: '{datetime_str}'. Błąd: {e}")
 
-                try:
-                    # Parsuj jako datę i czas w strefie czasowej arkusza (SHEET_TIMEZONE)
-                    naive_date = datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
-                    naive_time = datetime.datetime.strptime(time_str, '%H:%M').time()
-                    naive_dt = datetime.datetime.combine(naive_date, naive_time)
-                    # Ustaw strefę czasową arkusza
-                    slot_start_sheet_tz = tz_sheet.localize(naive_dt)
-                    # Przekonwertuj na strefę czasową kalendarza dla porównań
-                    slot_start_cal_tz = slot_start_sheet_tz.astimezone(tz_cal)
+        logging.info(f"Airtable: Znaleziono {len(airtable_busy_slots)} zajętych slotów.")
+        return airtable_busy_slots
 
-                    # Porównuj daty w tej samej strefie (kalendarza)
-                    if start_datetime_aware_cal <= slot_start_cal_tz < end_datetime_aware_cal:
-                        slot_end_cal_tz = slot_start_cal_tz + duration_delta
-                        sheet_busy_slots.append({
-                            'start': slot_start_cal_tz, # Czas w strefie kalendarza
-                            'end': slot_end_cal_tz,   # Czas w strefie kalendarza
-                            'calendar_name': calendar_name_str
-                        })
-                        logging.debug(f"  Zajęty slot w arkuszu '{sheet_name}' (wiersz {row_num}): {slot_start_cal_tz:%Y-%m-%d %H:%M %Z} - {slot_end_cal_tz:%H:%M %Z} (Kalendarz: '{calendar_name_str}')")
-                except ValueError:
-                    logging.warning(f"  Pominięto wiersz {row_num} w arkuszu '{sheet_name}' (błąd parsowania daty/czasu): Data='{date_str}', Czas='{time_str}'")
-                except pytz.exceptions.AmbiguousTimeError or pytz.exceptions.NonExistentTimeError:
-                     logging.warning(f"  Pominięto wiersz {row_num} w arkuszu '{sheet_name}' (problem ze strefą czasową przy zmianie czasu): Data='{date_str}', Czas='{time_str}'")
-                except Exception as parse_err:
-                    logging.warning(f"  Pominięto wiersz {row_num} w arkuszu '{sheet_name}' (inny błąd): {parse_err} (Data='{date_str}', Czas='{time_str}')")
-            else:
-                logging.debug(f"Pominięto zbyt krótki wiersz {row_num} w arkuszu '{sheet_name}' (oczekiwano {expected_row_length} kolumn od F): {row}")
-
-    except HttpError as error:
-        logging.error(f"Błąd HTTP API odczytu arkusza '{sheet_name}': {error.resp.status} {error.resp.reason}", exc_info=True)
     except Exception as e:
-        logging.error(f"Nieoczekiwany błąd odczytu arkusza '{sheet_name}': {e}", exc_info=True)
-
-    logging.info(f"Znaleziono {len(sheet_busy_slots)} potencjalnie zajętych slotów w arkuszu '{sheet_name}' (w zakresie F:K) z przypisanymi kalendarzami.")
-    return sheet_busy_slots
+        logging.error(f"Błąd podczas pobierania danych z Airtable: {e}", exc_info=True)
+        return []
 
 
 def get_free_time_ranges(calendar_config_list, start_datetime, end_datetime):
     """
-    Pobiera listę wolnych zakresów czasowych, które są dostępne w CO NAJMNIEJ JEDNYM
-    kalendarzu z podanej listy (`calendar_config_list`) PO odfiltrowaniu przez przypisane do niego
-    rezerwacje z arkusza (Arkusz1).
-
-    Args:
-        calendar_config_list: Lista słowników konfiguracji kalendarzy do sprawdzenia
-                              (każdy słownik powinien zawierać 'id' i 'name').
-        start_datetime: Początek okresu wyszukiwania (może być naive lub aware).
-        end_datetime: Koniec okresu wyszukiwania (może być naive lub aware).
-
-    Returns:
-        Lista słowników {'start': dt_aware, 'end': dt_aware} reprezentujących
-        wolne zakresy czasowe (w strefie CALENDAR_TIMEZONE).
+    Pobiera listę wolnych zakresów czasowych, łącząc zajęte sloty
+    z Kalendarza Google i bazy danych Airtable.
     """
-    service_cal = get_calendar_service()
     tz = _get_calendar_timezone()
-    if not service_cal:
-        # logging.error("Błąd: Usługa kalendarza niedostępna dla get_free_time_ranges.") # Oryginalny log
-        print("[DEBUG PRINT] Błąd: Usługa kalendarza niedostępna dla get_free_time_ranges.")
-        return []
-    if not calendar_config_list:
-        # logging.warning("Brak kalendarzy do sprawdzenia w get_free_time_ranges.") # Oryginalny log
-        print("[DEBUG PRINT] Brak kalendarzy do sprawdzenia w get_free_time_ranges.")
-        return []
 
-    # Upewnij się, że daty graniczne są świadome strefy czasowej KALENDARZA
-    if start_datetime.tzinfo is None:
-        start_datetime = tz.localize(start_datetime)
-    else:
-        start_datetime = start_datetime.astimezone(tz)
-    if end_datetime.tzinfo is None:
-        end_datetime = tz.localize(end_datetime)
-    else:
-        end_datetime = end_datetime.astimezone(tz)
+    # Krok 1: Upewnij się, że daty graniczne są świadome strefy czasowej
+    if start_datetime.tzinfo is None: start_datetime = tz.localize(start_datetime)
+    else: start_datetime = start_datetime.astimezone(tz)
+    
+    if end_datetime.tzinfo is None: end_datetime = tz.localize(end_datetime)
+    else: end_datetime = end_datetime.astimezone(tz)
 
     now = datetime.datetime.now(tz)
-    # Ustal efektywny początek wyszukiwania (nie wcześniej niż teraz)
-    search_start_unfiltered = max(start_datetime, now)
+    search_start = max(start_datetime, now)
 
-    if search_start_unfiltered >= end_datetime:
-        # logging.info(f"Zakres [{search_start_unfiltered:%Y-%m-%d %H:%M %Z} - {end_datetime:%Y-%m-%d %H:%M %Z}] jest nieprawidłowy lub całkowicie w przeszłości.") # Oryginalny log
-        print(f"[DEBUG PRINT] Zakres [{search_start_unfiltered:%Y-%m-%d %H:%M %Z} - {end_datetime:%Y-%m-%d %H:%M %Z}] jest nieprawidłowy lub całkowicie w przeszłości.")
+    if search_start >= end_datetime:
+        logging.info(f"Zakres [{search_start:%Y-%m-%d %H:%M}]-[{end_datetime:%Y-%m-%d %H:%M}] jest nieprawidłowy/w przeszłości.")
         return []
 
-    calendar_names = [c.get('name', c.get('id', 'Nieznany')) for c in calendar_config_list]
-    # logging.info(f"Szukanie wolnych zakresów (Logika OR, Filtr Arkusza Per Kalendarz) w kalendarzach: {calendar_names} od {search_start_unfiltered:%Y-%m-%d %H:%M %Z} do {end_datetime:%Y-%m-%d %H:%M %Z}") # Oryginalny log
-    print(f"[DEBUG PRINT] Szukanie wolnych zakresów (Logika OR, Filtr Arkusza Per Kalendarz) w kalendarzach: {calendar_names} od {search_start_unfiltered:%Y-%m-%d %H:%M %Z} do {end_datetime:%Y-%m-%d %H:%M %Z}")
+    calendar_ids_to_check = [c['id'] for c in calendar_config_list if 'id' in c]
+    logging.info(f"Szukanie wolnych zakresów w kalendarzach: {[c['name'] for c in calendar_config_list]}")
 
+    # Krok 2: Pobierz zajęte sloty z OBU źródeł
+    busy_from_gcal = get_calendar_busy_slots(calendar_ids_to_check, search_start, end_datetime)
+    busy_from_airtable = get_airtable_booked_slots(search_start, end_datetime)
 
-    min_duration_delta = datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+    # Krok 3: Połącz i posortuj wszystkie zajęte sloty
+    all_busy_slots = sorted(busy_from_gcal + busy_from_airtable, key=lambda x: x['start'])
 
-    # --- Krok 1: Pobierz WSZYSTKIE zajęte sloty z Arkusza1 w danym zakresie ---
-    all_sheet_bookings = get_sheet_booked_slots(SPREADSHEET_ID, MAIN_SHEET_NAME, search_start_unfiltered, end_datetime)
-    all_sheet_bookings.sort(key=lambda x: x['start'])
-    # logging.debug(f"--- Zajęte sloty z Arkusza '{MAIN_SHEET_NAME}' (łącznie {len(all_sheet_bookings)} w zakresie) ---") # Oryginalny log
-    print(f"[DEBUG PRINT] --- Zajęte sloty z Arkusza '{MAIN_SHEET_NAME}' (łącznie {len(all_sheet_bookings)} w zakresie) ---")
-
-
-    # --- Krok 2: Dla każdego kalendarza z listy wejściowej, oblicz jego wolne sloty po filtracji ---
-    all_individually_filtered_free_ranges = []
-    calendar_ids_to_check_gcal = [c['id'] for c in calendar_config_list if 'id' in c]
-
-    busy_times_gcal_all = get_calendar_busy_slots(calendar_ids_to_check_gcal, search_start_unfiltered, end_datetime)
-    busy_times_gcal_by_id = defaultdict(list)
-    for busy_slot in busy_times_gcal_all:
-        busy_times_gcal_by_id[busy_slot['calendar_id']].append(busy_slot)
-
-    for cal_config in calendar_config_list:
-        cal_id = cal_config.get('id')
-        cal_name = cal_config.get('name', cal_id or 'Nieznany')
-        if not cal_id:
-            # logging.warning(f"Pominięto konfigurację kalendarza bez ID: {cal_config}") # Oryginalny log
-            print(f"[DEBUG PRINT] Pominięto konfigurację kalendarza bez ID: {cal_config}")
-            continue
-
-        # logging.debug(f"--- Przetwarzanie kalendarza: '{cal_name}' ({cal_id}) ---") # Oryginalny log
-        print(f"[DEBUG PRINT] --- Przetwarzanie kalendarza: '{cal_name}' ({cal_id}) ---")
-
-
-        busy_times_cal = sorted(busy_times_gcal_by_id.get(cal_id, []), key=lambda x: x['start'])
-        merged_busy_cal = []
-        for busy in busy_times_cal:
-            if not merged_busy_cal or busy['start'] > merged_busy_cal[-1]['end']:
-                 merged_busy_cal.append(busy.copy())
+    # Krok 4: Scal nakładające się zajęte sloty w jeden ciągły blok
+    merged_busy = []
+    if all_busy_slots:
+        current_busy = all_busy_slots[0].copy()
+        for next_busy in all_busy_slots[1:]:
+            if next_busy['start'] < current_busy['end']:
+                current_busy['end'] = max(current_busy['end'], next_busy['end'])
             else:
-                 merged_busy_cal[-1]['end'] = max(merged_busy_cal[-1]['end'], busy['end'])
+                merged_busy.append(current_busy)
+                current_busy = next_busy.copy()
+        merged_busy.append(current_busy)
 
-        raw_calendar_free_ranges = []
-        current_time = search_start_unfiltered
-        for busy_slot in merged_busy_cal:
-            if current_time < busy_slot['start']:
-                raw_calendar_free_ranges.append({'start': current_time, 'end': busy_slot['start']})
-            current_time = max(current_time, busy_slot['end'])
-        if current_time < end_datetime:
-            raw_calendar_free_ranges.append({'start': current_time, 'end': end_datetime})
+    # Krok 5: Wygeneruj wolne zakresy na podstawie scalonych zajętych
+    free_ranges = []
+    current_time = search_start
+    for busy in merged_busy:
+        if current_time < busy['start']:
+            free_ranges.append({'start': current_time, 'end': busy['start']})
+        current_time = max(current_time, busy['end'])
+    
+    if current_time < end_datetime:
+        free_ranges.append({'start': current_time, 'end': end_datetime})
 
-        raw_calendar_free_ranges_workhours = []
-        work_start_time = datetime.time(WORK_START_HOUR, 0)
-        work_end_time = datetime.time(WORK_END_HOUR, 0)
-        for free_range in raw_calendar_free_ranges:
-            range_start = free_range['start']
-            range_end = free_range['end']
-            current_day_start = range_start
-            while current_day_start < range_end:
-                day_date = current_day_start.date()
-                work_day_start_dt = tz.localize(datetime.datetime.combine(day_date, work_start_time))
-                work_day_end_dt = tz.localize(datetime.datetime.combine(day_date, work_end_time))
-                effective_start = max(current_day_start, work_day_start_dt) # Oryginalna nazwa zmiennej
-                effective_end = min(range_end, work_day_end_dt) # Oryginalna nazwa zmiennej
-                if effective_start < effective_end and (effective_end - effective_start) >= min_duration_delta:
-                    raw_calendar_free_ranges_workhours.append({'start': effective_start, 'end': effective_end})
-                next_day_start_dt = tz.localize(datetime.datetime.combine(day_date + datetime.timedelta(days=1), datetime.time.min))
-                current_day_start = min(range_end, max(effective_end, next_day_start_dt))
-                current_day_start = max(current_day_start, range_start)
-        # logging.debug(f"    Surowe wolne dla '{cal_name}' (po filtrze GCal i godzin pracy): {len(raw_calendar_free_ranges_workhours)}") # Oryginalny log
-        print(f"[DEBUG PRINT]     Surowe wolne dla '{cal_name}' (po filtrze GCal i godzin pracy): {len(raw_calendar_free_ranges_workhours)}")
+    # Krok 6: Zastosuj filtry godzin pracy i minimalnego czasu rezerwacji
+    final_free_slots = []
+    min_duration = datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
+    min_booking_time = now + datetime.timedelta(hours=MIN_BOOKING_LEAD_HOURS)
+    work_start_time = datetime.time(WORK_START_HOUR, 0)
+    work_end_time = datetime.time(WORK_END_HOUR, 0)
 
+    for free_range in free_ranges:
+        current_day_start = free_range['start']
+        while current_day_start < free_range['end']:
+            day = current_day_start.date()
+            day_work_start = tz.localize(datetime.datetime.combine(day, work_start_time))
+            day_work_end = tz.localize(datetime.datetime.combine(day, work_end_time))
+            
+            # Znajdź część wspólną wolnego zakresu i godzin pracy
+            slot_start = max(current_day_start, day_work_start)
+            slot_end = min(free_range['end'], day_work_end)
+            
+            # Zastosuj filtr minimalnego czasu rezerwacji
+            slot_start = max(slot_start, min_booking_time)
 
-        cal_name_normalized = cal_name.strip().lower()
-        sheet_bookings_for_this_cal = [
-            b for b in all_sheet_bookings
-            if b.get('calendar_name', '').strip().lower() == cal_name_normalized
-        ]
-        # logging.debug(f"    Znaleziono {len(sheet_bookings_for_this_cal)} pasujących rezerwacji w arkuszu '{MAIN_SHEET_NAME}' dla '{cal_name_normalized}'.") # Oryginalny log
-        print(f"[DEBUG PRINT]     Znaleziono {len(sheet_bookings_for_this_cal)} pasujących rezerwacji w arkuszu '{MAIN_SHEET_NAME}' dla '{cal_name_normalized}'.")
+            if slot_start < slot_end and (slot_end - slot_start) >= min_duration:
+                final_free_slots.append({'start': slot_start, 'end': slot_end})
+            
+            # Przejdź do następnego dnia
+            next_day_date = day + datetime.timedelta(days=1)
+            current_day_start = tz.localize(datetime.datetime.combine(next_day_date, datetime.time.min))
 
-        candidate_ranges = raw_calendar_free_ranges_workhours
-        if sheet_bookings_for_this_cal:
-            # logging.debug(f"    Filtrowanie wg {len(sheet_bookings_for_this_cal)} rezerwacji z arkusza...") # Oryginalny log
-            print(f"[DEBUG PRINT]     Filtrowanie wg {len(sheet_bookings_for_this_cal)} rezerwacji z arkusza...")
-            for sheet_busy in sheet_bookings_for_this_cal:
-                next_candidate_ranges = []
-                for calendar_free in candidate_ranges:
-                    overlap_start = max(calendar_free['start'], sheet_busy['start'])
-                    overlap_end = min(calendar_free['end'], sheet_busy['end'])
-                    if overlap_start < overlap_end:
-                        if calendar_free['start'] < sheet_busy['start'] and (sheet_busy['start'] - calendar_free['start']) >= min_duration_delta:
-                            next_candidate_ranges.append({'start': calendar_free['start'], 'end': sheet_busy['start']})
-                        if calendar_free['end'] > sheet_busy['end'] and (calendar_free['end'] - sheet_busy['end']) >= min_duration_delta:
-                            next_candidate_ranges.append({'start': sheet_busy['end'], 'end': calendar_free['end']})
-                    else:
-                        next_candidate_ranges.append(calendar_free)
-                candidate_ranges = sorted(next_candidate_ranges, key=lambda x: x['start'])
-            filtered_calendar_free_ranges = candidate_ranges
-            # logging.debug(f"    Sloty dla '{cal_name}' PO filtracji arkuszem: {len(filtered_calendar_free_ranges)}") # Oryginalny log
-            print(f"[DEBUG PRINT]     Sloty dla '{cal_name}' PO filtracji arkuszem: {len(filtered_calendar_free_ranges)}")
-        else:
-            filtered_calendar_free_ranges = raw_calendar_free_ranges_workhours
-            # logging.debug(f"    Brak rezerwacji w arkuszu '{MAIN_SHEET_NAME}' do filtrowania dla '{cal_name}'. Używam slotów po filtrze GCal/godzin.") # Oryginalny log
-            print(f"[DEBUG PRINT]     Brak rezerwacji w arkuszu '{MAIN_SHEET_NAME}' do filtrowania dla '{cal_name}'. Używam slotów po filtrze GCal/godzin.")
-
-        all_individually_filtered_free_ranges.extend(filtered_calendar_free_ranges)
-
-    if not all_individually_filtered_free_ranges:
-        # logging.info("Brak wolnych zakresów w żadnym z wybranych kalendarzy po indywidualnej filtracji.") # Oryginalny log
-        print("[DEBUG PRINT] Brak wolnych zakresów w żadnym z wybranych kalendarzy po indywidualnej filtracji.")
-        return []
-    sorted_filtered_free = sorted(all_individually_filtered_free_ranges, key=lambda x: x['start'])
-    # logging.debug(f"--- Łączenie {len(sorted_filtered_free)} indywidualnie przefiltrowanych wolnych slotów (Logika 'OR') ---") # Oryginalny log
-    print(f"[DEBUG PRINT] --- Łączenie {len(sorted_filtered_free)} indywidualnie przefiltrowanych wolnych slotów (Logika 'OR') ---")
-
-
-    merged_all_free_ranges = []
-    if sorted_filtered_free:
-        current_merged_slot = sorted_filtered_free[0].copy()
-        for next_slot in sorted_filtered_free[1:]:
-            if next_slot['start'] <= current_merged_slot['end']:
-                current_merged_slot['end'] = max(current_merged_slot['end'], next_slot['end'])
-            else:
-                if (current_merged_slot['end'] - current_merged_slot['start']) >= min_duration_delta:
-                     merged_all_free_ranges.append(current_merged_slot)
-                current_merged_slot = next_slot.copy()
-        if (current_merged_slot['end'] - current_merged_slot['start']) >= min_duration_delta:
-            merged_all_free_ranges.append(current_merged_slot)
-    # logging.debug(f"--- Scalone wolne zakresy ('OR') PRZED filtrem wyprzedzenia ({len(merged_all_free_ranges)}) ---") # Oryginalny log
-    print(f"[DEBUG PRINT] --- Scalone wolne zakresy ('OR') PRZED filtrem wyprzedzenia ({len(merged_all_free_ranges)}) ---")
-
-
-    # --- Krok 5: Zastosuj filtr MIN_BOOKING_LEAD_HOURS ---
-    final_filtered_slots = []
-    min_start_time = now + datetime.timedelta(hours=MIN_BOOKING_LEAD_HOURS)
-    # logging.debug(f"Minimalny czas startu (filtr {MIN_BOOKING_LEAD_HOURS}h): {min_start_time:%Y-%m-%d %H:%M %Z}") # Oryginalny log
-    print(f"[DEBUG PRINT] get_free_time_ranges: 'now' is {now.strftime('%Y-%m-%d %H:%M:%S %Z')}, min_start_time (lead filter) is {min_start_time.strftime('%Y-%m-%d %H:%M:%S %Z')}, MIN_BOOKING_LEAD_HOURS is {MIN_BOOKING_LEAD_HOURS}")
-
-
-    for slot in merged_all_free_ranges:
-        original_slot_start = slot['start'] # Do logowania
-        original_slot_end = slot['end']     # Do logowania
-
-        effective_start = max(slot['start'], min_start_time) # Oryginalna nazwa zmiennej
-        effective_end = slot['end'] # Oryginalna nazwa zmiennej (koniec nie jest modyfikowany przez min_start_time)
-
-        passes_filter = False
-        reason = ""
-
-        if effective_start < effective_end:
-            if (effective_end - effective_start) >= min_duration_delta:
-                final_filtered_slots.append({'start': effective_start, 'end': effective_end})
-                passes_filter = True
-            else:
-                reason = f"Too short after lead filter (duration: {(effective_end - effective_start).total_seconds()/60:.1f} min)"
-        else:
-            reason = f"Start ({effective_start.strftime('%H:%M')}) not before end ({effective_end.strftime('%H:%M')}) after lead filter"
-
-        # Loguj tylko sloty, które są odrzucane LUB te, które są z dzisiaj (dla lepszej widoczności)
-        if not passes_filter or (original_slot_start.date() == now.date() and passes_filter):
-            print(
-                f"[DEBUG PRINT] Slot Eval: Original [{original_slot_start.strftime('%Y-%m-%d %H:%M')}-{original_slot_end.strftime('%Y-%m-%d %H:%M')}] "
-                f"Effective after lead: [{effective_start.strftime('%Y-%m-%d %H:%M')}-{effective_end.strftime('%Y-%m-%d %H:%M')}] "
-                f"Passes Lead Filter: {passes_filter}. Reason (if failed): {reason}"
-            )
-
-
-    # logging.info(f"Znaleziono {len(final_filtered_slots)} ostatecznych wolnych zakresów (Logika 'OR', Filtr Arkusza Per Kalendarz, po wszystkich filtrach).") # Oryginalny log
-    print(f"[DEBUG PRINT] Znaleziono {len(final_filtered_slots)} ostatecznych wolnych zakresów (Logika 'OR', Filtr Arkusza Per Kalendarz, po wszystkich filtrach).")
-    if final_filtered_slots:
-        for i, s_debug in enumerate(final_filtered_slots[:5]):
-             print(f"[DEBUG PRINT] Final slot {i+1} for AI: {s_debug['start'].strftime('%Y-%m-%d %H:%M:%S %Z')} - {s_debug['end'].strftime('%Y-%m-%d %H:%M:%S %Z')}")
-        if len(final_filtered_slots) > 5:
-             print("[DEBUG PRINT] ... and possibly more.")
-    else:
-        print("[DEBUG PRINT] No final slots available after all filters.")
-
-
-    return final_filtered_slots
-
+    logging.info(f"Znaleziono {len(final_free_slots)} ostatecznych wolnych zakresów po wszystkich filtrach.")
+    return final_free_slots
 
 def is_slot_actually_free(start_time, calendar_id):
     """
@@ -1676,398 +1480,138 @@ def format_ranges_for_ai(ranges, subject=None):
     logging.debug(f"--- Zakresy sformatowane dla AI ({slots_added} pokazanych, Przedmiot: {subject or 'brak'}) ---\n{formatted_output}\n---------------------------------")
     return formatted_output
 
+
+
+
 # =====================================================================
-# === FUNKCJE GOOGLE SHEETS (ZAPIS + ODCZYT) ==========================
+# === FUNKCJE AIRTABLE (ZAPIS + ODCZYT) ===============================
 # =====================================================================
 
-def get_sheets_service():
-    """Inicjalizuje (i cachuje) usługę Google Sheets API."""
-    global _sheets_service
-    if _sheets_service:
-        return _sheets_service
-    if not os.path.exists(SHEETS_SERVICE_ACCOUNT_FILE):
-        logging.error(f"KRYTYCZNY BŁĄD: Brak pliku klucza '{SHEETS_SERVICE_ACCOUNT_FILE}'")
-        return None
+def create_airtable_record_phase1(psid, start_time, calendar_name, subject):
+    """Zapisuje dane Fazy 1 do tabeli 'Rezerwacje' w Airtable."""
+    if not airtable_api:
+        return False, "Błąd połączenia z Airtable (Faza 1)."
     try:
-        creds = service_account.Credentials.from_service_account_file(
-            SHEETS_SERVICE_ACCOUNT_FILE, scopes=SHEET_SCOPES
-        )
-        _sheets_service = build('sheets', 'v4', credentials=creds, cache_discovery=False)
-        logging.info(f"Utworzono połączenie z Google Sheets API (odczyt/zapis) używając '{SHEETS_SERVICE_ACCOUNT_FILE}'.")
-        return _sheets_service
+        table = airtable_api.table(AIRTABLE_BASE_ID, AIRTABLE_BOOKINGS_TABLE_NAME)
+        
+        # Airtable preferuje daty w formacie ISO 8601 w strefie UTC (z 'Z' na końcu)
+        start_time_utc = start_time.astimezone(pytz.utc)
+        
+        # Upewnij się, że nazwy pól odpowiadają DOKŁADNIE nazwom kolumn w Airtable
+        # Na podstawie Twoich zrzutów ekranu!
+        record_data = {
+            'PSID': psid,
+            'Date': start_time_utc.isoformat(), # Używam 'Date' jak na zrzucie ekranu
+            'Nazwa Kalendarza': calendar_name,
+            'Przedmiot': subject, # Upewnij się, że masz taką kolumnę!
+            'Status': 'Oczekiwanie na dane ucznia' # Dobra praktyka, by śledzić status
+        }
+        
+        logging.info(f"Próba zapisu Fazy 1 (Airtable) do '{AIRTABLE_BOOKINGS_TABLE_NAME}': {record_data}")
+        created_record = table.create(record_data)
+        
+        record_id = created_record['id']
+        logging.info(f"Zapisano Faza 1 (Airtable) pomyślnie. Record ID: {record_id}")
+        
+        # Logowanie statystyki po udanym zapisie
+        log_statistic("booking")
+        
+        return True, record_id
+        
     except Exception as e:
-        logging.error(f"Błąd tworzenia usługi Google Sheets: {e}", exc_info=True)
-        return None
+        logging.error(f"Błąd podczas zapisu Fazy 1 do Airtable: {e}", exc_info=True)
+        return False, "Błąd systemu podczas zapisu do bazy danych."
 
-def find_row_by_psid(psid):
-    """Szuka wiersza w arkuszu Arkusz1 na podstawie PSID."""
-    service = get_sheets_service()
-    if not service:
-        logging.error("Błąd: Usługa arkuszy niedostępna (szukanie PSID).")
-        return None
+def update_airtable_record_phase2(record_id, student_data):
+    """Aktualizuje rekord w Airtable danymi Fazy 2."""
+    if not airtable_api:
+        return False, "Błąd połączenia z Airtable (Faza 2)."
+    if not record_id:
+        return False, "Brak ID rekordu do aktualizacji."
+        
     try:
-        read_range = SHEET_READ_RANGE_FOR_PSID_SEARCH # Np. Arkusz1!A2:A
-        logging.debug(f"Szukanie PSID {psid} w '{MAIN_SHEET_NAME}' zakres '{read_range}'")
-        result = service.spreadsheets().values().get(
-            spreadsheetId=SPREADSHEET_ID, range=read_range
-        ).execute()
-        values = result.get('values', [])
-        if not values:
-            logging.debug(f"Arkusz '{MAIN_SHEET_NAME}' pusty lub brak PSID w zakresie A2:A.")
-            return None
-        for i, row in enumerate(values):
-            # Sprawdź czy wiersz nie jest pusty i czy pierwszy element (PSID) pasuje
-            if row and len(row) > 0 and row[0].strip() == psid:
-                row_number = i + 2 # +2 bo zakres zaczyna się od A2, a indeksy są 0-based
-                logging.info(f"Znaleziono PSID {psid} w wierszu {row_number} arkusza '{MAIN_SHEET_NAME}'.")
-                return row_number
-        logging.info(f"Nie znaleziono PSID {psid} w arkuszu '{MAIN_SHEET_NAME}' (zakres {read_range}).")
-        return None
-    except HttpError as error:
-        error_content = "Brak szczegółów"
-        try:
-            if error.resp and error.content:
-                error_content = json.loads(error.content.decode('utf-8'))
-        except Exception: pass
-        logging.error(f"Błąd HTTP {error.resp.status} API szukania PSID w '{MAIN_SHEET_NAME}': {error.resp.reason}. Szczegóły: {error_content}", exc_info=False)
-        return None
-    except Exception as e:
-        logging.error(f"Nieoczekiwany błąd szukania PSID w '{MAIN_SHEET_NAME}': {e}", exc_info=True)
-        return None
-
-
-def write_to_sheet_phase1(psid, start_time, calendar_name):
-    """Zapisuje dane Fazy 1 (PSID, Data, Czas, Nazwa Kalendarza) do Arkusz1 (APPEND)."""
-    service = get_sheets_service()
-    if not service:
-        return False, "Błąd połączenia z Google Sheets (Faza 1 - Append)."
-
-    tz_sheet = _get_sheet_timezone() # Użyj strefy czasowej arkusza do zapisu
-    # Upewnij się, że start_time jest świadome i w strefie arkusza
-    if start_time.tzinfo is None:
-        # Jeśli naive, załóż, że jest w strefie kalendarza i przekonwertuj do strefy arkusza
-        tz_cal = _get_calendar_timezone()
-        try:
-            start_time_aware = tz_cal.localize(start_time).astimezone(tz_sheet)
-        except (pytz.exceptions.AmbiguousTimeError, pytz.exceptions.NonExistentTimeError):
-             logging.error(f"Błąd konwersji czasu Fazy 1 (zmiana czasu?) dla {start_time}. Używam UTC offsetu.")
-             # Fallback: użyj offsetu UTC jeśli lokalizacja zawiedzie
-             start_time_aware = start_time.astimezone(tz_sheet) # Próba konwersji z istniejącego (może być UTC)
-    else:
-        # Jeśli aware, po prostu przekonwertuj do strefy arkusza
-        start_time_aware = start_time.astimezone(tz_sheet)
-
-    date_str = start_time_aware.strftime('%Y-%m-%d')
-    time_str = start_time_aware.strftime('%H:%M')
-
-    # Przygotuj wiersz z odpowiednią liczbą pustych komórek
-    # Znajdź maksymalny indeks kolumny używany w zapisie
-    max_col_index = max(SHEET_PSID_COLUMN_INDEX, SHEET_DATE_COLUMN_INDEX, SHEET_TIME_COLUMN_INDEX, SHEET_CALENDAR_NAME_COLUMN_INDEX)
-    data_row = [""] * max_col_index # Utwórz listę pustych stringów o odpowiedniej długości
-
-    # Wypełnij dane w odpowiednich indeksach (0-based)
-    data_row[SHEET_PSID_COLUMN_INDEX - 1] = psid
-    data_row[SHEET_DATE_COLUMN_INDEX - 1] = date_str
-    data_row[SHEET_TIME_COLUMN_INDEX - 1] = time_str
-    data_row[SHEET_CALENDAR_NAME_COLUMN_INDEX - 1] = calendar_name # Zapisz nazwę kalendarza
-
-    try:
-        # Zakres A1 jest tylko po to, by append wiedziało, do którego arkusza dodać
-        # Dane zostaną dodane w pierwszym wolnym wierszu
-        range_name = f"{MAIN_SHEET_NAME}!A1"
-        body = {'values': [data_row]}
-        logging.info(f"Próba zapisu Fazy 1 (Append) do '{MAIN_SHEET_NAME}': PSID={psid}, Data={date_str}, Czas={time_str}, Kalendarz='{calendar_name}'")
-
-        result = service.spreadsheets().values().append(
-            spreadsheetId=SPREADSHEET_ID,
-            range=range_name, # Gdzie zacząć szukać miejsca do dodania
-            valueInputOption='USER_ENTERED', # Interpretuj dane jakby wpisał je użytkownik
-            insertDataOption='INSERT_ROWS', # Wstaw jako nowy wiersz
-            body=body
-        ).execute()
-
-        updated_range = result.get('updates', {}).get('updatedRange', '')
-        logging.info(f"Zapisano Faza 1 (Append) pomyślnie. Zaktualizowany zakres: {updated_range}")
-
-        # Spróbuj wyodrębnić numer wiersza z 'updatedRange' (np. "Arkusz1!A10:K10")
-        match = re.search(rf"{re.escape(MAIN_SHEET_NAME)}!A(\d+):", updated_range)
-        row_index = int(match.group(1)) if match else None
-
-        if row_index:
-            logging.info(f"Wyodrębniono numer wiersza zapisu Fazy 1: {row_index}")
-            # Loguj statystykę rezerwacji PO udanym zapisie Fazy 1
-            log_statistic("booking")
-            return True, row_index # Zwróć sukces i numer wiersza
-        else:
-            logging.warning(f"Nie udało się wyodrębnić numeru wiersza z odpowiedzi API append: {updated_range}. Zwracam sukces bez numeru wiersza.")
-            # Loguj statystykę rezerwacji PO udanym zapisie Fazy 1 (nawet bez numeru wiersza)
-            log_statistic("booking")
-            # Zwracamy sukces, ale bez numeru wiersza - Faza 2 będzie musiała go znaleźć po PSID.
-            return True, None
-
-    except HttpError as error:
-        error_content = "Brak szczegółów"
-        try:
-            if error.resp and error.content:
-                error_content = json.loads(error.content.decode('utf-8'))
-        except Exception: pass
-        error_details = f"{error.resp.status} {error.resp.reason}"
-        logging.error(f"Błąd API Fazy 1 (Append) do '{MAIN_SHEET_NAME}': {error_details}. Szczegóły: {error_content}", exc_info=False)
-        # Zwróć bardziej szczegółowy błąd, jeśli to możliwe
-        api_message = error_content.get('error', {}).get('message', error_details) if isinstance(error_content, dict) else error_details
-        return False, f"Błąd zapisu Fazy 1 ({api_message})."
-    except Exception as e:
-        logging.error(f"Błąd Python Fazy 1 (Append) do '{MAIN_SHEET_NAME}': {e}", exc_info=True)
-        return False, "Wewnętrzny błąd systemu podczas zapisu Fazy 1."
-
-def update_sheet_phase2(student_data, sheet_row_index):
-    """Aktualizuje wiersz w Arkusz1 danymi Fazy 2 (używając tylko numeru klasy dla kol. H)."""
-    service = get_sheets_service()
-    if not service:
-        return False, "Błąd połączenia z Google Sheets (Faza 2)."
-    if sheet_row_index is None or not isinstance(sheet_row_index, int) or sheet_row_index < 2:
-        logging.error(f"Nieprawidłowy indeks wiersza ({sheet_row_index}) do aktualizacji Fazy 2 w '{MAIN_SHEET_NAME}'.")
-        return False, "Brak/nieprawidłowy numer wiersza do aktualizacji."
-    try:
-        # Pobierz dane z wejściowego słownika, zapewniając domyślne wartości ''
+        table = airtable_api.table(AIRTABLE_BASE_ID, AIRTABLE_BOOKINGS_TABLE_NAME)
+        
         parent_fn = student_data.get('parent_first_name', '')
         parent_ln = student_data.get('parent_last_name', '')
         student_fn = student_data.get('student_first_name', '')
         student_ln = student_data.get('student_last_name', '')
-        grade_info = student_data.get('grade_info', '') # Pełna informacja, np. "3 klasa liceum"
-        level_info = student_data.get('level_info', '') # Np. "Podstawowy", "Rozszerzony", "Brak"
-
-        # Wyodrębnij numer klasy, pełny opis i typ szkoły
-        numerical_grade, _, school_type = extract_school_type(grade_info) # Ignorujemy drugi element (class_desc)
-
-        logging.info(f"Przygotowanie danych do Fazy 2 (Arkusz1, wiersz {sheet_row_index}): Rodzic='{parent_fn} {parent_ln}', Uczeń='{student_fn} {student_ln}', NrKlasy(H)='{numerical_grade}', TypSzkoły(I)='{school_type}', Poziom(J)='{level_info}'")
-
-        # Przygotuj listę wartości do zaktualizowania dla każdej grupy kolumn
-        # Grupa 1: Dane rodzica i ucznia (Kolumny B, C, D, E)
-        update_data_group1 = [parent_fn, parent_ln, student_fn, student_ln]
-        # Grupa 2: Dane o edukacji (Kolumny H, I, J)
-        update_data_group2 = [numerical_grade, school_type, level_info]
-
-        # Zdefiniuj zakresy aktualizacji
-        start_col_g1 = chr(ord('A') + SHEET_PARENT_FN_COLUMN_INDEX - 1) # B
-        end_col_g1 = chr(ord('A') + SHEET_STUDENT_LN_COLUMN_INDEX - 1)   # E
-        range_group1 = f"{MAIN_SHEET_NAME}!{start_col_g1}{sheet_row_index}:{end_col_g1}{sheet_row_index}"
-
-        start_col_g2 = chr(ord('A') + SHEET_GRADE_COLUMN_INDEX - 1)     # H
-        end_col_g2 = chr(ord('A') + SHEET_LEVEL_COLUMN_INDEX - 1)       # J
-        range_group2 = f"{MAIN_SHEET_NAME}!{start_col_g2}{sheet_row_index}:{end_col_g2}{sheet_row_index}"
-
-        # Przygotuj ciała zapytań
-        body1 = {'values': [update_data_group1]}
-        body2 = {'values': [update_data_group2]}
-
-        # Wykonaj aktualizację grupy 1
-        logging.info(f"Aktualizacja Fazy 2 (Grupa 1) wiersz {sheet_row_index} arkusz '{MAIN_SHEET_NAME}' zakres {range_group1} danymi: {update_data_group1}")
-        result1 = service.spreadsheets().values().update(
-            spreadsheetId=SPREADSHEET_ID,
-            range=range_group1,
-            valueInputOption='USER_ENTERED',
-            body=body1
-        ).execute()
-        logging.info(f"Zaktualizowano Faza 2 (Grupa 1): {result1.get('updatedCells')} komórek.")
-
-        # Wykonaj aktualizację grupy 2
-        logging.info(f"Aktualizacja Fazy 2 (Grupa 2) wiersz {sheet_row_index} arkusz '{MAIN_SHEET_NAME}' zakres {range_group2} danymi: {update_data_group2}")
-        result2 = service.spreadsheets().values().update(
-            spreadsheetId=SPREADSHEET_ID,
-            range=range_group2,
-            valueInputOption='USER_ENTERED',
-            body=body2
-        ).execute()
-        logging.info(f"Zaktualizowano Faza 2 (Grupa 2): {result2.get('updatedCells')} komórek.")
-
+        grade_info = student_data.get('grade_info', '')
+        level_info = student_data.get('level_info', '')
+        
+        # Użyj swojej istniejącej funkcji do ekstrakcji danych
+        numerical_grade, _, school_type = extract_school_type(grade_info)
+        
+        # Upewnij się, że nazwy pól odpowiadają DOKŁADNIE nazwom kolumn w Airtable
+        update_data = {
+            'Imię Rodzica': parent_fn,
+            'Nazwisko Rodzica': parent_ln,
+            'Imię Ucznia': student_fn,
+            'Nazwisko Ucznia': student_ln,
+            'Klasa': numerical_grade, # Zapisujemy tylko numer
+            'Typ Szkoły': school_type,
+            'Poziom': level_info if level_info != 'Brak' else '',
+            'Status': 'Dane zebrane - oczekiwanie na potwierdzenie'
+        }
+        
+        logging.info(f"Aktualizacja Fazy 2 (Airtable) rekordu {record_id} danymi: {update_data}")
+        table.update(record_id, update_data)
+        logging.info(f"Zaktualizowano rekord {record_id} pomyślnie.")
+        
         return True, None # Sukces
-
-    except HttpError as error:
-        error_content = "Brak szczegółów"
-        try:
-            if error.resp and error.content:
-                error_content = json.loads(error.content.decode('utf-8'))
-        except Exception: pass
-        error_details = f"{error.resp.status} {error.resp.reason}"
-        logging.error(f"Błąd API Fazy 2 (Update) w '{MAIN_SHEET_NAME}': {error_details}. Szczegóły: {error_content}", exc_info=False)
-        api_message = error_content.get('error', {}).get('message', error_details) if isinstance(error_content, dict) else error_details
-        return False, f"Błąd aktualizacji Fazy 2 ({api_message})."
+        
     except Exception as e:
-        logging.error(f"Błąd Python Fazy 2 (Update) w '{MAIN_SHEET_NAME}': {e}", exc_info=True)
-        return False, "Wewnętrzny błąd systemu podczas aktualizacji Fazy 2."
-
-# --- NOWE FUNKCJE DLA STATYSTYK (Arkusz2) ---
-
-def find_column_by_date(service, sheet_id, sheet_name, row_index, target_date):
-    """Znajduje indeks kolumny (1-based) w danym wierszu na podstawie daty."""
-    tz_sheet = _get_sheet_timezone()
-    # Upewnij się, że target_date jest obiektem date
-    if isinstance(target_date, datetime.datetime):
-        target_date = target_date.astimezone(tz_sheet).date()
-    elif not isinstance(target_date, datetime.date):
-        logging.error(f"[Stats] Nieprawidłowy typ daty docelowej: {type(target_date)}")
-        return None
-
-    try:
-        # Odczytaj cały wiersz nagłówka z datami
-        range_name = f"{sheet_name}!{row_index}:{row_index}"
-        logging.debug(f"[Stats] Odczyt wiersza nagłówka dat: {range_name}")
-        result = service.spreadsheets().values().get(spreadsheetId=sheet_id, range=range_name).execute()
-        values = result.get('values', [[]])[0] # Pobierz pierwszy (i jedyny) wiersz
-
-        if not values:
-            logging.warning(f"[Stats] Wiersz nagłówka dat ({row_index}) w '{sheet_name}' jest pusty.")
-            return None
-
-        # Iteruj przez komórki wiersza, szukając pasującej daty
-        for col_idx, cell_value in enumerate(values):
-            if not cell_value: # Pomiń puste komórki
-                continue
-            try:
-                # Spróbuj sparsować datę z komórki arkusza (oczekiwany format D.M.YYYY)
-                cell_date = datetime.datetime.strptime(cell_value.strip(), '%d.%m.%Y').date()
-                if cell_date == target_date:
-                    column_index_1_based = col_idx + 1 # Indeks kolumny jest 1-based
-                    logging.info(f"[Stats] Znaleziono kolumnę dla daty {target_date.strftime('%d.%m.%Y')} -> Kolumna {column_index_1_based} ({chr(ord('A') + col_idx)})")
-                    return column_index_1_based
-            except ValueError:
-                # Ignoruj komórki, których nie można sparsować jako daty w oczekiwanym formacie
-                # Loguj tylko przy debugowaniu, aby uniknąć spamu
-                # logging.debug(f"[Stats] Nie udało się sparsować daty w komórce {chr(ord('A') + col_idx)}{row_index}: '{cell_value}'")
-                pass
-            except Exception as parse_err:
-                 logging.warning(f"[Stats] Błąd parsowania daty w komórce {chr(ord('A') + col_idx)}{row_index}: '{cell_value}', Błąd: {parse_err}")
-
-
-        logging.warning(f"[Stats] Nie znaleziono kolumny dla daty {target_date.strftime('%d.%m.%Y')} w wierszu {row_index} arkusza '{sheet_name}'.")
-        return None
-
-    except HttpError as error:
-        logging.error(f"[Stats] Błąd HTTP API podczas szukania kolumny daty w '{sheet_name}': {error}", exc_info=True)
-        return None
-    except Exception as e:
-        logging.error(f"[Stats] Nieoczekiwany błąd podczas szukania kolumny daty w '{sheet_name}': {e}", exc_info=True)
-        return None
-
-def find_row_by_label(service, sheet_id, sheet_name, column_letter, target_label):
-    """Znajduje indeks wiersza (1-based) w danej kolumnie na podstawie etykiety."""
-    try:
-        range_name = f"{sheet_name}!{column_letter}:{column_letter}" # Cała kolumna A
-        logging.debug(f"[Stats] Szukanie etykiety '{target_label}' w zakresie {range_name}")
-        result = service.spreadsheets().values().get(spreadsheetId=sheet_id, range=range_name).execute()
-        values = result.get('values', [])
-
-        if not values:
-            logging.warning(f"[Stats] Kolumna etykiet ({column_letter}) w '{sheet_name}' jest pusta.")
-            return None
-
-        for row_idx, row in enumerate(values):
-            if row and row[0].strip() == target_label:
-                row_index_1_based = row_idx + 1 # Indeks wiersza jest 1-based
-                logging.info(f"[Stats] Znaleziono wiersz dla etykiety '{target_label}' -> Wiersz {row_index_1_based}")
-                return row_index_1_based
-
-        logging.warning(f"[Stats] Nie znaleziono wiersza dla etykiety '{target_label}' w kolumnie {column_letter} arkusza '{sheet_name}'.")
-        return None
-
-    except HttpError as error:
-        logging.error(f"[Stats] Błąd HTTP API podczas szukania wiersza etykiety w '{sheet_name}': {error}", exc_info=True)
-        return None
-    except Exception as e:
-        logging.error(f"[Stats] Nieoczekiwany błąd podczas szukania wiersza etykiety w '{sheet_name}': {e}", exc_info=True)
-        return None
-
-def increment_cell_value(service, sheet_id, sheet_name, row_index, col_index):
-    """Odczytuje, inkrementuje i zapisuje wartość w danej komórce."""
-    if not row_index or not col_index:
-        logging.error(f"[Stats] Nieprawidłowe indeksy wiersza/kolumny ({row_index}, {col_index}) do inkrementacji.")
-        return False
-
-    # Konwertuj col_index (1-based) na literę kolumny
-    col_letter = chr(ord('A') + col_index - 1)
-    cell_a1_notation = f"{sheet_name}!{col_letter}{row_index}"
-
-    try:
-        # 1. Odczytaj obecną wartość
-        logging.debug(f"[Stats] Odczyt wartości z komórki {cell_a1_notation}")
-        result = service.spreadsheets().values().get(
-            spreadsheetId=sheet_id,
-            range=cell_a1_notation,
-            valueRenderOption='UNFORMATTED_VALUE' # Odczytaj jako liczbę, jeśli to możliwe
-        ).execute()
-        values = result.get('values', [[]])
-        current_value_raw = values[0][0] if values and values[0] else 0
-        current_value = 0
-        if isinstance(current_value_raw, (int, float)):
-            current_value = int(current_value_raw)
-        elif isinstance(current_value_raw, str) and current_value_raw.isdigit():
-            current_value = int(current_value_raw)
-        else:
-            # Jeśli wartość nie jest numeryczna lub pusta, zacznij od 0
-            logging.debug(f"[Stats] Wartość w {cell_a1_notation} nie jest liczbą ('{current_value_raw}'). Zaczynam od 0.")
-            current_value = 0
-
-        # 2. Inkrementuj wartość
-        new_value = current_value + 1
-        logging.info(f"[Stats] Inkrementacja wartości w {cell_a1_notation} z {current_value} do {new_value}")
-
-        # 3. Zapisz nową wartość
-        body = {'values': [[new_value]]}
-        update_result = service.spreadsheets().values().update(
-            spreadsheetId=sheet_id,
-            range=cell_a1_notation,
-            valueInputOption='USER_ENTERED', # Zapisz jako liczbę
-            body=body
-        ).execute()
-        logging.debug(f"[Stats] Zapisano nową wartość w {cell_a1_notation}. Wynik: {update_result.get('updatedCells')} komórek.")
-        return True
-
-    except HttpError as error:
-        logging.error(f"[Stats] Błąd HTTP API podczas inkrementacji komórki {cell_a1_notation}: {error}", exc_info=True)
-        return False
-    except Exception as e:
-        logging.error(f"[Stats] Nieoczekiwany błąd podczas inkrementacji komórki {cell_a1_notation}: {e}", exc_info=True)
-        return False
+        logging.error(f"Błąd podczas aktualizacji Fazy 2 w Airtable: {e}", exc_info=True)
+        return False, "Błąd systemu podczas aktualizacji w bazie danych."
 
 def log_statistic(event_type):
-    """Loguje statystykę (new_contact lub booking) w Arkusz2."""
-    service = get_sheets_service()
-    if not service:
-        logging.error("[Stats] Nie można zalogować statystyki - usługa arkuszy niedostępna.")
+    """Loguje statystykę (new_contact lub booking) w tabeli 'Statystyki' w Airtable."""
+    if not airtable_api:
+        logging.error("[Stats] Nie można zalogować statystyki - usługa Airtable niedostępna.")
         return
 
     try:
-        # Określ etykietę wiersza na podstawie typu zdarzenia
-        target_label = None
+        table = airtable_api.table(AIRTABLE_BASE_ID, AIRTABLE_STATS_TABLE_NAME)
+        
+        # Nazwa pola do inkrementacji na podstawie typu zdarzenia
+        # Zgodnie z Twoim zrzutem ekranu: 'Nowe Kontakty' i 'Rezerwacje'
+        field_to_increment = None
         if event_type == "new_contact":
-            target_label = STATS_NEW_CONTACT_ROW_LABEL
+            field_to_increment = "Nowe Kontakty"
         elif event_type == "booking":
-            target_label = STATS_BOOKING_ROW_LABEL
+            field_to_increment = "Rezerwacje" # Nazwa kolumny zliczającej rezerwacje
         else:
             logging.error(f"[Stats] Nieznany typ zdarzenia statystycznego: {event_type}")
             return
-
-        # Znajdź wiersz dla tej etykiety (w kolumnie A)
-        target_row_index = find_row_by_label(service, SPREADSHEET_ID, STATS_SHEET_NAME, 'A', target_label)
-        if not target_row_index:
-            logging.error(f"[Stats] Nie znaleziono wiersza dla '{target_label}' w {STATS_SHEET_NAME}!A:A.")
-            return
-
-        # Pobierz dzisiejszą datę w strefie czasowej arkusza
-        today = datetime.datetime.now(_get_sheet_timezone()).date()
-
-        # Znajdź kolumnę dla dzisiejszej daty (w wierszu nagłówka)
-        target_col_index = find_column_by_date(service, SPREADSHEET_ID, STATS_SHEET_NAME, STATS_DATE_HEADER_ROW, today)
-        if not target_col_index:
-            logging.error(f"[Stats] Nie znaleziono kolumny dla daty {today.strftime('%d.%m.%Y')} w {STATS_SHEET_NAME} wiersz {STATS_DATE_HEADER_ROW}.")
-            return
-
-        # Inkrementuj wartość w znalezionej komórce
-        increment_cell_value(service, SPREADSHEET_ID, STATS_SHEET_NAME, target_row_index, target_col_index)
+            
+        # Pobierz dzisiejszą datę w formacie YYYY-MM-DD
+        today_str = datetime.datetime.now(pytz.timezone(AIRTABLE_TIMEZONE)).strftime('%Y-%m-%d')
+        
+        # Sprawdź, czy istnieje już rekord dla dzisiejszej daty
+        # W Airtable pole typu "Date" jest przechowywane w formacie ISO, musimy odpowiednio sformatować formułę
+        formula = f"IS_SAME({{Data}}, '{today_str}', 'day')"
+        existing_record = table.first(formula=formula)
+        
+        if existing_record:
+            # Rekord istnieje - odczytaj i zaktualizuj
+            record_id = existing_record['id']
+            current_value = existing_record.get('fields', {}).get(field_to_increment, 0)
+            new_value = (current_value or 0) + 1
+            
+            logging.info(f"[Stats] Aktualizacja statystyk dla {today_str}: {field_to_increment} z {current_value} na {new_value}")
+            table.update(record_id, {field_to_increment: new_value})
+        else:
+            # Rekord nie istnieje - utwórz nowy
+            new_record_data = {
+                "Data": today_str,
+                field_to_increment: 1
+            }
+            logging.info(f"[Stats] Tworzenie nowego rekordu statystyk dla {today_str}: {new_record_data}")
+            table.create(new_record_data)
 
     except Exception as e:
-        logging.error(f"[Stats] Ogólny błąd podczas logowania statystyki '{event_type}': {e}", exc_info=True)
+        logging.error(f"[Stats] Ogólny błąd podczas logowania statystyki '{event_type}' w Airtable: {e}", exc_info=True)
+
 
 # =====================================================================
 # === FUNKCJE KOMUNIKACJI FB ==========================================
@@ -2372,134 +1916,6 @@ def _call_gemini(user_psid, prompt_history, generation_config, task_name, page_a
 
 
 
-# =====================================================================
-# === FUNKCJA PRZETWARZANIA POJEDYNCZEGO ZDARZENIA W TLE ==============
-# =====================================================================
-def _send_typing_on(recipient_psid, page_access_token): # Nazwa zmieniona dla jasności
-    """Wysyła wskaźnik 'pisania' do użytkownika."""
-    if not page_access_token or len(page_access_token) < 50 or not ENABLE_TYPING_DELAY:
-        return
-    logging.debug(f"[{recipient_psid}] Wysyłanie 'typing_on'")
-    params = {"access_token": page_access_token}
-    payload = {"recipient": {"id": recipient_psid}, "sender_action": "typing_on"} # recipient to PSID użytkownika
-    try:
-        requests.post(FACEBOOK_GRAPH_API_URL, params=params, json=payload, timeout=3)
-    except requests.exceptions.RequestException as e:
-        logging.warning(f"[{recipient_psid}] Błąd wysyłania 'typing_on': {e}")
-
-def _send_single_message(recipient_psid, message_text, page_access_token): # Nazwa zmieniona
-    """Wysyła pojedynczy fragment wiadomości przez Facebook Graph API."""
-    logging.info(f"--- Wysyłanie fragmentu do {recipient_psid} (dł: {len(message_text)}) ---")
-    if not recipient_psid or not message_text:
-        logging.error(f"Błąd wysyłania: Brak ID odbiorcy (użytkownika) lub treści wiadomości.")
-        return False
-    if not page_access_token or len(page_access_token) < 50:
-        logging.error(f"!!! [{recipient_psid}] Brak lub nieprawidłowy token strony FB dla tej wiadomości. NIE WYSŁANO.")
-        return False
-
-    params = {"access_token": page_access_token}
-    payload = {
-        "recipient": {"id": recipient_psid}, # recipient to PSID użytkownika
-        "message": {"text": message_text},
-        "messaging_type": "RESPONSE"
-    }
-    try:
-        r = requests.post(FACEBOOK_GRAPH_API_URL, params=params, json=payload, timeout=30)
-        r.raise_for_status()
-        response_json = r.json()
-        if fb_error := response_json.get('error'):
-            error_code = fb_error.get('code')
-            error_msg = fb_error.get('message', 'Brak wiadomości o błędzie FB.')
-            logging.error(f"!!! BŁĄD FB API (wysyłanie) dla {recipient_psid}: Kod={error_code}, Wiadomość='{error_msg}' Pełny błąd: {fb_error} !!!")
-            if error_code == 190:
-                logging.critical(f"!!! Token strony FB użyty dla {recipient_psid} jest nieprawidłowy, wygasł lub ma niewystarczające uprawnienia (pages_messaging) !!!")
-            elif error_code == 2018001:
-                 logging.warning(f"Użytkownik {recipient_psid} prawdopodobnie zablokował bota lub nie można do niego wysłać wiadomości.")
-            return False
-        logging.debug(f"[{recipient_psid}] Fragment wysłany pomyślnie (FB Msg ID: {response_json.get('message_id')}).")
-        return True
-    except requests.exceptions.Timeout:
-        logging.error(f"!!! BŁĄD TIMEOUT podczas wysyłania wiadomości do {recipient_psid} !!!")
-        return False
-    except requests.exceptions.HTTPError as http_err:
-        logging.error(f"!!! BŁĄD HTTP {http_err.response.status_code} podczas wysyłania do {recipient_psid}: {http_err} !!!")
-        if http_err.response is not None:
-            try:
-                logging.error(f"    Odpowiedź FB (HTTP Err): {http_err.response.json()}")
-            except json.JSONDecodeError:
-                logging.error(f"    Odpowiedź FB (HTTP Err, nie JSON): {http_err.response.text}")
-        return False
-    except requests.exceptions.RequestException as req_err:
-        logging.error(f"!!! BŁĄD RequestException podczas wysyłania do {recipient_psid}: {req_err} !!!")
-        return False
-    except Exception as e:
-        logging.error(f"!!! Nieoczekiwany BŁĄD podczas wysyłania wiadomości do {recipient_psid}: {e} !!!", exc_info=True)
-        return False
-
-
-def send_message(recipient_psid, full_message_text, page_access_token): # Nazwa zmieniona
-    """Wysyła wiadomość, dzieląc ją w razie potrzeby i dodając opóźnienia."""
-    if not full_message_text or not isinstance(full_message_text, str) or not full_message_text.strip():
-        logging.warning(f"[{recipient_psid}] Pominięto wysłanie pustej lub nieprawidłowej wiadomości.")
-        return
-
-    message_len = len(full_message_text)
-    logging.info(f"[{recipient_psid}] Przygotowanie do wysłania wiadomości (długość: {message_len}).")
-
-    if ENABLE_TYPING_DELAY:
-        estimated_typing_duration = min(MAX_TYPING_DELAY_SECONDS, max(MIN_TYPING_DELAY_SECONDS, message_len / TYPING_CHARS_PER_SECOND))
-        logging.debug(f"[{recipient_psid}] Szacowany czas pisania: {estimated_typing_duration:.2f}s")
-        _send_typing_on(recipient_psid, page_access_token)
-        time.sleep(estimated_typing_duration)
-
-    chunks = []
-    if message_len <= MESSAGE_CHAR_LIMIT:
-        chunks.append(full_message_text)
-    else:
-        logging.info(f"[{recipient_psid}] Wiadomość za długa ({message_len} > {MESSAGE_CHAR_LIMIT}). Dzielenie na fragmenty...")
-        remaining_text = full_message_text
-        while remaining_text:
-            if len(remaining_text) <= MESSAGE_CHAR_LIMIT:
-                chunks.append(remaining_text.strip())
-                break
-            split_index = -1
-            delimiters = ['\n\n', '\n', '. ', '! ', '? ', ' ']
-            search_end_pos = MESSAGE_CHAR_LIMIT
-            for delim in delimiters:
-                found_index = remaining_text.rfind(delim, 0, search_end_pos)
-                if found_index != -1:
-                    split_index = found_index + len(delim)
-                    break
-            if split_index == -1:
-                split_index = MESSAGE_CHAR_LIMIT
-            chunk = remaining_text[:split_index].strip()
-            if chunk:
-                chunks.append(chunk)
-            remaining_text = remaining_text[split_index:].strip()
-        logging.info(f"[{recipient_psid}] Podzielono wiadomość na {len(chunks)} fragmentów.")
-
-    num_chunks = len(chunks)
-    successful_sends = 0
-    for i, chunk_text in enumerate(chunks):
-        logging.debug(f"[{recipient_psid}] Wysyłanie fragmentu {i+1}/{num_chunks}...")
-        if not _send_single_message(recipient_psid, chunk_text, page_access_token):
-            logging.error(f"!!! [{recipient_psid}] Błąd wysyłania fragmentu {i+1}/{num_chunks}. Anulowanie wysyłania pozostałych.")
-            break
-        successful_sends += 1
-        if num_chunks > 1 and i < num_chunks - 1:
-            logging.debug(f"[{recipient_psid}] Oczekiwanie {MESSAGE_DELAY_SECONDS}s przed następnym fragmentem...")
-            if ENABLE_TYPING_DELAY:
-                 _send_typing_on(recipient_psid, page_access_token)
-            time.sleep(MESSAGE_DELAY_SECONDS)
-    logging.info(f"--- [{recipient_psid}] Zakończono proces wysyłania. Wysłano {successful_sends}/{num_chunks} fragmentów. ---")
-
-def _simulate_typing(recipient_psid, duration_seconds, page_access_token): # Nazwa zmieniona
-    """Wysyła 'typing_on' i czeka określoną liczbę sekund (jeśli włączone)."""
-    if ENABLE_TYPING_DELAY and duration_seconds > 0:
-        _send_typing_on(recipient_psid, page_access_token)
-        wait_time = min(duration_seconds, MAX_TYPING_DELAY_SECONDS * 1.1)
-        time.sleep(wait_time)
-
 
 # =====================================================================
 # === INSTRUKCJE SYSTEMOWE I GŁÓWNE FUNKCJE AI ========================
@@ -2603,6 +2019,7 @@ Dobrze, dziękujemy za wszystkie informacje. Aby lekcja się odbyła prosimy jes
 # Zmodyfikowany, aby uwzględnić, że przedmiot może być już znany z kontekstu strony
 AVAILABLE_SUBJECTS = sorted(list(ALL_SUBJECT_LINKS.keys())) # Musi być zdefiniowane przed użyciem
 
+# ZASTĄP CAŁĄ TĘ ZMIENNĄ
 SYSTEM_INSTRUCTION_GENERAL_RAW = """Jesteś przyjaznym, proaktywnym i profesjonalnym asystentem klienta centrum korepetycji. Twoim głównym celem jest przeprowadzenie klienta przez proces zapoznania się z ofertą i zachęcenie go do umówienia pierwszej lekcji.
 
 **Styl Komunikacji:**
@@ -2625,49 +2042,42 @@ SYSTEM_INSTRUCTION_GENERAL_RAW = """Jesteś przyjaznym, proaktywnym i profesjona
 
 **Format Lekcji:** Online, przez platformę Microsoft Teams (bez konieczności instalacji, wystarczy link).
 
+**Format Odpowiedzi (NOWA ZASADA):**
+*   Gdy po raz pierwszy zbierzesz informacje o klasie i poziomie, **TWOJA ODPOWIEDŹ MUSI ZAWIERAĆ** specjalny znacznik z tymi danymi. Wygląda on tak: `[DANE_UCZNIA_OGOLNE: KlasaInfo: <pełna informacja o klasie i szkole>, Poziom: <Podstawowy/Rozszerzony/Brak>]`. Ten znacznik umieść **przed** swoją normalną wiadomością do klienta o cenie. Jeśli poziom nie dotyczy (np. szkoła podstawowa), wpisz "Brak".
+
 **Twój Przepływ Pracy:**
 
 1.  **Identyfikacja Potrzeby (PRZEDMIOT):**
-    *   **Jeśli ZNASZ już przedmiot (np. z kontekstu strony, który jest: {current_subject_from_page}),** przywitaj się uprzejmie, potwierdź przedmiot (np. "Dzień dobry! Widzę, że kontaktują się Państwo w sprawie korepetycji z przedmiotu {current_subject_from_page}.")
+    *   Jeśli ZNASZ już przedmiot (np. z kontekstu strony, który jest: {current_subject_from_page}), przywitaj się uprzejmie, potwierdź przedmiot.
 
-2. **Szybka informacja**
-    *  Poinformuj, że udzielacie korepetycji również z innych przedmiotów i podaj linki do odpowiednich stron, **korzystając z informacji o linkach, które Ci przekazałem (patrz wyżej)**. Twoja informacja powinna być sformułowana np. tak: "Gdyby byli Państwo zainteresowani to udzielamy również korepetycji z [Inny Przedmiot 1] (kontakt: [Link do Innego Przedmiotu 1]) oraz [Inny Przedmiot 2] (kontakt: [Link do Innego Przedmiotu 2])." **Nie wymieniaj tutaj przedmiotu, z którego właśnie toczy się rozmowa (jeśli jest znany jako {current_subject_from_page}).**
-
+2.  **Szybka informacja:**
+    *   Poinformuj o innych przedmiotach i podaj linki.
 
 3.  **Zbieranie Informacji o Uczniu:**
-    *   Zapytaj o **klasę** ucznia oraz **typ szkoły** (podstawowa czy średnia - liceum/technikum). Staraj się uzyskać obie informacje. Jeśli jest to poziom szkoły podstawowej poniżej 4 klasy poinformuj, że nie udzielamy korepetycji dla takiego poziomu.
-    *   **Tylko jeśli** szkoła to liceum lub technikum, zapytaj o **poziom nauczania** (podstawowy czy rozszerzony).
+    *   Zapytaj o klasę i typ szkoły (podstawowa, liceum/technikum). Jeśli to szkoła średnia, zapytaj też o poziom (podstawowy/rozszerzony).
+    *   Jeśli poziom szkoły podstawowej jest poniżej 4 klasy, poinformuj, że nie udzielacie korepetycji dla takiego poziomu.
 
 4.  **Prezentacja Ceny i Formatu:**
-    *   Na podstawie zebranych informacji (przedmiot, klasa, typ szkoły, poziom), **ustal właściwą cenę** z cennika.
-    *   **Poinformuj klienta o cenie** za 60 minut lekcji dla danego poziomu i przedmiotu, np. "Dla ucznia w [klasa] [typ szkoły] na poziomie [poziom] z przedmiotu [przedmiot] koszt zajęć wynosi [cena] zł za 60 minut.".
-    *   **Dodaj informację o formacie:** "Wszystkie zajęcia odbywają się wygodnie online przez platformę Microsoft Teams - wystarczy kliknąć w link, nie trzeba nic instalować."
+    *   Na podstawie zebranych informacji ustal właściwą cenę.
+    *   **Zbuduj odpowiedź:** Najpierw wstaw znacznik `[DANE_UCZNIA_OGOLNE: ...]`, a potem w nowej linii napisz wiadomość dla klienta, informując go o cenie i formacie lekcji.
+    *   Przykład:
+        `[DANE_UCZNIA_OGOLNE: KlasaInfo: 8 klasa podstawówki, Poziom: Brak]`
+        `Dla ucznia w 8 klasie szkoły podstawowej koszt zajęć wynosi 60 zł za 60 minut. Wszystkie zajęcia odbywają się online...`
 
 5.  **Zachęta do Umówienia Lekcji:**
-    *   Po podaniu ceny i informacji o formacie, **bezpośrednio zapytaj**, czy klient jest zainteresowany umówieniem pierwszej lekcji (może być próbna), np. "Czy byliby Państwo zainteresowani umówieniem pierwszej lekcji z [przedmiot], aby zobaczyć, jak pracujemy?".
+    *   Po podaniu ceny, bezpośrednio zapytaj, czy klient jest zainteresowany umówieniem lekcji.
 
 6.  **Obsługa Odpowiedzi na Propozycję Lekcji:**
-    *   **Jeśli TAK (lub podobna pozytywna odpowiedź):** Twoja odpowiedź musi zawierać **TYLKO I WYŁĄCZNIE** znacznik: `{intent_marker}`. System przejmie wtedy proces umawiania terminu dla ustalonego przedmiotu. **Upewnij się, że przedmiot został wcześniej jasno ustalony.**
-    *   **Jeśli NIE (lub wahanie):**
-        *   Zapytaj delikatnie o powód odmowy/wątpliwości.
-        *   **Jeśli powodem jest forma ONLINE:** Wyjaśnij zalety: "Jeśli chodzi o formę online, chciałbym zapewnić, że nasi korepetytorzy to profesjonaliści z doświadczeniem w prowadzeniu zajęć zdalnych. Używamy interaktywnych narzędzi na platformie Teams, co sprawia, że lekcje są angażujące i efektywne – zupełnie inaczej niż mogło to wyglądać podczas nauki zdalnej w pandemii. Wszystko odbywa się przez przeglądarkę po kliknięciu w link."
-        *   **Po wyjaśnieniu (lub jeśli powód był inny):** Zaproponuj lekcję próbną (płatną jak standardowa, bez zobowiązań) dla ustalonego przedmiotu.
-        *   **Jeśli klient zgodzi się na lekcję próbną po perswazji:** Twoja odpowiedź musi zawierać **TYLKO I WYŁĄCZNIE** znacznik: `{intent_marker}`.
-        *   **Jeśli klient nadal odmawia:** Podziękuj za rozmowę i zakończ uprzejmie. (Bez znacznika).
-    *   **Jeśli użytkownik zada inne pytanie:** Odpowiedz na nie zgodnie z ogólnymi zasadami i **ponownie spróbuj zachęcić** do umówienia lekcji z ustalonego przedmiotu (wróć do kroku 4 lub 5). **Jeśli pytanie dotyczy innego przedmiotu, potwierdź zmianę przedmiotu i wróć do kroku 2.**
+    *   **Jeśli TAK:** Twoja odpowiedź musi zawierać **TYLKO I WYŁĄCZNIE** znacznik: `{intent_marker}`.
+    *   **Jeśli NIE (lub wahanie):** Postępuj jak dotychczas.
 
-7.  **Obsługa Powrotu (jeśli aktywowano Cię w trybie tymczasowym):**
-    *   Odpowiedz na pytanie ogólne użytkownika.
-    *   Jeśli odpowiedź użytkownika na Twoją odpowiedź wydaje się satysfakcjonująca (np. "ok", "dziękuję") i **nie zawiera kolejnego pytania ogólnego**, dodaj na **samym końcu** swojej odpowiedzi (po ewentualnym podziękowaniu) **DOKŁADNIE** znacznik: `{return_marker}`.
-    *   Jeśli użytkownik zada kolejne pytanie ogólne, odpowiedz na nie normalnie, bez znacznika powrotu.
+7.  **Obsługa Powrotu (tryb tymczasowy):**
+    *   Postępuj jak dotychczas.
 
 **Zasady Dodatkowe:**
-*   Prowadź rozmowę płynnie.
-*   Bądź cierpliwy i empatyczny.
-*   **Jeśli przedmiot nie jest znany, nie przechodź do kroku 2, dopóki go nie ustalisz.**
-*   Znacznik `{intent_marker}` jest sygnałem dla systemu, że użytkownik jest gotowy na ustalanie terminu **dla konkretnego, ustalonego przedmiotu**.
-*   Znacznik `{return_marker}` służy tylko do powrotu z trybu odpowiedzi na pytanie ogólne zadane podczas innego procesu.
-""" # Nazwa zmieniona na _RAW dla jasności
+*   Pamiętaj o dodaniu znacznika `[DANE_UCZNIA_OGOLNE: ...]` gdy pierwszy raz informujesz o cenie.
+*   Reszta zasad pozostaje bez zmian.
+"""
 
 SYSTEM_INSTRUCTION_GENERAL = SYSTEM_INSTRUCTION_GENERAL_RAW.format(
     available_subjects_list=", ".join(AVAILABLE_SUBJECTS),
@@ -2943,23 +2353,7 @@ def webhook_verification():
 
 
 # Nie ma potrzeby zmiany tej funkcji
-def find_row_and_update_sheet(psid, start_time, student_data, sheet_row_index=None):
-    """Znajduje wiersz (jeśli nie podano) i aktualizuje dane Fazy 2 w Arkusz1."""
-    if sheet_row_index is None:
-        logging.warning(f"[{psid}] Aktualizacja Fazy 2 bez indeksu wiersza. Próba znalezienia w '{MAIN_SHEET_NAME}'...")
-        sheet_row_index = find_row_by_psid(psid) # find_row_by_psid szuka od wiersza 2
-        if sheet_row_index is None:
-            logging.error(f"[{psid}] Nie znaleziono wiersza dla PSID w '{MAIN_SHEET_NAME}' do aktualizacji Fazy 2.")
-            # Zwróć błąd, aby proces mógł odpowiednio zareagować
-            return False, "Nie znaleziono powiązanego wpisu w arkuszu do aktualizacji."
-        else:
-            logging.info(f"[{psid}] Znaleziono wiersz {sheet_row_index} dla PSID w '{MAIN_SHEET_NAME}' do aktualizacji Fazy 2.")
-    # Sprawdź ponownie, czy sheet_row_index jest prawidłowy po potencjalnym znalezieniu
-    if sheet_row_index is None or not isinstance(sheet_row_index, int) or sheet_row_index < 2:
-         logging.error(f"[{psid}] Nieprawidłowy indeks wiersza ({sheet_row_index}) przekazany do update_sheet_phase2.")
-         return False, f"Nieprawidłowy numer wiersza ({sheet_row_index})."
 
-    return update_sheet_phase2(student_data, sheet_row_index)
 
 @app.route('/webhook', methods=['POST'])
 def webhook_handle():
@@ -3074,19 +2468,16 @@ if __name__ == '__main__':
     cal_service = get_calendar_service()
     print(f"    Usługa Calendar API: {'OK' if cal_service else 'BŁĄD INICJALIZACJI!'}")
     print("-" * 60)
-    print("  Konfiguracja Google Sheets:")
-    print(f"    ID Arkusza: {SPREADSHEET_ID}")
-    print(f"    Główny Arkusz (Rezerwacje): '{MAIN_SHEET_NAME}'")
-    print(f"    Arkusz Statystyk: '{STATS_SHEET_NAME}'")
-    print(f"    Strefa: {SHEET_TIMEZONE} (TZ: {_get_sheet_timezone()})")
-    print(f"    Kolumny Kluczowe (Arkusz1): Data={SHEET_DATE_COLUMN_INDEX}({chr(ord('A')+SHEET_DATE_COLUMN_INDEX-1)}), Czas={SHEET_TIME_COLUMN_INDEX}({chr(ord('A')+SHEET_TIME_COLUMN_INDEX-1)}), NumerKlasy(H)={SHEET_GRADE_COLUMN_INDEX}({chr(ord('A')+SHEET_GRADE_COLUMN_INDEX-1)}), Kalendarz={SHEET_CALENDAR_NAME_COLUMN_INDEX}({chr(ord('A')+SHEET_CALENDAR_NAME_COLUMN_INDEX-1)})")
-    print(f"    Struktura Statystyk (Arkusz2): Daty w wierszu {STATS_DATE_HEADER_ROW}, Etykiety: '{STATS_NEW_CONTACT_ROW_LABEL}', '{STATS_BOOKING_ROW_LABEL}'")
-    print(f"    Plik klucza: {SHEETS_SERVICE_ACCOUNT_FILE} ({'OK' if os.path.exists(SHEETS_SERVICE_ACCOUNT_FILE) else 'BRAK!!!'})")
-    sheets_service = get_sheets_service()
-    print(f"    Usługa Sheets API: {'OK' if sheets_service else 'BŁĄD INICJALIZACJI!'}")
+# ======================== POCZĄTEK BLOKU DO WKLEJENIA ========================
+    print("  Konfiguracja Airtable:")
+    print(f"    ID Bazy: {AIRTABLE_BASE_ID}")
+    print(f"    Tabela Rezerwacji: '{AIRTABLE_BOOKINGS_TABLE_NAME}'")
+    print(f"    Tabela Statystyk: '{AIRTABLE_STATS_TABLE_NAME}'")
+    print(f"    Klucz API: {'OK (załadowany)' if AIRTABLE_API_KEY and AIRTABLE_API_KEY != 'TU_WKLEJ_SWOJ_KLUCZ_API' else 'BRAK lub DOMYŚLNY!!!'}")
+    print(f"    Usługa Airtable API: {'OK' if airtable_api else 'BŁĄD INICJALIZACJI!'}")
+# ========================= KONIEC BLOKU DO WKLEJENIA =========================
     print("--- KONIEC KONFIGURACJI ---")
     print("="*60 + "\n")
-
     port = int(os.environ.get("PORT", 8080))
     # Uruchom w trybie debug Flask tylko jeśli logowanie jest na DEBUG
     run_flask_in_debug = (log_level == logging.DEBUG)
