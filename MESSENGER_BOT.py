@@ -1,57 +1,49 @@
-# messenger_bot.py
-import google.generativeai as genai
+# -*- coding: utf-8 -*-
+
+# verify_server.py (Wersja: Wiele Stron FB + Statystyki + Zapis do Google Calendar)
+from pyairtable import Api 
+from flask import Flask, request, Response
+import threading
+import os
+import json
+import requests
+import time
+import vertexai
+import random
+from vertexai.generative_models import (
+    GenerativeModel, Part, Content, GenerationConfig,
+    SafetySetting, HarmCategory, HarmBlockThreshold
+)
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from flask import Flask, request
-from pyairtable import Api
-import json
-import os
-import random
+import errno
+import logging
 import datetime
+import pytz
 import locale
 import re
-import pytz
-import time
-import requests
-import threading
 from collections import defaultdict
 
-# --- Ustawienia Lokalizacji ---
-try:
-    locale.setlocale(locale.LC_TIME, 'pl_PL.UTF-8')
-except locale.Error:
-    print("Ostrzeżenie: Nie można ustawić polskiej lokalizacji.")
-
-# --- KONFIGURACJA ---
-API_KEY = "AIzaSyCJGoODg04hUZ3PpKf5tb7NoIMtT9G9K9I"
-FB_PAGE_ACCESS_TOKEN = os.environ.get("FB_PAGE_ACCESS_TOKEN", "EAAKusF6JViEBPNJiRftrqPmOy6CoZAWZBw3ZBEWl8dd7LtinSSF85JeKYXA3ZB7xlvFG6e5txU1i8RUEiskmZCXXyuIH4x4B4j4zBrOXm0AQyskcKBUaMVgS2o3AMZA2FWF0PNTuusd6nbxGPzGZAWyGoPP9rjDl1COwLk1YhTOsG7eaXa6FIxnXQaGFdB9oh7gdADaq7e4aQZDZD")
-VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "KOLAGEN")
-AIRTABLE_API_KEY = os.environ.get("AIRTABLE_API_KEY", "patcSdupvwJebjFDo.7e15a93930d15261989844687bcb15ac5c08c84a29920c7646760bc6f416146d")
-AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID", "appTjrMTVhYBZDPw9")
-AIRTABLE_BOOKINGS_TABLE_NAME = "Rezerwacje"
-CALENDAR_SERVICE_ACCOUNT_FILE = 'KALENDARZ_KLUCZ.json'
-CALENDAR_CONFIG_FILE = 'calendars_config.json' # <-- Nowy plik konfiguracyjny
-CALENDAR_SCOPES = ['https://www.googleapis.com/auth/calendar'] 
-CALENDAR_TIMEZONE = 'Europe/Warsaw'
-APPOINTMENT_DURATION_MINUTES = 60
-SEARCH_DAYS = 14
-WORK_START_HOUR = 8
-WORK_END_HOUR = 22
-MIN_BOOKING_LEAD_HOURS = 24
-BREAK_BUFFER_MINUTES = 10
-HELD_SLOTS = {} 
-HOLD_DURATION_HOURS = 24
-HISTORY_DIR = "conversation_history"
-
-# --- Inicjalizacja API ---
-try:
-    genai.configure(api_key=API_KEY)
-    airtable_api = Api(AIRTABLE_API_KEY)
-    print("--- Połączono z Airtable API. ---")
-except Exception as e:
-    print(f"Błąd konfiguracji API: {e}")
-    exit()
+# --- Konfiguracja Stron Facebook ---
+PAGE_CONFIG = {
+    "661857023673365": {
+        "token": "EAAJUltDBrJQBPOBUTGeEQusJwEZA2CwhD63gy7TXOVcQpnDW2gKtNZASCZBnUZBvhlh5OAe9iaOR8Cn0hrG34wacQHlUCYXBxZBzDg1sHuAjV0IBZAHvc9RT9ZAXbFgn0CMQq00ZCS52RFVwlgM4rDKVwSJrzGKJqvaJOCmTeuE9ZBY6IXYB1rR2iXb3beNo4lGZBF8h0nvRoCmQZDZD",
+        "subject": "Polski", "name": "Zakręcone Korepetycje - Polski", "link": "https://tiny.pl/0xnsgbt2"
+    },
+    "638454406015018": {
+        "token": "EAAJUltDBrJQBPAZAylC5nVzVG4NjbhPZCtvI40aWuk4y8jm6wLdQqjuhsMMxHATytTF6Awh0LPKI9Rljckk9yC31JKtzgWMGhRoCsah1IRDqV0TBYs9XZAZBvWYBW0rSt95NFOz6nRw5GZAXlT7yIbKUO3tkZCTuZB3eTDX0kaTjRl9I8ueLsZCa9ZBVZCHNb7f5pj8F8ZC9yyehQZDZD",
+        "subject": "Matematyka", "name": "Zakręcone Korepetycje - MATEMATYKA", "link": "https://tiny.pl/f7xz5n0g"
+    },
+    "653018101222547": {
+        "token": "EAAJUltDBrJQBPOkydccFPcQ1SDZBhYFBFZCMTohk1hgtLbHNmwdA0ylZCZBMTDeDG2OOmbhYaN5KJTJV5N4pX1LLR60G9ye8btGM1hfCfXoLsz1qSw7YUqZCrzeLQqrKQ5uEOn19VGGg7zfEDuLy6TZAPBtf5kQK7ZBKGnrZBaWcmfGofVoAQ5R2stUyG6bGCnPWpx1CZBzzlZAgZDZD",
+        "subject": "Angielski", "name": "English Zone: Zakręcone Korepetycje", "link": "https://tiny.pl/prrr7qf1"
+    },
+}
+ALL_SUBJECT_LINKS = {
+    page_data["subject"]: page_data["link"]
+    for page_data in PAGE_CONFIG.values() if "subject" in page_data and "link" in page_data
+}
 
 app = Flask(__name__)
 
@@ -157,18 +149,6 @@ except Exception as e:
 # =====================================================================
 # === FUNKCJE POMOCNICZE (Ogólne) =====================================
 # =====================================================================
-
-
-def wczytaj_konfiguracje_kalendarzy():
-    if not os.path.exists(CALENDAR_CONFIG_FILE):
-        print(f"OSTRZEŻENIE: Brak pliku konfiguracyjnego '{CALENDAR_CONFIG_FILE}'. Bot nie będzie miał dostępu do żadnych kalendarzy.")
-        return []
-    try:
-        with open(CALENDAR_CONFIG_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"BŁĄD: Nie można wczytać lub sparsować pliku '{CALENDAR_CONFIG_FILE}': {e}")
-        return []
 
 def create_google_event_from_airtable(calendar_service, airtable_record_fields):
     """Tworzy wydarzenie w Google Calendar na podstawie danych z rekordu Airtable."""
@@ -2362,60 +2342,6 @@ def get_gemini_general_response(user_psid, current_user_message_text, history_fo
 # === WEBHOOK HANDLERS ================================================
 # =====================================================================
 
-
-def process_message(user_psid, message_text, page_config):
-    """Przetwarza jedną wiadomość od użytkownika, zarządza stanem i wysyła odpowiedź."""
-    
-    # === KROK 1: Wczytaj dynamicznie konfigurację kalendarzy ===
-    calendars_config = wczytaj_konfiguracje_kalendarzy()
-    if not calendars_config:
-        send_message(user_psid, "Przepraszam, system nie ma obecnie skonfigurowanych żadnych kalendarzy. Proszę skontaktować się z administratorem.", page_config['token'])
-        return
-        
-    subject_to_calendars = defaultdict(list)
-    for cal_config in calendars_config:
-        if 'subject' in cal_config:
-            subject_to_calendars[cal_config['subject'].lower()].append(cal_config)
-
-    # === KROK 2: Weryfikacja tożsamości i statusu klienta ===
-    user_profile = get_user_profile(user_psid, page_config['token'])
-    if not user_profile or not user_profile.get('first_name') or not user_profile.get('last_name'):
-        send_message(user_psid, "Przepraszam, mam problem z weryfikacją Twojego konta na Facebooku. Upewnij się, że Twoje imię i nazwisko są widoczne publicznie.", page_config['token'])
-        return
-
-    first_name = user_profile['first_name']
-    last_name = user_profile['last_name']
-    user_status, record_data = check_user_status_in_airtable(first_name, last_name)
-    
-    # Wczytaj historię rozmowy
-    os.makedirs(HISTORY_DIR, exist_ok=True)
-    history_file = os.path.join(HISTORY_DIR, f"{user_psid}.json")
-    try:
-        with open(history_file, 'r', encoding='utf-8') as f:
-            historia_konwersacji = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        historia_konwersacji = []
-    
-    historia_konwersacji.append({'role': 'user', 'parts': [{'text': message_text}]})
-
-    # === KROK 3: Wybór "Mózgu" Bota na podstawie statusu ===
-
-    if user_status == "AWAITING_CONFIRMATION":
-        print(f"--- Uruchamianie logiki POTWIERDZANIA dla {user_psid} ---")
-        historia_konwersacji = uruchom_logike_potwierdzania(user_psid, record_data, historia_konwersacji, page_config, subject_to_calendars)
-    
-    elif user_status == "NOT_FOUND":
-        send_message(user_psid, "Witaj! Wygląda na to, że jesteś nowym klientem. Aby umówić pierwsze zajęcia, skontaktuj się z nami bezpośrednio. Po pierwszej rezerwacji będę mógł Ci w pełni pomagać.", page_config['token'])
-        return 
-    
-    else: # OK_PROCEED
-        print(f"--- Uruchamianie logiki STANDARDOWEJ dla {user_psid} ---")
-        historia_konwersacji = uruchom_glowna_logike_planowania(user_psid, historia_konwersacji, page_config, subject_to_calendars)
-
-    # Zapisz zaktualizowaną historię
-    with open(history_file, 'w', encoding='utf-8') as f:
-        json.dump(historia_konwersacji[-20:], f, indent=2, ensure_ascii=False)
-
 @app.route('/webhook', methods=['GET'])
 def webhook_verification():
     """Obsługuje weryfikację webhooka przez Facebooka."""
@@ -2441,37 +2367,55 @@ def webhook_verification():
 @app.route('/webhook', methods=['POST'])
 def webhook_handle():
     """Główny handler dla przychodzących zdarzeń z Messengera."""
-    if request.method == 'GET':
-        token_sent = request.args.get("hub.verify_token")
-        if token_sent == VERIFY_TOKEN:
-            return request.args.get("hub.challenge")
-        return 'Invalid verification token', 403
-    
-    elif request.method == 'POST':
-        data = request.get_json()
-        print(json.dumps(data, indent=2))
-        
-        if data.get("object") == "page":
-            for entry in data.get("entry", []):
-                page_id = entry.get("id")
-                page_config = PAGE_CONFIG.get(page_id)
-                
-                if not page_config:
-                    print(f"OSTRZEŻENIE: Otrzymano wiadomość dla nieskonfigurowanej strony o ID: {page_id}")
-                    continue
+    now_str = datetime.datetime.now(_get_calendar_timezone()).strftime('%Y-%m-%d %H:%M:%S %Z')
+    logging.info(f"\n{'='*30} {now_str} POST /webhook {'='*30}")
+    raw_data = request.data
 
-                for messaging_event in entry.get("messaging", []):
-                    if messaging_event.get("message"):
-                        sender_psid = messaging_event["sender"]["id"]
-                        message = messaging_event["message"]
-                        
-                        if message.get("text") and not message.get("is_echo"):
-                            message_text = message["text"]
-                            # Uruchom przetwarzanie w osobnym wątku, przekazując konfigurację strony
-                            thread = threading.Thread(target=process_message, args=(sender_psid, message_text, page_config))
-                            thread.start()
+    # 1. Zdekoduj dane
+    data = None
+    try:
+        decoded_data = raw_data.decode('utf-8')
+        data = json.loads(decoded_data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        logging.error(f"BŁĄD dekodowania danych przychodzących z FB: {e}", exc_info=True)
+        logging.error(f"Surowe dane (fragment): {raw_data[:500]}...")
+        # Mimo błędu, Facebook oczekuje odpowiedzi 200 OK, że coś odebraliśmy
+        return Response("ERROR_DECODING_DATA_BUT_OK", status=200)
+
+    # 2. Sprawdź podstawową strukturę (object: page)
+    if not (data and data.get("object") == "page"):
+        logging.warning(f"POST na /webhook, ale obiekt != 'page' lub brak danych. Typ: {type(data)}. Dane: {raw_data[:200]}...")
+        return Response("INVALID_OBJECT_TYPE_BUT_OK", status=200) # FB oczekuje 200
+
+    # 3. Jeśli dane są poprawne, przygotuj wątki do przetwarzania
+    threads_to_run = []
+    if data.get("entry"): # Upewnij się, że 'entry' istnieje
+        for entry in data.get("entry", []):
+            page_id_from_entry = entry.get("id") # ID strony, do której przyszło zdarzenie
+            if entry.get("messaging"): # Upewnij się, że 'messaging' istnieje
+                for event_item in entry.get("messaging", []): # event_item to pojedyncze zdarzenie
+                    # Utwórz wątek dla każdego zdarzenia
+                    # Ważne: event_item.copy() aby każdy wątek miał swoją kopię słownika zdarzenia
+                    thread = threading.Thread(target=process_single_event, args=(event_item.copy(), page_id_from_entry))
+                    threads_to_run.append(thread)
+                    thread.start() # Uruchom wątek
+            else:
+                logging.debug(f"Brak klucza 'messaging' w entry dla page_id: {page_id_from_entry}. Dane entry: {entry}")
         
-        return "ok", 200
+        if threads_to_run:
+            logging.info(f"Uruchomiono {len(threads_to_run)} wątków do przetworzenia zdarzeń. Wysyłanie 200 OK do Facebooka.")
+        else:
+            logging.info("Brak zdarzeń 'messaging' do przetworzenia w otrzymanym requeście. Wysyłanie 200 OK do Facebooka.")
+    else:
+        logging.debug(f"Brak klucza 'entry' w danych od Facebooka. Dane: {data}")
+        # Mimo to wyślij 200 OK
+    
+    # 4. Wyślij odpowiedź 200 OK do Facebooka JAK NAJSZYBCIEJ
+    # Ta odpowiedź idzie teraz zanim wątki zakończą swoją pracę.
+    return Response("EVENT_RECEIVED_QUEUED_FOR_PROCESSING", status=200)
+
+    # Cała poprzednia logika pętli `for entry... for event...` została przeniesiona
+    # do funkcji `process_single_event` i jest uruchamiana w wątkach.
 
 
 # =====================================================================
