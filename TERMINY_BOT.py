@@ -50,16 +50,16 @@ HOLD_DURATION_HOURS = 24
 HISTORY_DIR = "conversation_history"
 GRAY_COLOR_ID = "8" 
 
-# === NOWA ZMIENNA: INFORMACJE O USŁUGACH ===
+# === ZMIENNA: INFORMACJE O USŁUGACH ===
 SERVICE_INFO = {
     "Cennik": {
         "Szkoła Podstawowa": "60 zł / 60 min",
         "Liceum (Podstawa)": "70 zł / 60 min",
         "Liceum (Rozszerzenie)": "80 zł / 60 min"
     },
-    "Format Lekcji": "Wszystkie zajęcia odbywają się online za pośrednictwem platformy Google Meet. Link do spotkania jest generowany automatycznie po potwierdzeniu terminu.",
+    "Format Lekcji": "Wszystkie zajęcia odbywają się online za pośrednictwem platformy Google Meet.",
     "Dostępne Przedmioty": ["Matematyka", "Fizyka", "Chemia"],
-    "Polityka Odwoływania": "Zajęcia można bezpłatnie odwołać najpóźniej na 24 godziny przed ich planowanym rozpoczęciem."
+    "Polityka Odwoływania": "Zajęcia można bezpłatnie odwołać najpóźniej na 24 godziny przed ich rozpoczęciem."
 }
 
 # --- Inicjalizacja API ---
@@ -100,7 +100,6 @@ def get_user_profile(psid):
         return None, None
 
 def check_user_status_in_airtable(first_name, last_name):
-    """Sprawdza status i zwraca krotkę (status, dane_rekordu)."""
     if not airtable_api or not first_name or not last_name:
         return "OK_PROCEED", None
     try:
@@ -110,10 +109,8 @@ def check_user_status_in_airtable(first_name, last_name):
         if not record:
             print(f"--- AIRTABLE CHECK: Użytkownik {first_name} {last_name} nie znaleziony. Status: NOT_FOUND ---")
             return "NOT_FOUND", None
-        
         status = record.get('fields', {}).get('Status')
         print(f"--- AIRTABLE CHECK: Użytkownik {first_name} {last_name} znaleziony. Status w bazie: '{status}' ---")
-        
         if status == "Dane zebrane - oczekiwanie na potwierdzenie":
             return "AWAITING_CONFIRMATION", record
         else:
@@ -123,7 +120,6 @@ def check_user_status_in_airtable(first_name, last_name):
         return "OK_PROCEED", None
 
 def update_airtable_status(record_id, new_status):
-    """Aktualizuje pole 'Status' dla danego rekordu w Airtable."""
     if not airtable_api: return False, "Brak połączenia z Airtable"
     try:
         table = airtable_api.table(AIRTABLE_BASE_ID, AIRTABLE_BOOKINGS_TABLE_NAME)
@@ -147,10 +143,63 @@ def get_calendar_service():
         print(f"!!! KRYTYCZNY BŁĄD: Nie można połączyć się z Google Calendar API: {e} !!!")
         return None
 
+def cleanup_and_get_active_held_slots():
+    global HELD_SLOTS
+    tz = pytz.timezone(CALENDAR_TIMEZONE)
+    now = datetime.datetime.now(tz)
+    expiration_delta = datetime.timedelta(hours=HOLD_DURATION_HOURS)
+    slots_to_check = list(HELD_SLOTS.keys())
+    for slot_iso in slots_to_check:
+        hold_time = HELD_SLOTS[slot_iso]
+        if now - hold_time > expiration_delta:
+            print(f"--- BLOKADA WYGASŁA: Termin {slot_iso} został zwolniony. ---")
+            del HELD_SLOTS[slot_iso]
+    return list(HELD_SLOTS.keys())
+
+def get_busy_slots_from_airtable(duration_minutes, search_days):
+    """Pobiera i przetwarza zajęte sloty z Airtable, dodając bufory."""
+    if not airtable_api:
+        print("Ostrzeżenie: Połączenie z Airtable niedostępne, sloty nie zostaną pobrane.")
+        return []
+    
+    tz = pytz.timezone(CALENDAR_TIMEZONE)
+    now = datetime.datetime.now(tz)
+    busy_blocks = []
+    buffer_delta = datetime.timedelta(minutes=BREAK_BUFFER_MINUTES)
+    duration_delta = datetime.timedelta(minutes=duration_minutes)
+    
+    try:
+        table = airtable_api.table(AIRTABLE_BASE_ID, AIRTABLE_BOOKINGS_TABLE_NAME)
+        # Pobieramy wszystkie rekordy, filtrowanie po dacie w Pythonie jest bardziej niezawodne
+        records = table.all()
+        
+        for record in records:
+            date_str = record.get('fields', {}).get('Date')
+            if not date_str:
+                continue
+
+            start_dt_utc = datetime.datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+            start_dt_local = start_dt_utc.astimezone(tz)
+            
+            # Bierzemy pod uwagę tylko przyszłe rezerwacje
+            if start_dt_local >= now:
+                end_dt_local = start_dt_local + duration_delta
+                
+                # Dodajemy bufory
+                buffered_start = start_dt_local - buffer_delta
+                buffered_end = end_dt_local + buffer_delta
+                busy_blocks.append((buffered_start, buffered_end))
+                
+    except Exception as e:
+        print(f"BŁĄD: Nie udało się pobrać lub przetworzyć danych z Airtable: {e}")
+
+    return busy_blocks
+
 def find_available_slots_gcal(service, calendar_id, duration_minutes, search_days):
     if not service: return []
     tz = pytz.timezone(CALENDAR_TIMEZONE)
     now = datetime.datetime.now(tz)
+    
     time_min_gcal = now.isoformat()
     time_max_gcal = (now + datetime.timedelta(days=search_days)).isoformat()
     try:
@@ -162,6 +211,7 @@ def find_available_slots_gcal(service, calendar_id, duration_minutes, search_day
     except HttpError as e:
         print(f"Błąd API podczas pobierania wszystkich wydarzeń: {e}")
         return []
+    
     busy_from_gcal = []
     buffer_delta = datetime.timedelta(minutes=BREAK_BUFFER_MINUTES)
     for event in all_events:
@@ -174,6 +224,13 @@ def find_available_slots_gcal(service, calendar_id, duration_minutes, search_day
             start_dt -= buffer_delta
             end_dt += buffer_delta
         busy_from_gcal.append((start_dt, end_dt))
+
+    busy_from_airtable = get_busy_slots_from_airtable(duration_minutes, search_days)
+    active_held_slots_iso = cleanup_and_get_active_held_slots()
+    held_blocks = [(datetime.datetime.fromisoformat(iso), datetime.datetime.fromisoformat(iso) + datetime.timedelta(minutes=duration_minutes)) for iso in active_held_slots_iso]
+
+    all_busy_blocks = busy_from_gcal + held_blocks + busy_from_airtable
+    
     available_slots = []
     duration_delta = datetime.timedelta(minutes=duration_minutes)
     search_start_dt = now + datetime.timedelta(hours=MIN_BOOKING_LEAD_HOURS)
@@ -182,7 +239,7 @@ def find_available_slots_gcal(service, calendar_id, duration_minutes, search_day
         day_start_work = tz.localize(datetime.datetime.combine(current_date, datetime.time(WORK_START_HOUR)))
         day_end_work = tz.localize(datetime.datetime.combine(current_date, datetime.time(WORK_END_HOUR)))
         current_time = max(day_start_work, search_start_dt)
-        today_busy_blocks = sorted([b for b in busy_from_gcal if b[0].date() == current_date])
+        today_busy_blocks = sorted([b for b in all_busy_blocks if b[0].date() == current_date])
         for busy_start, busy_end in today_busy_blocks:
             if current_time < busy_start:
                 potential_slot = current_time
@@ -253,24 +310,14 @@ def stworz_instrukcje_POTWIERDZENIE(dane_lekcji, info_o_uslugach_str):
     TWOJA LOGIKA DZIAŁANIA:
     1.  **PRIORYTET #1: BĄDŹ POMOCNY.** Jeśli pierwsza wiadomość użytkownika to pytanie (np. o cenę, o inną usługę), odpowiedz na nie wyczerpująco, korzystając z "OGÓLNYCH INFORMACJI O USŁUGACH".
     2.  **CEL GŁÓWNY:** ZAWSZE na końcu swojej pomocnej odpowiedzi, przypomnij o lekcji do potwierdzenia, np. "A propos, widzę, że mamy dla Ciebie wstępnie zarezerwowaną lekcję [Przedmiot] na [Data]. Czy potwierdzamy ten termin?".
-    3.  Jeśli pierwsza wiadomość użytkownika nie jest pytaniem (np. to "hej"), od razu przejdź do celu głównego i zapytaj o potwierdzenie.
+    3.  Jeśli pierwsza wiadomość użytkownika не jest pytaniem (np. to "hej"), od razu przejdź do celu głównego i zapytaj o potwierdzenie.
     4.  Gdy użytkownik napisze "tak", "potwierdzam" lub w inny sposób wyrazi zgodę, Twoja odpowiedź MUSI użyć akcji `POTWIERDZ_I_UTWORZ_WYDARZENIE`.
 
     --- PRZYKŁADY AKCJI ---
     1. Akcja: ROZMOWA (gdy odpowiadasz na pytanie i przypominasz)
-       - Przykład JSON:
-         {{
-           "action": "ROZMOWA",
-           "details": {{}},
-           "user_response": "Cena za liceum to 70 zł. A propos, widzę, że mamy dla Ciebie wstępnie zarezerwowaną lekcję na jutro. Czy potwierdzamy ją?"
-         }}
+       - Przykład JSON: {{"action": "ROZMOWA", "details": {{}}, "user_response": "Cena za liceum to 70 zł. A propos, widzę, że mamy dla Ciebie wstępnie zarezerwowaną lekcję na jutro. Czy potwierdzamy ją?"}}
     2. Akcja: POTWIERDZ_I_UTWORZ_WYDARZENIE (gdy użytkownik się zgodził)
-       - Przykład JSON:
-         {{
-           "action": "POTWIERDZ_I_UTWORZ_WYDARZENIE",
-           "details": {{}},
-           "user_response": "Świetnie! Potwierdziłem Twoją lekcję. Została ona właśnie dodana do oficjalnego kalendarza. Do zobaczenia!"
-         }}
+       - Przykład JSON: {{"action": "POTWIERDZ_I_UTWORZ_WYDARZENIE", "details": {{}}, "user_response": "Świetnie! Potwierdziłem Twoją lekcję. Została ona właśnie dodana do oficjalnego kalendarza. Do zobaczenia!"}}
     """
     return instrukcja
 
@@ -289,26 +336,19 @@ def stworz_instrukcje_STANDARDOWA(dostepne_sloty_str, aktualne_wydarzenia_str, i
     
     AKTUALNE WYDARZENIA W KALENDARZU:
     {aktualne_wydarzenia_str}
-
     DOSTĘPNE SLOTY DO REZERWACJI:
     {dostepne_sloty_str}
 
     --- BIBLIOTEKA PRZYKŁADÓW AKCJI ---
     1. Akcja: ROZMOWA (gdy inicjujesz proces rezerwacji)
        - Przykład JSON: {{ "action": "ROZMOWA", "details": {{}}, "user_response": "Jasne, chętnie pomogę. Czy te zajęcia mają być jednorazowe, czy cykliczne, powtarzające się co tydzień?" }}
-    
-    2. Akcja: ROZMOWA (gdy dopytujesz o preferencje terminu)
-       - Przykład JSON: {{ "action": "ROZMOWA", "details": {{}}, "user_response": "Rozumiem. W takim razie proszę podać preferowany dzień tygodnia lub porę dnia (np. rano, popołudnie, wieczór), a ja znajdę najlepszy termin." }}
-
-    3. Akcja: ZAPROPONUJ_TERMIN
+    2. Akcja: ZAPROPONUJ_TERMIN
        - Przykład JSON: {{ "action": "ZAPROPONUJ_TERMIN", "details": {{"proponowany_termin_iso": "2024-07-26T18:20:00+02:00"}}, "user_response": "Znalazłem wolny termin w piątek o 18:20. Czy pasuje?"}}
-    
-    4. Akcja: DOPISZ_ZAJECIA
+    3. Akcja: DOPISZ_ZAJECIA
        - Przykład JSON: {{ "action": "DOPISZ_ZAJECIA", "details": {{ "nowy_termin_iso": "2024-07-26T18:20:00+02:00", "summary": "Korepetycje" }}, "user_response": "Świetnie! Zapisałem korepetycje na ten termin." }}
-    
-    5. Inne akcje (ODWOLAJ_ZAJECIA, PRZELOZ_ZAJECIA, UTWORZ_CYKLICZNE) działają według poprzednich wzorców.
     """
     return instrukcja
+
 # =====================================================================
 # === KONIEC PIERWSZEJ POŁOWY KODU ===
 # =====================================================================
@@ -316,11 +356,13 @@ def stworz_instrukcje_STANDARDOWA(dostepne_sloty_str, aktualne_wydarzenia_str, i
 # === POCZĄTEK DRUGIEJ POŁOWY KODU ===
 # =====================================================================
 
-# --- GŁÓWNA LOGIKA BOTA ---
-
 def uruchom_logike_potwierdzania(user_psid, message_text, record_data, historia_konwersacji):
     """Uruchamia wyspecjalizowaną logikę AI, której celem jest potwierdzenie rezerwacji."""
     calendar_service = get_calendar_service()
+    if not calendar_service: 
+        send_message(user_psid, "Przepraszam, mam problem z połączeniem z systemem kalendarza. Spróbuj ponownie później.")
+        return historia_konwersacji
+
     model = genai.GenerativeModel('gemini-1.5-pro-latest')
     
     info_o_uslugach_str = json.dumps(SERVICE_INFO, indent=2, ensure_ascii=False)
@@ -350,13 +392,11 @@ def uruchom_logike_potwierdzania(user_psid, message_text, record_data, historia_
         record_id = record_data.get('id')
         fields = record_data.get('fields', {})
         termin_iso = fields.get('Date')
-        summary = f"Korepetycje: {fields.get('Imię Ucznia', '')} ({fields.get('Przedmiot', '')})"
+        summary = f"Korepetycje: {fields.get('Imię Ucznia', '')} ({fields.get('Przedmiot', 'N/A')})"
         
         if record_id and termin_iso:
-            # Krok 1: Zaktualizuj status w Airtable
             update_success, _ = update_airtable_status(record_id, "Potwierdzone")
             if update_success:
-                # Krok 2: Utwórz wydarzenie w Kalendarzu Google
                 create_success, result = create_google_event(calendar_service, GOOGLE_CALENDAR_ID, termin_iso, summary)
                 if not create_success:
                     send_message(user_psid, "UWAGA: Wystąpił błąd przy tworzeniu wydarzenia w Kalendarzu Google. Skontaktuj się z administratorem.")
@@ -366,10 +406,13 @@ def uruchom_logike_potwierdzania(user_psid, message_text, record_data, historia_
     historia_konwersacji.append({'role': 'model', 'parts': [{'text': json.dumps(decyzja_ai, ensure_ascii=False)}]})
     return historia_konwersacji
 
-
 def uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersacji):
     """Uruchamia standardową logikę planowania dla zweryfikowanych klientów."""
     calendar_service = get_calendar_service()
+    if not calendar_service: 
+        send_message(user_psid, "Przepraszam, mam problem z połączeniem z systemem kalendarza.")
+        return historia_konwersacji
+
     model = genai.GenerativeModel('gemini-1.5-pro-latest')
     
     MAX_RETRIES = 3; decyzja_ai = None; proposal_verified = False
@@ -427,7 +470,6 @@ def uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersac
     print(f"--- DEBUG (wątek {user_psid}): AI chce wykonać akcję: '{akcja}' ze szczegółami: {szczegoly} ---")
     send_message(user_psid, odpowiedz_tekstowa)
     
-    # ... (tutaj cała logika if/elif dla akcji ODWOLAJ, DOPISZ, PRZELOZ itd., jest długa, więc ją wklejam w całości)
     if akcja == "DOPISZ_ZAJECIA" or akcja == "PRZELOZ_ZAJECIA":
         nowy_termin_iso = szczegoly.get("nowy_termin_iso")
         if nowy_termin_iso and nowy_termin_iso in HELD_SLOTS:
@@ -438,6 +480,7 @@ def uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersac
             if nowy_termin_iso:
                 success, result = create_google_event(calendar_service, GOOGLE_CALENDAR_ID, nowy_termin_iso, summary)
                 if success: print(f"--- Utworzono wydarzenie: {result.get('htmlLink')} ---")
+                else: print(f"--- BŁĄD SYSTEMU: {result} ---")
         elif akcja == "PRZELOZ_ZAJECIA":
             event_id = szczegoly.get("eventId")
             if event_id and nowy_termin_iso:
@@ -448,11 +491,14 @@ def uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersac
                     delete_success, _ = delete_google_event(calendar_service, GOOGLE_CALENDAR_ID, event_id)
                     if delete_success:
                         create_google_event(calendar_service, GOOGLE_CALENDAR_ID, nowy_termin_iso, summary, recurrence_rule)
+                    else:
+                        print(f"--- BŁĄD SYSTEMU: Nie udało się usunąć starego wydarzenia podczas przekładania. ---")
     elif akcja == "ODWOLAJ_ZAJECIA":
         event_id = szczegoly.get("eventId")
         if event_id:
             success, message = delete_google_event(calendar_service, GOOGLE_CALENDAR_ID, event_id)
             if success: print(f"--- {message} ---")
+            else: print(f"--- BŁĄD SYSTEMU: {message} ---")
     
     historia_konwersacji.append({'role': 'model', 'parts': [{'text': json.dumps(decyzja_ai, ensure_ascii=False)}]})
     return historia_konwersacji
@@ -490,7 +536,6 @@ def process_message(user_psid, message_text):
     with open(history_file, 'w') as f:
         json.dump(historia_konwersacji[-20:], f, indent=2)
 
-# --- WEBHOOK MESSENGERA ---
 @app.route('/webhook2', methods=['GET', 'POST'])
 def webhook():
     if request.method == 'GET':
@@ -514,8 +559,6 @@ def webhook():
                             thread.start()
         return "ok", 200
 
-# --- URUCHOMIENIE SERWERA ---
 if __name__ == '__main__':
     print("Uruchamianie serwera Flask na porcie 8081...")
-    # W środowisku produkcyjnym użyj serwera WSGI, np. Gunicorn lub Waitress
     app.run(host='0.0.0.0', port=8081, debug=True)
