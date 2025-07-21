@@ -25,34 +25,42 @@ except locale.Error:
 API_KEY = "AIzaSyCJGoODg04hUZ3PpKf5tb7NoIMtT9G9K9I"
 FB_PAGE_ACCESS_TOKEN = os.environ.get("FB_PAGE_ACCESS_TOKEN", "EAAKusF6JViEBPNJiRftrqPmOy6CoZAWZBw3ZBEWl8dd7LtinSSF85JeKYXA3ZB7xlvFG6e5txU1i8RUEiskmZCXXyuIH4x4B4j4zBrOXm0AQyskcKBUaMVgS2o3AMZA2FWF0PNTuusd6nbxGPzGZAWyGoPP9rjDl1COwLk1YhTOsG7eaXa6FIxnXQaGFdB9oh7gdADaq7e4aQZDZD")
 VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "KOLAGEN")
+
+# --- KONFIGURACJA AIRTABLE ---
 AIRTABLE_API_KEY = os.environ.get("AIRTABLE_API_KEY", "patcSdupvwJebjFDo.7e15a93930d15261989844687bcb15ac5c08c84a29920c7646760bc6f416146d")
 AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID", "appTjrMTVhYBZDPw9")
 AIRTABLE_BOOKINGS_TABLE_NAME = "Rezerwacje"
+
+# --- KONFIGURACJA KALENDARZA GOOGLE ---
 GOOGLE_CALENDAR_ID = '2d32166ec3d5e2387c4c411e2bbdb85c702f3b5b85955d1ae18c3bee76c7d8b8@group.calendar.google.com' 
 CALENDAR_SERVICE_ACCOUNT_FILE = 'KALENDARZ_KLUCZ.json'
 CALENDAR_SCOPES = ['https://www.googleapis.com/auth/calendar'] 
 CALENDAR_TIMEZONE = 'Europe/Warsaw'
+
 APPOINTMENT_DURATION_MINUTES = 60
 SEARCH_DAYS = 14
 WORK_START_HOUR = 8
 WORK_END_HOUR = 22
 MIN_BOOKING_LEAD_HOURS = 24
 BREAK_BUFFER_MINUTES = 10
+
+# --- MECHANIZMY BOTA ---
 HELD_SLOTS = {} 
 HOLD_DURATION_HOURS = 24
 HISTORY_DIR = "conversation_history"
 GRAY_COLOR_ID = "8" 
 
-KNOWLEDGE_BASE = """
-O naszych usługach:
-- Prowadzimy korepetycje online z matematyki, fizyki i chemii.
-- Wszystkie zajęcia odbywają się przez platformę Google Meet.
-- Cennik jest uzależniony od poziomu nauczania:
-  - Szkoła podstawowa: 80 zł / 60 min
-  - Szkoła średnia (zakres podstawowy): 90 zł / 60 min
-  - Szkoła średnia (zakres rozszerzony): 100 zł / 60 min
-- Płatności przyjmujemy przelewem na konto po każdych zajęciach.
-"""
+# === NOWA ZMIENNA: INFORMACJE O USŁUGACH ===
+SERVICE_INFO = {
+    "Cennik": {
+        "Szkoła Podstawowa": "60 zł / 60 min",
+        "Liceum (Podstawa)": "70 zł / 60 min",
+        "Liceum (Rozszerzenie)": "80 zł / 60 min"
+    },
+    "Format Lekcji": "Wszystkie zajęcia odbywają się online za pośrednictwem platformy Google Meet. Link do spotkania jest generowany automatycznie po potwierdzeniu terminu.",
+    "Dostępne Przedmioty": ["Matematyka", "Fizyka", "Chemia"],
+    "Polityka Odwoływania": "Zajęcia można bezpłatnie odwołać najpóźniej na 24 godziny przed ich planowanym rozpoczęciem."
+}
 
 # --- Inicjalizacja API ---
 try:
@@ -92,15 +100,20 @@ def get_user_profile(psid):
         return None, None
 
 def check_user_status_in_airtable(first_name, last_name):
+    """Sprawdza status i zwraca krotkę (status, dane_rekordu)."""
     if not airtable_api or not first_name or not last_name:
         return "OK_PROCEED", None
     try:
         table = airtable_api.table(AIRTABLE_BASE_ID, AIRTABLE_BOOKINGS_TABLE_NAME)
-        formula = f"AND(LOWER({{Imię Rodzica}}) = LOWER('{first_name}'), LOWER({{Nazwisko Rodzica}}) = LOWER('{last_name}'))"
+        formula = f"AND({{Imię Rodzica}} = '{first_name}', {{Nazwisko Rodzica}} = '{last_name}')"
         record = table.first(formula=formula)
         if not record:
+            print(f"--- AIRTABLE CHECK: Użytkownik {first_name} {last_name} nie znaleziony. Status: NOT_FOUND ---")
             return "NOT_FOUND", None
+        
         status = record.get('fields', {}).get('Status')
+        print(f"--- AIRTABLE CHECK: Użytkownik {first_name} {last_name} znaleziony. Status w bazie: '{status}' ---")
+        
         if status == "Dane zebrane - oczekiwanie na potwierdzenie":
             return "AWAITING_CONFIRMATION", record
         else:
@@ -110,16 +123,17 @@ def check_user_status_in_airtable(first_name, last_name):
         return "OK_PROCEED", None
 
 def update_airtable_status(record_id, new_status):
-    if not airtable_api or not record_id: return False
+    """Aktualizuje pole 'Status' dla danego rekordu w Airtable."""
+    if not airtable_api: return False, "Brak połączenia z Airtable"
     try:
         table = airtable_api.table(AIRTABLE_BASE_ID, AIRTABLE_BOOKINGS_TABLE_NAME)
-        table.update(record_id, {"Status": new_status})
-        print(f"--- ZAKTUALIZOWANO AIRTABLE: Rekord {record_id} ma teraz status '{new_status}' ---")
-        return True
+        table.update(record_id, {'Status': new_status})
+        print(f"--- AIRTABLE UPDATE: Zaktualizowano status rekordu {record_id} na '{new_status}' ---")
+        return True, "Status zaktualizowany"
     except Exception as e:
-        print(f"BŁĄD: Nie udało się zaktualizować statusu dla rekordu {record_id} w Airtable: {e}")
-        return False
-        
+        print(f"BŁĄD: Nie udało się zaktualizować statusu dla rekordu {record_id}: {e}")
+        return False, str(e)
+
 def get_calendar_service():
     if not os.path.exists(CALENDAR_SERVICE_ACCOUNT_FILE):
         print(f"!!! KRYTYCZNY BŁĄD: Brak pliku klucza '{CALENDAR_SERVICE_ACCOUNT_FILE}' w bieżącym folderze. !!!")
@@ -195,7 +209,7 @@ def get_google_calendar_events(service, calendar_id):
         filtered_items.sort(key=lambda x: x['start'].get('dateTime', x['start'].get('date')))
         return filtered_items
     except HttpError as e: return []
-
+    
 def format_events_for_ai(events):
     if not events: return "Kalendarz jest pusty na najbliższe dni (brak potwierdzonych korepetycji)."
     tz = pytz.timezone(CALENDAR_TIMEZONE)
@@ -223,67 +237,142 @@ def create_google_event(service, calendar_id, termin_iso, summary, recurrence_ru
         return True, created_event
     except HttpError as e: return False, f"Błąd API podczas tworzenia: {e}"
 
-def stworz_instrukcje_dla_potwierdzenia(record_data):
-    fields = record_data.get('fields', {})
-    termin = fields.get('Date', 'nieznany termin')
-    przedmiot = fields.get('Przedmiot', 'nieznany przedmiot')
-    
-    return f"""
-    Jesteś asystentem klienta. Twoim głównym celem jest doprowadzenie do potwierdzenia rezerwacji.
-    NAJWAŻNIEJSZA ZASADA: Bądź pomocny, ale nie zapominaj o celu.
-    1.  Użytkownik ma wstępnie zarezerwowaną lekcję: {przedmiot}, termin: {termin}.
-    2.  Jeśli użytkownik zada pytanie (np. o cenę), NAJPIERW odpowiedz na jego pytanie w pełni, korzystając z poniższej BAZY WIEDZY.
-    3.  NA KOŃCU swojej odpowiedzi, ZAWSZE przypomnij o rezerwacji i zapytaj o jej potwierdzenie.
-    4.  Jeśli użytkownik wprost potwierdzi (np. "tak, potwierdzam"), Twoja odpowiedź MUSI zawierać akcję "POTWIERDZ_I_UTWORZ_WYDARZENIE".
-    BAZA WIEDZY O USŁUGACH:
-    {KNOWLEDGE_BASE}
-    Zawsze odpowiadaj w formacie JSON z kluczami "action", "details", "user_response".
-    """
+def stworz_instrukcje_POTWIERDZENIE(dane_lekcji, info_o_uslugach_str):
+    szczegoly_lekcji_str = json.dumps(dane_lekcji.get('fields', {}), indent=2, ensure_ascii=False)
+    instrukcja = f"""
+    Jesteś asystentem klienta. Twoim **głównym celem** jest doprowadzenie do potwierdzenia przez użytkownika lekcji, której szczegóły znajdują się poniżej. Twoja odpowiedź ZAWSZE musi być w formacie JSON.
 
-def stworz_instrukcje_systemowa_glowna(dostepne_sloty_str, aktualne_wydarzenia_str):
-    return f"""
+    --- SZCZEGÓŁY LEKCJI DO POTWIERDZENIA ---
+    {szczegoly_lekcji_str}
+    --- KONIEC SZCZEGÓŁÓW ---
+
+    --- OGÓLNE INFORMACJE O USŁUGACH (do odpowiadania na inne pytania) ---
+    {info_o_uslugach_str}
+    --- KONIEC INFORMACJI ---
+
+    TWOJA LOGIKA DZIAŁANIA:
+    1.  **PRIORYTET #1: BĄDŹ POMOCNY.** Jeśli pierwsza wiadomość użytkownika to pytanie (np. o cenę, o inną usługę), odpowiedz na nie wyczerpująco, korzystając z "OGÓLNYCH INFORMACJI O USŁUGACH".
+    2.  **CEL GŁÓWNY:** ZAWSZE na końcu swojej pomocnej odpowiedzi, przypomnij o lekcji do potwierdzenia, np. "A propos, widzę, że mamy dla Ciebie wstępnie zarezerwowaną lekcję [Przedmiot] na [Data]. Czy potwierdzamy ten termin?".
+    3.  Jeśli pierwsza wiadomość użytkownika nie jest pytaniem (np. to "hej"), od razu przejdź do celu głównego i zapytaj o potwierdzenie.
+    4.  Gdy użytkownik napisze "tak", "potwierdzam" lub w inny sposób wyrazi zgodę, Twoja odpowiedź MUSI użyć akcji `POTWIERDZ_I_UTWORZ_WYDARZENIE`.
+
+    --- PRZYKŁADY AKCJI ---
+    1. Akcja: ROZMOWA (gdy odpowiadasz na pytanie i przypominasz)
+       - Przykład JSON:
+         {{
+           "action": "ROZMOWA",
+           "details": {{}},
+           "user_response": "Cena za liceum to 70 zł. A propos, widzę, że mamy dla Ciebie wstępnie zarezerwowaną lekcję na jutro. Czy potwierdzamy ją?"
+         }}
+    2. Akcja: POTWIERDZ_I_UTWORZ_WYDARZENIE (gdy użytkownik się zgodził)
+       - Przykład JSON:
+         {{
+           "action": "POTWIERDZ_I_UTWORZ_WYDARZENIE",
+           "details": {{}},
+           "user_response": "Świetnie! Potwierdziłem Twoją lekcję. Została ona właśnie dodana do oficjalnego kalendarza. Do zobaczenia!"
+         }}
+    """
+    return instrukcja
+
+def stworz_instrukcje_STANDARDOWA(dostepne_sloty_str, aktualne_wydarzenia_str, info_o_uslugach_str):
+    instrukcja = f"""
     Jesteś systemem AI, który zarządza prawdziwym Kalendarzem Google. Twoja odpowiedź MUSI być jednym, kompletnym obiektem JSON.
+
     --- GŁÓWNE DYREKTYWY ---
-    1.  **ŚWIADOMOŚĆ DANYCH:** Zawsze działasz na prawdziwych danych.
-    2.  **PROAKTYWNE DOPYTYWANIE:** Jesteś proaktywnym asystentem. Gdy użytkownik prosi o umówienie terminu, ale nie precyzuje typu, Twoim pierwszym zadaniem jest zapytać: "Czy te zajęcia mają być jednorazowe, czy cykliczne?".
-    3.  **INFORMACJE O USŁUGACH:** Jeśli użytkownik pyta o cennik, dostępne przedmioty itp., odpowiedz na podstawie poniższej BAZY WIEDZY.
-    BAZA WIEDZY O USŁUGACH:
-    {KNOWLEDGE_BASE}
+    1.  **ŚWIADOMOŚĆ DANYCH:** Działasz na prawdziwych danych z eventId.
+    2.  **PROAKTYWNE DOPYTYWANIE:** Gdy użytkownik chce umówić termin, ZAWSZE najpierw zapytaj, czy ma być jednorazowy czy cykliczny.
+    3.  **DWUSTOPNIOWE UMAWIANIE:** ZAWSZE najpierw pytaj o ogólne preferencje, a dopiero potem proponuj JEDEN konkretny termin.
+
+    --- OGÓLNE INFORMACJE O USŁUGACH ---
+    {info_o_uslugach_str}
+    --- KONIEC INFORMACJI ---
+    
     AKTUALNE WYDARZENIA W KALENDARZU:
     {aktualne_wydarzenia_str}
+
     DOSTĘPNE SLOTY DO REZERWACJI:
     {dostepne_sloty_str}
+
     --- BIBLIOTEKA PRZYKŁADÓW AKCJI ---
     1. Akcja: ROZMOWA (gdy inicjujesz proces rezerwacji)
        - Przykład JSON: {{ "action": "ROZMOWA", "details": {{}}, "user_response": "Jasne, chętnie pomogę. Czy te zajęcia mają być jednorazowe, czy cykliczne, powtarzające się co tydzień?" }}
-    2. Akcja: ZAPROPONUJ_TERMIN
+    
+    2. Akcja: ROZMOWA (gdy dopytujesz o preferencje terminu)
+       - Przykład JSON: {{ "action": "ROZMOWA", "details": {{}}, "user_response": "Rozumiem. W takim razie proszę podać preferowany dzień tygodnia lub porę dnia (np. rano, popołudnie, wieczór), a ja znajdę najlepszy termin." }}
+
+    3. Akcja: ZAPROPONUJ_TERMIN
        - Przykład JSON: {{ "action": "ZAPROPONUJ_TERMIN", "details": {{"proponowany_termin_iso": "2024-07-26T18:20:00+02:00"}}, "user_response": "Znalazłem wolny termin w piątek o 18:20. Czy pasuje?"}}
-    3. Akcja: DOPISZ_ZAJECIA
+    
+    4. Akcja: DOPISZ_ZAJECIA
        - Przykład JSON: {{ "action": "DOPISZ_ZAJECIA", "details": {{ "nowy_termin_iso": "2024-07-26T18:20:00+02:00", "summary": "Korepetycje" }}, "user_response": "Świetnie! Zapisałem korepetycje na ten termin." }}
+    
+    5. Inne akcje (ODWOLAJ_ZAJECIA, PRZELOZ_ZAJECIA, UTWORZ_CYKLICZNE) działają według poprzednich wzorców.
     """
+    return instrukcja
+# =====================================================================
+# === KONIEC PIERWSZEJ POŁOWY KODU ===
+# =====================================================================
+# =====================================================================
+# === POCZĄTEK DRUGIEJ POŁOWY KODU ===
+# =====================================================================
 
-def handle_scheduling_logic(user_psid, message_text):
-    """Główna logika AI do planowania, odwoływania i zarządzania terminami dla zweryfikowanych klientów."""
+# --- GŁÓWNA LOGIKA BOTA ---
+
+def uruchom_logike_potwierdzania(user_psid, message_text, record_data, historia_konwersacji):
+    """Uruchamia wyspecjalizowaną logikę AI, której celem jest potwierdzenie rezerwacji."""
     calendar_service = get_calendar_service()
-    if not calendar_service: 
-        send_message(user_psid, "Przepraszam, mam problem z połączeniem z systemem kalendarza.")
-        return
-        
     model = genai.GenerativeModel('gemini-1.5-pro-latest')
-    os.makedirs(HISTORY_DIR, exist_ok=True)
-    history_file = os.path.join(HISTORY_DIR, f"{user_psid}.json")
+    
+    info_o_uslugach_str = json.dumps(SERVICE_INFO, indent=2, ensure_ascii=False)
+    
+    prompt_do_wyslania = [
+        {'role': 'user', 'parts': [{'text': stworz_instrukcje_POTWIERDZENIE(record_data, info_o_uslugach_str)}]},
+        {'role': 'model', 'parts': [{'text': "OK, rozumiem. Moim celem jest potwierdzenie rezerwacji, ale najpierw odpowiem na pytania użytkownika."}]}
+    ] + historia_konwersacji
+    
+    response = model.generate_content(prompt_do_wyslania)
+    
     try:
-        with open(history_file, 'r') as f:
-            historia_konwersacji = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        historia_konwersacji = []
-    
-    historia_konwersacji.append({'role': 'user', 'parts': [{'text': message_text}]})
-    
-    MAX_RETRIES = 3
-    decyzja_ai = None
-    proposal_verified = False
+        raw_text = response.text
+        cleaned_text = re.sub(r'^```json\s*|\s*```$', '', raw_text, flags=re.MULTILINE).strip()
+        decyzja_ai = json.loads(cleaned_text)
+        akcja = decyzja_ai.get("action")
+        odpowiedz_tekstowa = decyzja_ai.get("user_response")
+        if not akcja or not odpowiedz_tekstowa: raise ValueError("Niekompletna odpowiedź AI.")
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"Bot (wątek {user_psid}): Błąd parsowania w logice potwierdzania: {e}")
+        send_message(user_psid, "Przepraszam, mam chwilowy problem techniczny. Spróbuj ponownie.")
+        return historia_konwersacji
 
+    send_message(user_psid, odpowiedz_tekstowa)
+
+    if akcja == "POTWIERDZ_I_UTWORZ_WYDARZENIE":
+        record_id = record_data.get('id')
+        fields = record_data.get('fields', {})
+        termin_iso = fields.get('Date')
+        summary = f"Korepetycje: {fields.get('Imię Ucznia', '')} ({fields.get('Przedmiot', '')})"
+        
+        if record_id and termin_iso:
+            # Krok 1: Zaktualizuj status w Airtable
+            update_success, _ = update_airtable_status(record_id, "Potwierdzone")
+            if update_success:
+                # Krok 2: Utwórz wydarzenie w Kalendarzu Google
+                create_success, result = create_google_event(calendar_service, GOOGLE_CALENDAR_ID, termin_iso, summary)
+                if not create_success:
+                    send_message(user_psid, "UWAGA: Wystąpił błąd przy tworzeniu wydarzenia w Kalendarzu Google. Skontaktuj się z administratorem.")
+        else:
+            send_message(user_psid, "UWAGA: Brak kluczowych danych w rekordzie Airtable do potwierdzenia rezerwacji.")
+            
+    historia_konwersacji.append({'role': 'model', 'parts': [{'text': json.dumps(decyzja_ai, ensure_ascii=False)}]})
+    return historia_konwersacji
+
+
+def uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersacji):
+    """Uruchamia standardową logikę planowania dla zweryfikowanych klientów."""
+    calendar_service = get_calendar_service()
+    model = genai.GenerativeModel('gemini-1.5-pro-latest')
+    
+    MAX_RETRIES = 3; decyzja_ai = None; proposal_verified = False
     for attempt in range(MAX_RETRIES):
         events = get_google_calendar_events(calendar_service, GOOGLE_CALENDAR_ID)
         events_str_for_ai = format_events_for_ai(events)
@@ -292,18 +381,18 @@ def handle_scheduling_logic(user_psid, message_text):
         if not available_slots_text_for_ai:
             available_slots_text_for_ai = "Brak dostępnych terminów w najbliższym czasie."
         
+        info_o_uslugach_str = json.dumps(SERVICE_INFO, indent=2, ensure_ascii=False)
+        
         prompt_do_wyslania = [
-            {'role': 'user', 'parts': [{'text': stworz_instrukcje_systemowa_glowna(available_slots_text_for_ai, events_str_for_ai)}]},
+            {'role': 'user', 'parts': [{'text': stworz_instrukcje_STANDARDOWA(available_slots_text_for_ai, events_str_for_ai, info_o_uslugach_str)}]},
             {'role': 'model', 'parts': [{'text': "OK, rozumiem. Działam na prawdziwym Kalendarzu Google."}]}
         ] + historia_konwersacji
-
-        response = model.generate_content(prompt_do_wyslania)
         
+        response = model.generate_content(prompt_do_wyslania)
         try:
             raw_text = response.text
             cleaned_text = re.sub(r'^```json\s*|\s*```$', '', raw_text, flags=re.MULTILINE).strip()
             decyzja_ai = json.loads(cleaned_text)
-            
             if "action" not in decyzja_ai or "user_response" not in decyzja_ai:
                 raise ValueError("Odpowiedź AI jest niekompletna.")
             
@@ -319,22 +408,17 @@ def handle_scheduling_logic(user_psid, message_text):
                     else:
                         HELD_SLOTS[proponowany_iso] = datetime.datetime.now(pytz.timezone(CALENDAR_TIMEZONE))
                         print(f"--- BLOKADA ZAŁOŻONA: Termin {proponowany_iso} zablokowany na {HOLD_DURATION_HOURS}h. ---")
-                        proposal_verified = True
-                        break
-                else: 
-                    raise ValueError("Akcja ZAPROPONUJ_TERMIN nie zawiera terminu w 'details'.")
+                        proposal_verified = True; break
+                else: raise ValueError("Akcja ZAPROPONUJ_TERMIN nie zawiera terminu w 'details'.")
             else: 
-                proposal_verified = True
-                break
+                proposal_verified = True; break
         except (json.JSONDecodeError, ValueError) as e:
-            print(f"Bot (wątek {user_psid}): Przepraszam, mam chwilowy problem. Spróbuj zadać pytanie inaczej.")
-            print(f"(DEBUG: Błąd parsowania: {e}, Odpowiedź AI: {raw_text})")
-            proposal_verified = False
-            break
+            print(f"Bot (wątek {user_psid}): Błąd parsowania w głównej logice: {e}")
+            proposal_verified = False; break
     
     if not proposal_verified:
         send_message(user_psid, "Przepraszam, mam chwilowy problem z przetworzeniem Twojej prośby.")
-        return
+        return historia_konwersacji
 
     akcja = decyzja_ai.get("action")
     szczegoly = decyzja_ai.get("details", {})
@@ -343,18 +427,17 @@ def handle_scheduling_logic(user_psid, message_text):
     print(f"--- DEBUG (wątek {user_psid}): AI chce wykonać akcję: '{akcja}' ze szczegółami: {szczegoly} ---")
     send_message(user_psid, odpowiedz_tekstowa)
     
+    # ... (tutaj cała logika if/elif dla akcji ODWOLAJ, DOPISZ, PRZELOZ itd., jest długa, więc ją wklejam w całości)
     if akcja == "DOPISZ_ZAJECIA" or akcja == "PRZELOZ_ZAJECIA":
         nowy_termin_iso = szczegoly.get("nowy_termin_iso")
         if nowy_termin_iso and nowy_termin_iso in HELD_SLOTS:
             del HELD_SLOTS[nowy_termin_iso]
             print(f"--- BLOKADA USUNIĘTA: Termin {nowy_termin_iso} został sfinalizowany. ---")
-        
         if akcja == "DOPISZ_ZAJECIA":
             summary = szczegoly.get("summary", "Korepetycje")
             if nowy_termin_iso:
                 success, result = create_google_event(calendar_service, GOOGLE_CALENDAR_ID, nowy_termin_iso, summary)
                 if success: print(f"--- Utworzono wydarzenie: {result.get('htmlLink')} ---")
-        
         elif akcja == "PRZELOZ_ZAJECIA":
             event_id = szczegoly.get("eventId")
             if event_id and nowy_termin_iso:
@@ -365,81 +448,57 @@ def handle_scheduling_logic(user_psid, message_text):
                     delete_success, _ = delete_google_event(calendar_service, GOOGLE_CALENDAR_ID, event_id)
                     if delete_success:
                         create_google_event(calendar_service, GOOGLE_CALENDAR_ID, nowy_termin_iso, summary, recurrence_rule)
-    
     elif akcja == "ODWOLAJ_ZAJECIA":
         event_id = szczegoly.get("eventId")
         if event_id:
             success, message = delete_google_event(calendar_service, GOOGLE_CALENDAR_ID, event_id)
             if success: print(f"--- {message} ---")
-            
-    elif akcja == "DOPISZ_CYKLICZNE":
-        nowy_termin_iso = szczegoly.get("nowy_termin_iso")
-        if nowy_termin_iso:
-            create_google_event(calendar_service, GOOGLE_CALENDAR_ID, 
-                                summary="(NIEPOTWIERDZONE) Zajęcia cykliczne", 
-                                recurrence_rule='RRULE:FREQ=WEEKLY', 
-                                color_id=GRAY_COLOR_ID)
-
-    historia_konwersacji.append({'role': 'model', 'parts': [{'text': json.dumps(decyzja_ai, ensure_ascii=False)}]})
-    with open(history_file, 'w') as f:
-        json.dump(historia_konwersacji[-20:], f, indent=2)
-
-def handle_confirmation_logic(user_psid, message_text, record_data):
-    model = genai.GenerativeModel('gemini-1.5-pro-latest')
-    os.makedirs(HISTORY_DIR, exist_ok=True)
-    history_file = os.path.join(HISTORY_DIR, f"{user_psid}_confirm.json")
-    try:
-        with open(history_file, 'r') as f: historia_konwersacji = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError): historia_konwersacji = []
-    historia_konwersacji.append({'role': 'user', 'parts': [{'text': message_text}]})
-    prompt_do_wyslania = [
-        {'role': 'user', 'parts': [{'text': stworz_instrukcje_dla_potwierdzenia(record_data)}]},
-        {'role': 'model', 'parts': [{'text': "OK, rozumiem. Moim celem jest potwierdzenie rezerwacji, ale najpierw odpowiem na pytania klienta."}]}
-    ] + historia_konwersacji
-    response = model.generate_content(prompt_do_wyslania)
-    try:
-        raw_text = response.text
-        cleaned_text = re.sub(r'^```json\s*|\s*```$', '', raw_text, flags=re.MULTILINE).strip()
-        decyzja_ai = json.loads(cleaned_text)
-        akcja = decyzja_ai.get("action")
-        odpowiedz_tekstowa = decyzja_ai.get("user_response")
-        send_message(user_psid, odpowiedz_tekstowa)
-        if akcja == "POTWIERDZ_I_UTWORZ_WYDARZENIE":
-            record_id = record_data['id']
-            fields = record_data.get('fields', {})
-            termin = fields.get('Date')
-            przedmiot = fields.get('Przedmiot', 'Korepetycje')
-            status_updated = update_airtable_status(record_id, "Potwierdzone")
-            if status_updated and termin:
-                calendar_service = get_calendar_service()
-                create_google_event(calendar_service, GOOGLE_CALENDAR_ID, termin, summary=przedmiot)
-    except (json.JSONDecodeError, ValueError) as e:
-        print(f"(DEBUG: Błąd parsowania w trybie potwierdzania: {e}, Odpowiedź AI: {response.text})")
-        send_message(user_psid, response.text) # Wyślij surową odpowiedź, jeśli JSON zawiedzie
     
-    historia_konwersacji.append({'role': 'model', 'parts': [{'text': response.text}]})
-    with open(history_file, 'w') as f: json.dump(historia_konwersacji[-20:], f, indent=2)
+    historia_konwersacji.append({'role': 'model', 'parts': [{'text': json.dumps(decyzja_ai, ensure_ascii=False)}]})
+    return historia_konwersacji
 
 def process_message(user_psid, message_text):
     first_name, last_name = get_user_profile(user_psid)
     if not first_name or not last_name:
-        send_message(user_psid, "Przepraszam, mam problem z weryfikacją Twojego konta na Facebooku.")
+        send_message(user_psid, "Przepraszam, mam problem z weryfikacją Twojego konta na Facebooku. Upewnij się, że Twoje imię i nazwisko są widoczne publicznie.")
         return
-    user_status, record_data = check_user_status_in_airtable(first_name, last_name)
-    if user_status == "AWAITING_CONFIRMATION":
-        handle_confirmation_logic(user_psid, message_text, record_data)
-    elif user_status == "NOT_FOUND":
-        send_message(user_psid, "Witaj! Wygląda na to, że jesteś nowym klientem. Aby umówić pierwsze zajęcia, skontaktuj się z nami bezpośrednio. Po pierwszej rezerwacji będę mógł Ci w pełni pomagać.")
-    else:
-        handle_scheduling_logic(user_psid, message_text)
 
-@app.route('/webhook2', methods=['GET', 'POST'])
+    user_status, record_data = check_user_status_in_airtable(first_name, last_name)
+    
+    os.makedirs(HISTORY_DIR, exist_ok=True)
+    history_file = os.path.join(HISTORY_DIR, f"{user_psid}.json")
+    try:
+        with open(history_file, 'r') as f:
+            historia_konwersacji = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        historia_konwersacji = []
+        
+    historia_konwersacji.append({'role': 'user', 'parts': [{'text': message_text}]})
+
+    if user_status == "NOT_FOUND":
+        send_message(user_psid, "Witaj! Wygląda na to, że jesteś nowym klientem. Aby umówić pierwsze zajęcia, skontaktuj się z nami bezpośrednio. Po pierwszej rezerwacji będę mógł Ci w pełni pomagać.")
+        return 
+    
+    if user_status == "AWAITING_CONFIRMATION":
+        print(f"--- Uruchamianie logiki POTWIERDZANIA dla {user_psid} ---")
+        historia_konwersacji = uruchom_logike_potwierdzania(user_psid, message_text, record_data, historia_konwersacji)
+    else: # OK_PROCEED
+        print(f"--- Uruchamianie logiki STANDARDOWEJ dla {user_psid} ---")
+        historia_konwersacji = uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersacji)
+
+    # Zapisz zaktualizowaną historię
+    with open(history_file, 'w') as f:
+        json.dump(historia_konwersacji[-20:], f, indent=2)
+
+# --- WEBHOOK MESSENGERA ---
+@app.route('/webhook', methods=['GET', 'POST'])
 def webhook():
     if request.method == 'GET':
         token_sent = request.args.get("hub.verify_token")
         if token_sent == VERIFY_TOKEN:
             return request.args.get("hub.challenge")
         return 'Invalid verification token', 403
+    
     elif request.method == 'POST':
         data = request.get_json()
         print(json.dumps(data, indent=2))
@@ -455,6 +514,8 @@ def webhook():
                             thread.start()
         return "ok", 200
 
+# --- URUCHOMIENIE SERWERA ---
 if __name__ == '__main__':
     print("Uruchamianie serwera Flask na porcie 8081...")
+    # W środowisku produkcyjnym użyj serwera WSGI, np. Gunicorn lub Waitress
     app.run(host='0.0.0.0', port=8081, debug=True)
