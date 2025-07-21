@@ -23,30 +23,21 @@ except locale.Error:
 
 # --- KONFIGURACJA ---
 API_KEY = "AIzaSyCJGoODg04hUZ3PpKf5tb7NoIMtT9G9K9I"
-
-# --- KONFIGURACJA MESSENGERA (zgodnie z prośbą) ---
 FB_PAGE_ACCESS_TOKEN = os.environ.get("FB_PAGE_ACCESS_TOKEN", "EAAKusF6JViEBPNJiRftrqPmOy6CoZAWZBw3ZBEWl8dd7LtinSSF85JeKYXA3ZB7xlvFG6e5txU1i8RUEiskmZCXXyuIH4x4B4j4zBrOXm0AQyskcKBUaMVgS2o3AMZA2FWF0PNTuusd6nbxGPzGZAWyGoPP9rjDl1COwLk1YhTOsG7eaXa6FIxnXQaGFdB9oh7gdADaq7e4aQZDZD")
 VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "KOLAGEN")
-
-# --- KONFIGURACJA AIRTABLE ---
 AIRTABLE_API_KEY = os.environ.get("AIRTABLE_API_KEY", "patcSdupvwJebjFDo.7e15a93930d15261989844687bcb15ac5c08c84a29920c7646760bc6f416146d")
 AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID", "appTjrMTVhYBZDPw9")
 AIRTABLE_BOOKINGS_TABLE_NAME = "Rezerwacje"
-
-# --- KONFIGURACJA KALENDARZA GOOGLE ---
 GOOGLE_CALENDAR_ID = '2d32166ec3d5e2387c4c411e2bbdb85c702f3b5b85955d1ae18c3bee76c7d8b8@group.calendar.google.com' 
 CALENDAR_SERVICE_ACCOUNT_FILE = 'KALENDARZ_KLUCZ.json'
 CALENDAR_SCOPES = ['https://www.googleapis.com/auth/calendar'] 
 CALENDAR_TIMEZONE = 'Europe/Warsaw'
-
 APPOINTMENT_DURATION_MINUTES = 60
 SEARCH_DAYS = 14
 WORK_START_HOUR = 8
 WORK_END_HOUR = 22
 MIN_BOOKING_LEAD_HOURS = 24
 BREAK_BUFFER_MINUTES = 10
-
-# --- MECHANIZMY BOTA ---
 HELD_SLOTS = {} 
 HOLD_DURATION_HOURS = 24
 HISTORY_DIR = "conversation_history"
@@ -69,16 +60,47 @@ def send_message(recipient_psid, message_text):
     print(f"Wysyłanie do {recipient_psid}: '{message_text[:100]}...'")
     params = {"access_token": FB_PAGE_ACCESS_TOKEN}
     headers = {"Content-Type": "application/json"}
-    chunks = [message_text[i:i + 2000] for i in range(0, len(message_text), 2000)]
-    for chunk in chunks:
-        data = json.dumps({"recipient": {"id": recipient_psid}, "message": {"text": chunk}, "messaging_type": "RESPONSE"})
-        try:
-            r = requests.post("https://graph.facebook.com/v19.0/me/messages", params=params, headers=headers, data=data)
-            if r.status_code != 200:
-                print(f"BŁĄD: Nie udało się wysłać wiadomości. Status: {r.status_code}, Odpowiedź: {r.text}")
-        except Exception as e:
-            print(f"BŁĄD: Wyjątek podczas wysyłania wiadomości: {e}")
-        time.sleep(1)
+    data = json.dumps({"recipient": {"id": recipient_psid}, "message": {"text": message_text}, "messaging_type": "RESPONSE"})
+    try:
+        r = requests.post("https://graph.facebook.com/v19.0/me/messages", params=params, headers=headers, data=data)
+        if r.status_code != 200:
+            print(f"BŁĄD: Nie udało się wysłać wiadomości. Status: {r.status_code}, Odpowiedź: {r.text}")
+    except Exception as e:
+        print(f"BŁĄD: Wyjątek podczas wysyłania wiadomości: {e}")
+
+def get_user_profile(psid):
+    """Pobiera imię i nazwisko użytkownika z Facebook Graph API."""
+    try:
+        url = f"https://graph.facebook.com/{psid}?fields=first_name,last_name&access_token={FB_PAGE_ACCESS_TOKEN}"
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+        print(f"--- POBRANO PROFIL FB dla {psid}: {data} ---")
+        return data.get("first_name"), data.get("last_name")
+    except requests.exceptions.RequestException as e:
+        print(f"BŁĄD: Nie można pobrać profilu FB dla PSID {psid}: {e}")
+        return None, None
+
+def check_user_status_in_airtable(first_name, last_name):
+    """Sprawdza status użytkownika w Airtable po imieniu i nazwisku."""
+    if not airtable_api or not first_name or not last_name:
+        return "OK_PROCEED"
+    try:
+        table = airtable_api.table(AIRTABLE_BASE_ID, AIRTABLE_BOOKINGS_TABLE_NAME)
+        formula = f"AND({{Imię Rodzica}} = '{first_name}', {{Nazwisko Rodzica}} = '{last_name}')"
+        record = table.first(formula=formula)
+        if not record:
+            print(f"--- AIRTABLE CHECK: Użytkownik {first_name} {last_name} nie znaleziony. Status: NOT_FOUND ---")
+            return "NOT_FOUND"
+        status = record.get('fields', {}).get('Status')
+        print(f"--- AIRTABLE CHECK: Użytkownik {first_name} {last_name} znaleziony. Status w bazie: '{status}' ---")
+        if status == "Dane zebrane - oczekiwanie na potwierdzenie":
+            return "AWAITING_CONFIRMATION"
+        else:
+            return "OK_PROCEED"
+    except Exception as e:
+        print(f"BŁĄD: Wystąpił błąd podczas sprawdzania statusu w Airtable dla {first_name} {last_name}: {e}")
+        return "OK_PROCEED"
 
 def get_calendar_service():
     if not os.path.exists(CALENDAR_SERVICE_ACCOUNT_FILE):
@@ -92,40 +114,6 @@ def get_calendar_service():
     except Exception as e:
         print(f"!!! KRYTYCZNY BŁĄD: Nie można połączyć się z Google Calendar API: {e} !!!")
         return None
-
-def check_user_status_in_airtable(psid):
-    if not airtable_api:
-        print("OSTRZEŻENIE: Brak połączenia z Airtable, weryfikacja statusu pominięta.")
-        return "OK_PROCEED"
-    try:
-        table = airtable_api.table(AIRTABLE_BASE_ID, AIRTABLE_BOOKINGS_TABLE_NAME)
-        formula = f"{{PSID}} = '{psid}'"
-        record = table.first(formula=formula)
-        if not record:
-            print(f"--- AIRTABLE CHECK: Użytkownik {psid} nie znaleziony. Status: NOT_FOUND ---")
-            return "NOT_FOUND"
-        status = record.get('fields', {}).get('Status')
-        print(f"--- AIRTABLE CHECK: Użytkownik {psid} znaleziony. Status w bazie: '{status}' ---")
-        if status == "Dane zebrane - oczekiwanie na potwierdzenie":
-            return "AWAITING_CONFIRMATION"
-        else:
-            return "OK_PROCEED"
-    except Exception as e:
-        print(f"BŁĄD: Wystąpił błąd podczas sprawdzania statusu w Airtable dla PSID {psid}: {e}")
-        return "OK_PROCEED"
-
-def cleanup_and_get_active_held_slots():
-    global HELD_SLOTS
-    tz = pytz.timezone(CALENDAR_TIMEZONE)
-    now = datetime.datetime.now(tz)
-    expiration_delta = datetime.timedelta(hours=HOLD_DURATION_HOURS)
-    slots_to_check = list(HELD_SLOTS.keys())
-    for slot_iso in slots_to_check:
-        hold_time = HELD_SLOTS[slot_iso]
-        if now - hold_time > expiration_delta:
-            print(f"--- BLOKADA WYGASŁA: Termin {slot_iso} został zwolniony. ---")
-            del HELD_SLOTS[slot_iso]
-    return list(HELD_SLOTS.keys())
 
 def find_available_slots_gcal(service, calendar_id, duration_minutes, search_days):
     if not service: return []
@@ -154,9 +142,6 @@ def find_available_slots_gcal(service, calendar_id, duration_minutes, search_day
             start_dt -= buffer_delta
             end_dt += buffer_delta
         busy_from_gcal.append((start_dt, end_dt))
-    active_held_slots_iso = cleanup_and_get_active_held_slots()
-    held_blocks = [(datetime.datetime.fromisoformat(iso), datetime.datetime.fromisoformat(iso) + datetime.timedelta(minutes=duration_minutes)) for iso in active_held_slots_iso]
-    all_busy_blocks = busy_from_gcal + held_blocks
     available_slots = []
     duration_delta = datetime.timedelta(minutes=duration_minutes)
     search_start_dt = now + datetime.timedelta(hours=MIN_BOOKING_LEAD_HOURS)
@@ -165,7 +150,7 @@ def find_available_slots_gcal(service, calendar_id, duration_minutes, search_day
         day_start_work = tz.localize(datetime.datetime.combine(current_date, datetime.time(WORK_START_HOUR)))
         day_end_work = tz.localize(datetime.datetime.combine(current_date, datetime.time(WORK_END_HOUR)))
         current_time = max(day_start_work, search_start_dt)
-        today_busy_blocks = sorted([b for b in all_busy_blocks if b[0].date() == current_date])
+        today_busy_blocks = sorted([b for b in busy_from_gcal if b[0].date() == current_date])
         for busy_start, busy_end in today_busy_blocks:
             if current_time < busy_start:
                 potential_slot = current_time
@@ -192,7 +177,7 @@ def get_google_calendar_events(service, calendar_id):
         filtered_items.sort(key=lambda x: x['start'].get('dateTime', x['start'].get('date')))
         return filtered_items
     except HttpError as e: return []
-    
+
 def format_events_for_ai(events):
     if not events: return "Kalendarz jest pusty na najbliższe dni (brak potwierdzonych korepetycji)."
     tz = pytz.timezone(CALENDAR_TIMEZONE)
@@ -207,24 +192,6 @@ def format_events_for_ai(events):
         formatted.append(f"- ID: {event['id']}, Nazwa: {summary}{recurrence_info}, Start: {formatted_start}")
     return "\n".join(formatted)
 
-def delete_google_event(service, calendar_id, event_id):
-    if not service: return False, "Brak połączenia z API"
-    try: service.events().delete(calendarId=calendar_id, eventId=event_id).execute(); return True, f"Wydarzenie {event_id} usunięte."
-    except HttpError as e: return False, f"Błąd API podczas usuwania: {e}"
-
-def create_google_event(service, calendar_id, termin_iso, summary, recurrence_rule=None, color_id=None):
-    if not service: return False, "Brak połączenia z API"
-    start_dt = datetime.datetime.fromisoformat(termin_iso)
-    if start_dt.tzinfo is None: start_dt = pytz.timezone(CALENDAR_TIMEZONE).localize(start_dt)
-    end_dt = start_dt + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
-    event = {'summary': summary, 'start': {'dateTime': start_dt.isoformat(), 'timeZone': CALENDAR_TIMEZONE}, 'end': {'dateTime': end_dt.isoformat(), 'timeZone': CALENDAR_TIMEZONE}}
-    if recurrence_rule: event['recurrence'] = [recurrence_rule]
-    if color_id: event['colorId'] = color_id
-    try:
-        created_event = service.events().insert(calendarId=calendar_id, body=event).execute()
-        return True, created_event
-    except HttpError as e: return False, f"Błąd API podczas tworzenia: {e}"
-
 def stworz_instrukcje_systemowa(dostepne_sloty_str, aktualne_wydarzenia_str):
     return f"""
     Jesteś systemem AI, który zarządza prawdziwym Kalendarzem Google. Twoja odpowiedź MUSI być jednym, kompletnym obiektem JSON.
@@ -238,29 +205,36 @@ def stworz_instrukcje_systemowa(dostepne_sloty_str, aktualne_wydarzenia_str):
     {aktualne_wydarzenia_str}
     DOSTĘPNE SLOTY DO REZERWACJI:
     {dostepne_sloty_str}
-
     --- BIBLIOTEKA PRZYKŁADÓW AKCJI ---
     1. Akcja: ROZMOWA (gdy inicjujesz proces rezerwacji)
        - Przykład JSON: {{ "action": "ROZMOWA", "details": {{}}, "user_response": "Jasne, chętnie pomogę. Czy te zajęcia mają być jednorazowe, czy cykliczne, powtarzające się co tydzień?" }}
-    2. Akcja: ROZMOWA (gdy dopytujesz o preferencje terminu)
-       - Przykład JSON: {{ "action": "ROZMOWA", "details": {{}}, "user_response": "Rozumiem. W takim razie proszę podać preferowany dzień tygodnia lub porę dnia (np. rano, popołudnie, wieczór), a ja znajdę najlepszy termin." }}
-    3. Akcja: ZAPROPONUJ_TERMIN
+    2. Akcja: ZAPROPONUJ_TERMIN
        - Przykład JSON: {{ "action": "ZAPROPONUJ_TERMIN", "details": {{"proponowany_termin_iso": "2024-07-26T18:20:00+02:00"}}, "user_response": "Znalazłem wolny termin w piątek o 18:20. Czy pasuje?"}}
-    4. Akcja: DOPISZ_ZAJECIA
+    3. Akcja: DOPISZ_ZAJECIA
        - Przykład JSON: {{ "action": "DOPISZ_ZAJECIA", "details": {{ "nowy_termin_iso": "2024-07-26T18:20:00+02:00", "summary": "Korepetycje" }}, "user_response": "Świetnie! Zapisałem korepetycje na ten termin." }}
-    5. Akcja: DOPISZ_CYKLICZNE
-       - Przykład JSON: {{ "action": "DOPISZ_CYKLICZNE", "details": {{ "nowy_termin_iso": "2024-07-29T10:00:00+02:00" }}, "user_response": "Dodałem do kalendarza cykliczne, niepotwierdzone zajęcia. Proszę pamiętać o potwierdzeniu każdej lekcji przed jej terminem." }}
     """
 
 def process_message(user_psid, message_text):
-    user_status = check_user_status_in_airtable(user_psid)
-    if user_status == "NOT_FOUND":
-        send_message(user_psid, "prosze umowic pierszwa lekcje")
+    # === KROK 1: Weryfikacja tożsamości i statusu klienta ===
+    first_name, last_name = get_user_profile(user_psid)
+    if not first_name or not last_name:
+        send_message(user_psid, "Przepraszam, mam problem z weryfikacją Twojego konta na Facebooku. Upewnij się, że Twoje imię i nazwisko są widoczne publicznie.")
         return
-    if user_status == "AWAITING_CONFIRMATION":
-        send_message(user_psid, "prosze potwierdzic lekcje")
-        return
+
+    user_status = check_user_status_in_airtable(first_name, last_name)
     
+    if user_status == "NOT_FOUND":
+        send_message(user_psid, "Witaj! Wygląda na to, że jesteś nowym klientem. Aby umówić pierwsze zajęcia, skontaktuj się z nami bezpośrednio. Po pierwszej rezerwacji będę mógł Ci w pełni pomagać.")
+        # W przyszłości tutaj można uruchomić logikę pierwszej rezerwacji.
+        return 
+    
+    if user_status == "AWAITING_CONFIRMATION":
+        send_message(user_psid, "Dzień dobry. Widzę w systemie, że masz umówioną lekcję, która oczekuje na ostateczne potwierdzenie. Proszę potwierdzić lekcję, aby móc zarządzać kolejnymi terminami.")
+        return
+
+    # Jeśli status to "OK_PROCEED", kontynuuj normalnie...
+    # ======================================================
+
     calendar_service = get_calendar_service()
     if not calendar_service: 
         send_message(user_psid, "Przepraszam, mam problem z połączeniem z systemem kalendarza. Spróbuj ponownie później.")
@@ -327,7 +301,6 @@ def process_message(user_psid, message_text):
     
     print(f"--- DEBUG (wątek {user_psid}): AI chce wykonać akcję: '{akcja}' ze szczegółami: {szczegoly} ---")
     send_message(user_psid, odpowiedz_tekstowa)
-    
     if akcja == "DOPISZ_ZAJECIA" or akcja == "PRZELOZ_ZAJECIA":
         nowy_termin_iso = szczegoly.get("nowy_termin_iso")
         if nowy_termin_iso and nowy_termin_iso in HELD_SLOTS:
@@ -365,13 +338,14 @@ def process_message(user_psid, message_text):
     with open(history_file, 'w') as f:
         json.dump(historia_konwersacji[-20:], f, indent=2)
 
-@app.route('/webhook2', methods=['GET', 'POST'])
+@app.route('/webhook', methods=['GET', 'POST'])
 def webhook():
     if request.method == 'GET':
         token_sent = request.args.get("hub.verify_token")
         if token_sent == VERIFY_TOKEN:
             return request.args.get("hub.challenge")
         return 'Invalid verification token', 403
+    
     elif request.method == 'POST':
         data = request.get_json()
         print(json.dumps(data, indent=2))
