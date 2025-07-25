@@ -246,7 +246,7 @@ def create_google_event(service, calendar_id, termin_iso, summary, recurrence_ru
 def stworz_instrukcje_POTWIERDZENIE(dane_lekcji, info_o_uslugach_str):
     szczegoly_lekcji_str = json.dumps(dane_lekcji.get('fields', {}), indent=2, ensure_ascii=False)
     instrukcja = f"""
-    Jesteś asystentem klienta. Twoim **głównym celem** jest doprowadzenie do potwierdzenia przez użytkownika lekcji, której szczegóły znajdują się poniżej. Twoja odpowiedź ZAWSZE musi być w formacie JSON.
+    Jesteś asystentem klienta. Twoim **głównym celem** jest doprowadzenie do potwierdzenia przez użytkownika lekcji. Twoja odpowiedź ZAWSZE musi być w formacie JSON.
     --- SZCZEGÓŁY LEKCJI DO POTWIERDZENIA ---
     {szczegoly_lekcji_str}
     --- OGÓLNE INFORMACJE O USŁUGACH ---
@@ -257,14 +257,14 @@ def stworz_instrukcje_POTWIERDZENIE(dane_lekcji, info_o_uslugach_str):
     3.  Jeśli pierwsza wiadomość użytkownika nie jest pytaniem, od razu przejdź do celu głównego.
     4.  Gdy użytkownik się zgodzi, użyj akcji `POTWIERDZ_I_UTWORZ_WYDARZENIE`.
     --- PRZYKŁADY AKCJI ---
-    1. Akcja: ROZMOWA: {{ "action": "ROZMOWA", "details": {{}}, "user_response": "Cena za liceum to 70 zł. A propos, widzę, że mamy dla Ciebie lekcję na jutro. Czy potwierdzamy?" }}
-    2. Akcja: POTWIERDZ_I_UTWORZ_WYDARZENIE: {{ "action": "POTWIERDZ_I_UTWORZ_WYDARZENIE", "details": {{}}, "user_response": "Świetnie! Potwierdziłem Twoją lekcję. Do zobaczenia!" }}
+    1. ROZMOWA: {{ "action": "ROZMOWA", "details": {{}}, "user_response": "Cena za liceum to 70 zł. A propos, widzę, że mamy dla Ciebie lekcję na jutro. Czy potwierdzamy?" }}
+    2. POTWIERDZ_I_UTWORZ_WYDARZENIE: {{ "action": "POTWIERDZ_I_UTWORZ_WYDARZENIE", "details": {{}}, "user_response": "Świetnie! Potwierdziłem Twoją lekcję. Do zobaczenia!" }}
     """
     return instrukcja
 
 def stworz_instrukcje_STANDARDOWA(dostepne_sloty_str, aktualne_wydarzenia_str, info_o_uslugach_str):
     instrukcja = f"""
-    Jesteś systemem AI, który zarządza prawdziwym Kalendarzem Google. Twoja odpowiedź MUSI być jednym, kompletnym obiektem JSON.
+    Jesteś systemem AI. Twoja odpowiedź MUSI być jednym, kompletnym obiektem JSON.
     --- GŁÓWNE DYREKTYWY ---
     1.  **ŚWIADOMOŚĆ DANYCH:** Działasz na prawdziwych danych z eventId.
     2.  **PROAKTYWNE DOPYTYWANIE:** Gdy użytkownik chce umówić termin, ZAWSZE najpierw zapytaj, czy ma być jednorazowy czy cykliczny.
@@ -276,10 +276,10 @@ def stworz_instrukcje_STANDARDOWA(dostepne_sloty_str, aktualne_wydarzenia_str, i
     DOSTĘPNE SLOTY DO REZERWACJI:
     {dostepne_sloty_str}
     --- BIBLIOTEKA PRZYKŁADÓW AKCJI ---
-    1. Akcja: ROZMOWA (gdy inicjujesz rezerwację): {{ "action": "ROZMOWA", "details": {{}}, "user_response": "Jasne, chętnie pomogę. Czy te zajęcia mają być jednorazowe, czy cykliczne, powtarzające się co tydzień?" }}
-    2. Akcja: ROZMOWA (gdy dopytujesz o preferencje): {{ "action": "ROZMOWA", "details": {{}}, "user_response": "Rozumiem. W takim razie proszę podać preferowany dzień tygodnia lub porę dnia, a ja znajdę najlepszy termin." }}
-    3. Akcja: ZAPROPONUJ_TERMIN: {{ "action": "ZAPROPONUJ_TERMIN", "details": {{"proponowany_termin_iso": "2024-07-26T18:20:00+02:00"}}, "user_response": "Znalazłem wolny termin w piątek o 18:20. Czy pasuje?"}}
-    4. Akcja: DOPISZ_ZAJECIA: {{ "action": "DOPISZ_ZAJECIA", "details": {{ "nowy_termin_iso": "2024-07-26T18:20:00+02:00", "summary": "Korepetycje" }}, "user_response": "Świetnie! Zapisałem korepetycje na ten termin." }}
+    1. ROZMOWA (inicjacja): {{ "action": "ROZMOWA", "details": {{}}, "user_response": "Jasne, chętnie pomogę. Czy te zajęcia mają być jednorazowe, czy cykliczne, powtarzające się co tydzień?" }}
+    2. ROZMOWA (preferencje): {{ "action": "ROZMOWA", "details": {{}}, "user_response": "Rozumiem. W takim razie proszę podać preferowany dzień tygodnia lub porę dnia, a ja znajdę najlepszy termin." }}
+    3. ZAPROPONUJ_TERMIN: {{ "action": "ZAPROPONUJ_TERMIN", "details": {{"proponowany_termin_iso": "2024-07-26T18:20:00+02:00"}}, "user_response": "Znalazłem wolny termin w piątek o 18:20. Czy pasuje?"}}
+    4. DOPISZ_ZAJECIA: {{ "action": "DOPISZ_ZAJECIA", "details": {{ "nowy_termin_iso": "2024-07-26T18:20:00+02:00", "summary": "Korepetycje" }}, "user_response": "Świetnie! Zapisałem korepetycje na ten termin." }}
     """
     return instrukcja
 
@@ -290,9 +290,9 @@ def stworz_instrukcje_STANDARDOWA(dostepne_sloty_str, aktualne_wydarzenia_str, i
 # === POCZĄTEK DRUGIEJ POŁOWY KODU ===
 # =====================================================================
 
-def uruchom_logike_potwierdzania(user_psid, message_text, record_data, historia_konwersacji, calendar_id):
+def uruchom_logike_potwierdzania(user_psid, page_id, message_text, record_data, historia_konwersacji, calendar_id):
     """Uruchamia wyspecjalizowaną logikę AI, której celem jest potwierdzenie rezerwacji."""
-    calendar_service = get_calendar_service(CALENDAR_SERVICE_ACCOUNT_FILE, ['https://www.googleapis.com/auth/calendar'])
+    calendar_service = get_calendar_service(CALENDAR_SERVICE_ACCOUNT_FILE, CALENDAR_SCOPES)
     model = genai.GenerativeModel('gemini-1.5-pro-latest')
     
     info_o_uslugach_str = json.dumps(SERVICE_INFO, indent=2, ensure_ascii=False)
@@ -313,10 +313,10 @@ def uruchom_logike_potwierdzania(user_psid, message_text, record_data, historia_
         if not akcja or not odpowiedz_tekstowa: raise ValueError("Niekompletna odpowiedź AI.")
     except (json.JSONDecodeError, ValueError) as e:
         print(f"Bot (wątek {user_psid}): Błąd parsowania w logice potwierdzania: {e}")
-        send_message(user_psid, "Przepraszam, mam chwilowy problem techniczny. Spróbuj ponownie.")
+        send_message(user_psid, "Przepraszam, mam chwilowy problem techniczny. Spróbuj ponownie.", page_id)
         return historia_konwersacji
 
-    send_message(user_psid, odpowiedz_tekstowa)
+    send_message(user_psid, odpowiedz_tekstowa, page_id)
 
     if akcja == "POTWIERDZ_I_UTWORZ_WYDARZENIE":
         record_id = record_data.get('id')
@@ -329,17 +329,17 @@ def uruchom_logike_potwierdzania(user_psid, message_text, record_data, historia_
             if update_success:
                 create_success, result = create_google_event(calendar_service, calendar_id, termin_iso, summary)
                 if not create_success:
-                    send_message(user_psid, "UWAGA: Wystąpił błąd przy tworzeniu wydarzenia w Kalendarzu Google. Skontaktuj się z administratorem.")
+                    send_message(user_psid, "UWAGA: Wystąpił błąd przy tworzeniu wydarzenia w Kalendarzu Google. Skontaktuj się z administratorem.", page_id)
         else:
-            send_message(user_psid, "UWAGA: Brak kluczowych danych w rekordzie Airtable do potwierdzenia rezerwacji.")
+            send_message(user_psid, "UWAGA: Brak kluczowych danych w rekordzie Airtable do potwierdzenia rezerwacji.", page_id)
             
     historia_konwersacji.append({'role': 'model', 'parts': [{'text': json.dumps(decyzja_ai, ensure_ascii=False)}]})
     return historia_konwersacji
 
 
-def uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersacji, calendar_id):
+def uruchom_glowna_logike_planowania(user_psid, page_id, message_text, historia_konwersacji, calendar_id):
     """Uruchamia standardową logikę planowania dla zweryfikowanych klientów."""
-    calendar_service = get_calendar_service(CALENDAR_SERVICE_ACCOUNT_FILE, ['https://www.googleapis.com/auth/calendar'])
+    calendar_service = get_calendar_service(CALENDAR_SERVICE_ACCOUNT_FILE, CALENDAR_SCOPES)
     model = genai.GenerativeModel('gemini-1.5-pro-latest')
     
     MAX_RETRIES = 3; decyzja_ai = None; proposal_verified = False
@@ -372,7 +372,7 @@ def uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersac
             proposal_verified = False; break
     
     if not proposal_verified:
-        send_message(user_psid, "Przepraszam, mam chwilowy problem z przetworzeniem Twojej prośby.")
+        send_message(user_psid, "Przepraszam, mam chwilowy problem z przetworzeniem Twojej prośby.", page_id)
         return historia_konwersacji
 
     akcja = decyzja_ai.get("action")
@@ -380,7 +380,7 @@ def uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersac
     odpowiedz_tekstowa = decyzja_ai.get("user_response")
     
     print(f"--- DEBUG (wątek {user_psid}): AI chce wykonać akcję: '{akcja}' ze szczegółami: {szczegoly} ---")
-    send_message(user_psid, odpowiedz_tekstowa)
+    send_message(user_psid, odpowiedz_tekstowa, page_id)
     
     if akcja == "DOPISZ_ZAJECIA":
         summary = szczegoly.get("summary", "Korepetycje")
@@ -392,10 +392,10 @@ def uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersac
     historia_konwersacji.append({'role': 'model', 'parts': [{'text': json.dumps(decyzja_ai, ensure_ascii=False)}]})
     return historia_konwersacji
 
-def process_message(user_psid, message_text):
-    first_name, last_name = get_user_profile(user_psid)
+def process_message(user_psid, page_id, message_text):
+    first_name, last_name = get_user_profile(user_psid, page_id)
     if not first_name or not last_name:
-        send_message(user_psid, "Przepraszam, mam problem z weryfikacją Twojego konta na Facebooku.")
+        send_message(user_psid, "Przepraszam, mam problem z weryfikacją Twojego konta na Facebooku.", page_id)
         return
 
     user_status, record_data = check_user_status_in_airtable(first_name, last_name)
@@ -420,15 +420,15 @@ def process_message(user_psid, message_text):
     historia_konwersacji.append({'role': 'user', 'parts': [{'text': message_text}]})
 
     if user_status == "NOT_FOUND":
-        send_message(user_psid, "Witaj! Wygląda na to, że jesteś nowym klientem lub w Twojej rezerwacji brakuje kluczowych informacji. Aby umówić pierwsze zajęcia, skontaktuj się z nami bezpośrednio.")
+        send_message(user_psid, "Witaj! Wygląda na to, że jesteś nowym klientem lub w Twojej rezerwacji brakuje kluczowych informacji. Aby umówić pierwsze zajęcia, skontaktuj się z nami bezpośrednio.", page_id)
         return 
     
     if user_status == "AWAITING_CONFIRMATION":
         print(f"--- Uruchamianie logiki POTWIERDZANIA dla {user_psid} ---")
-        historia_konwersacji = uruchom_logike_potwierdzania(user_psid, message_text, record_data, historia_konwersacji, assigned_calendar_id)
+        historia_konwersacji = uruchom_logike_potwierdzania(user_psid, page_id, message_text, record_data, historia_konwersacji, assigned_calendar_id)
     else: # OK_PROCEED
         print(f"--- Uruchamianie logiki STANDARDOWEJ dla {user_psid} ---")
-        historia_konwersacji = uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersacji, assigned_calendar_id)
+        historia_konwersacji = uruchom_glowna_logike_planowania(user_psid, page_id, message_text, historia_konwersacji, assigned_calendar_id)
 
     with open(history_file, 'w', encoding='utf-8') as f:
         json.dump(historia_konwersacji[-20:], f, indent=2)
@@ -454,7 +454,7 @@ def webhook():
                         message = messaging_event["message"]
                         if message.get("text") and not message.get("is_echo"):
                             message_text = message["text"]
-                            thread = threading.Thread(target=process_message, args=(user_psid, page_id, message_text))
+                            thread = threading.Thread(target=process_message, args=(sender_psid, page_id, message_text))
                             thread.start()
         return "ok", 200
 
