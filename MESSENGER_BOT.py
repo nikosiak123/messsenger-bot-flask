@@ -594,123 +594,123 @@ def process_single_event(event_payload, page_id_from_entry_info):
                 context_data_to_save.pop('_just_reset', None)
                 user_message_text_for_ai = user_content.parts[0].text if user_content and user_content.parts else None
                 
-                 if is_initial_general_entry and not user_message_text_for_ai: 
-                    logging.debug(f"    (Wątek) [{actual_user_psid}] Generowanie wiadomości powitalnej. Bieżący przedmiot strony: '{current_subject}'")
-                    other_subjects_links_parts = []
-                    
-                    if not PAGE_CONFIG:
-                        logging.warning(f"    (Wątek) [{actual_user_psid}] PAGE_CONFIG jest pusty! Nie można wygenerować linków.")
-                    
-                    for page_id_iter, page_data_entry in PAGE_CONFIG.items(): 
-                        subj_name = page_data_entry.get("subject")
-                        subj_link = page_data_entry.get("link")
-                        page_entry_name_for_log = page_data_entry.get("name", f"ID: {page_id_iter}")
+             if is_initial_general_entry and not user_message_text_for_ai: 
+                logging.debug(f"    (Wątek) [{actual_user_psid}] Generowanie wiadomości powitalnej. Bieżący przedmiot strony: '{current_subject}'")
+                other_subjects_links_parts = []
+                
+                if not PAGE_CONFIG:
+                    logging.warning(f"    (Wątek) [{actual_user_psid}] PAGE_CONFIG jest pusty! Nie można wygenerować linków.")
+                
+                for page_id_iter, page_data_entry in PAGE_CONFIG.items(): 
+                    subj_name = page_data_entry.get("subject")
+                    subj_link = page_data_entry.get("link")
+                    page_entry_name_for_log = page_data_entry.get("name", f"ID: {page_id_iter}")
 
-                        logging.debug(f"      Iteracja PAGE_CONFIG dla '{page_entry_name_for_log}': Przedmiot='{subj_name}', Link='{subj_link}'")
+                    logging.debug(f"      Iteracja PAGE_CONFIG dla '{page_entry_name_for_log}': Przedmiot='{subj_name}', Link='{subj_link}'")
 
-                        if subj_name and subj_link:
-                            if current_subject and subj_name.lower() != current_subject.lower(): # Upewnij się, że current_subject nie jest None
-                                other_subjects_links_parts.append(f"- {subj_name}: {subj_link}")
-                                logging.debug(f"        Dodano link: - {subj_name}: {subj_link}")
-                            elif not current_subject: # Jeśli current_subject jest None, to nie ma z czym porównywać, więc dodaj link
-                                other_subjects_links_parts.append(f"- {subj_name}: {subj_link}")
-                                logging.warning(f"        Dodano link (current_subject był pusty/None, więc nie można porównać): - {subj_name}: {subj_link}")
-                            # else: # current_subject istnieje i jest taki sam jak subj_name - nie rób nic (nie dodawaj)
-                        else:
-                            logging.warning(f"        Pominięto wpis dla '{page_entry_name_for_log}' z PAGE_CONFIG - brak 'subject' lub 'link'.")
-                    
-                    links_text_for_user = ""
-                    if other_subjects_links_parts:
-                        links_text_for_user = "\n\nUdzielamy również korepetycji z:\n" + "\n".join(other_subjects_links_parts)
-                        logging.debug(f"    (Wątek) [{actual_user_psid}] Sformatowany tekst linków: {links_text_for_user}")
+                    if subj_name and subj_link:
+                        if current_subject and subj_name.lower() != current_subject.lower(): # Upewnij się, że current_subject nie jest None
+                            other_subjects_links_parts.append(f"- {subj_name}: {subj_link}")
+                            logging.debug(f"        Dodano link: - {subj_name}: {subj_link}")
+                        elif not current_subject: # Jeśli current_subject jest None, to nie ma z czym porównywać, więc dodaj link
+                            other_subjects_links_parts.append(f"- {subj_name}: {subj_link}")
+                            logging.warning(f"        Dodano link (current_subject był pusty/None, więc nie można porównać): - {subj_name}: {subj_link}")
+                        # else: # current_subject istnieje i jest taki sam jak subj_name - nie rób nic (nie dodawaj)
                     else:
-                        logging.debug(f"    (Wątek) [{actual_user_psid}] Brak linków do innych przedmiotów do wyświetlenia.")
+                        logging.warning(f"        Pominięto wpis dla '{page_entry_name_for_log}' z PAGE_CONFIG - brak 'subject' lub 'link'.")
+                
+                links_text_for_user = ""
+                if other_subjects_links_parts:
+                    links_text_for_user = "\n\nUdzielamy również korepetycji z:\n" + "\n".join(other_subjects_links_parts)
+                    logging.debug(f"    (Wątek) [{actual_user_psid}] Sformatowany tekst linków: {links_text_for_user}")
+                else:
+                    logging.debug(f"    (Wątek) [{actual_user_psid}] Brak linków do innych przedmiotów do wyświetlenia.")
 
-                    display_subject = current_subject if current_subject else "korepetycji"
-                    msg_result = f"Dzień dobry! Dziękujemy za kontakt w sprawie korepetycji z przedmiotu **{display_subject}**. W czym mogę pomóc? Jeśli chcą Państwo umówić termin, proszę dać znać, a ja sprawdzę dostępne opcje." + links_text_for_user
-                    logging.info(f"    (Wątek) [{actual_user_psid}] Wiadomość powitalna wygenerowana: '{msg_result[:200]}...'")
-                    
+                display_subject = current_subject if current_subject else "korepetycji"
+                msg_result = f"Dzień dobry! Dziękujemy za kontakt w sprawie korepetycji z przedmiotu **{display_subject}**. W czym mogę pomóc? Jeśli chcą Państwo umówić termin, proszę dać znać, a ja sprawdzę dostępne opcje." + links_text_for_user
+                logging.info(f"    (Wątek) [{actual_user_psid}] Wiadomość powitalna wygenerowana: '{msg_result[:200]}...'")
+                
+                model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
+                next_state = STATE_GENERAL
+                context_data_to_save.update({'type': STATE_GENERAL, 'required_subject': current_subject})
+            
+            elif user_message_text_for_ai: 
+                was_temporary = 'return_to_state' in context 
+                
+                # Wywołanie get_gemini_general_response - upewnij się, że ta funkcja poprawnie
+                # używa/formatuje SYSTEM_INSTRUCTION_GENERAL z linkami
+                # (zgodnie z jednym z dwóch podejść, które omawialiśmy)
+                ai_response_text_raw = get_gemini_general_response(
+                    actual_user_psid, 
+                    user_message_text_for_ai, 
+                    history_for_gemini,
+                    is_temporary_general_state, 
+                    current_page_token,
+                    current_subject_for_context=current_subject # Przekazujemy przedmiot bieżącej strony
+                )
+                
+                if ai_response_text_raw:
+                    model_resp_content = Content(role="model", parts=[Part.from_text(ai_response_text_raw)])
+                    if RETURN_TO_PREVIOUS in ai_response_text_raw and was_temporary:
+                        msg_result = ai_response_text_raw.split(RETURN_TO_PREVIOUS, 1)[0].strip()
+                        next_state = context.get('return_to_state', STATE_GENERAL) 
+                        context_data_to_save = context.get('return_to_context', {}).copy() 
+                        context_data_to_save['type'] = next_state 
+                        if next_state == STATE_SCHEDULING_ACTIVE: action = 'handle_scheduling' 
+                        elif next_state == STATE_GATHERING_INFO: action = 'handle_gathering'; trigger_gathering_ai_immediately = True
+                        else: action = 'handle_general' 
+                        current_state = next_state 
+                    elif INTENT_SCHEDULE_MARKER in ai_response_text_raw:
+                        # 1. Najpierw wyciągnij dane o uczniu, jeśli AI je podało
+                        student_data_match = re.search(
+                            r"\[DANE_UCZNIA_OGOLNE:\s*KlasaInfo:\s*(.*?),?\s*Poziom:\s*(.*?)\]",
+                            ai_response_text_raw, re.IGNORECASE | re.DOTALL
+                        )
+                        
+                        grade_info_from_ai = ""
+                        level_info_from_ai = ""
+                        
+                        if student_data_match:
+                            grade_info_from_ai = student_data_match.group(1).strip()
+                            level_info_from_ai = student_data_match.group(2).strip()
+                            logging.info(f"    (Wątek) [{actual_user_psid}] AI (General) zidentyfikowało dane ucznia: Klasa='{grade_info_from_ai}', Poziom='{level_info_from_ai}'")
+                            # Usuń znacznik z odpowiedzi, żeby użytkownik go nie widział
+                            ai_response_text_raw = re.sub(r"\[DANE_UCZNIA_OGOLNE:.*?\]", "", ai_response_text_raw).strip()
+
+                        # 2. Teraz przetwórz intencję umówienia wizyty
+                        msg_result = ai_response_text_raw.split(INTENT_SCHEDULE_MARKER, 1)[0].strip()
+                        confirmed_subject_by_ai = effective_subject_for_action 
+                        
+                        if confirmed_subject_by_ai and confirmed_subject_by_ai in AVAILABLE_SUBJECTS:
+                            next_state = STATE_SCHEDULING_ACTIVE
+                            # Tworzymy nowy kontekst i od razu wstawiamy dane o uczniu!
+                            context_data_to_save = {
+                                'type': STATE_SCHEDULING_ACTIVE, 
+                                'required_subject': confirmed_subject_by_ai,
+                                'known_grade': grade_info_from_ai,
+                                'known_level': level_info_from_ai
+                            }
+                            action = 'handle_scheduling' 
+                            current_state = next_state
+                        else:
+                            msg_result = (msg_result + "\n\n" if msg_result else "") + f"Nie jestem pewien, dla którego przedmiotu chcą Państwo umówić termin. Dostępne przedmioty to: {', '.join(AVAILABLE_SUBJECTS)}. Proszę sprecyzować."
+                            model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)]) 
+                            next_state = STATE_GENERAL
+                            context_data_to_save.update({'type': STATE_GENERAL, 'required_subject': current_subject})
+                    else: 
+                        msg_result = ai_response_text_raw
+                        next_state = STATE_GENERAL
+                        context_data_to_save.update({'type': STATE_GENERAL, 'required_subject': effective_subject_for_action})
+                        if was_temporary: 
+                            context_data_to_save.update({
+                                'return_to_state': context.get('return_to_state'),
+                                'return_to_context': context.get('return_to_context', {})
+                            })
+                else: 
+                    msg_result = "Przepraszam, mam chwilowy problem z przetworzeniem Twojej wiadomości. Spróbuj ponownie za chwilę."
                     model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
                     next_state = STATE_GENERAL
-                    context_data_to_save.update({'type': STATE_GENERAL, 'required_subject': current_subject})
-                
-                elif user_message_text_for_ai: 
-                    was_temporary = 'return_to_state' in context 
-                    
-                    # Wywołanie get_gemini_general_response - upewnij się, że ta funkcja poprawnie
-                    # używa/formatuje SYSTEM_INSTRUCTION_GENERAL z linkami
-                    # (zgodnie z jednym z dwóch podejść, które omawialiśmy)
-                    ai_response_text_raw = get_gemini_general_response(
-                        actual_user_psid, 
-                        user_message_text_for_ai, 
-                        history_for_gemini,
-                        is_temporary_general_state, 
-                        current_page_token,
-                        current_subject_for_context=current_subject # Przekazujemy przedmiot bieżącej strony
-                    )
-                    
-                    if ai_response_text_raw:
-                        model_resp_content = Content(role="model", parts=[Part.from_text(ai_response_text_raw)])
-                        if RETURN_TO_PREVIOUS in ai_response_text_raw and was_temporary:
-                            msg_result = ai_response_text_raw.split(RETURN_TO_PREVIOUS, 1)[0].strip()
-                            next_state = context.get('return_to_state', STATE_GENERAL) 
-                            context_data_to_save = context.get('return_to_context', {}).copy() 
-                            context_data_to_save['type'] = next_state 
-                            if next_state == STATE_SCHEDULING_ACTIVE: action = 'handle_scheduling' 
-                            elif next_state == STATE_GATHERING_INFO: action = 'handle_gathering'; trigger_gathering_ai_immediately = True
-                            else: action = 'handle_general' 
-                            current_state = next_state 
-                        elif INTENT_SCHEDULE_MARKER in ai_response_text_raw:
-                            # 1. Najpierw wyciągnij dane o uczniu, jeśli AI je podało
-                            student_data_match = re.search(
-                                r"\[DANE_UCZNIA_OGOLNE:\s*KlasaInfo:\s*(.*?),?\s*Poziom:\s*(.*?)\]",
-                                ai_response_text_raw, re.IGNORECASE | re.DOTALL
-                            )
-                            
-                            grade_info_from_ai = ""
-                            level_info_from_ai = ""
-                            
-                            if student_data_match:
-                                grade_info_from_ai = student_data_match.group(1).strip()
-                                level_info_from_ai = student_data_match.group(2).strip()
-                                logging.info(f"    (Wątek) [{actual_user_psid}] AI (General) zidentyfikowało dane ucznia: Klasa='{grade_info_from_ai}', Poziom='{level_info_from_ai}'")
-                                # Usuń znacznik z odpowiedzi, żeby użytkownik go nie widział
-                                ai_response_text_raw = re.sub(r"\[DANE_UCZNIA_OGOLNE:.*?\]", "", ai_response_text_raw).strip()
-
-                            # 2. Teraz przetwórz intencję umówienia wizyty
-                            msg_result = ai_response_text_raw.split(INTENT_SCHEDULE_MARKER, 1)[0].strip()
-                            confirmed_subject_by_ai = effective_subject_for_action 
-                            
-                            if confirmed_subject_by_ai and confirmed_subject_by_ai in AVAILABLE_SUBJECTS:
-                                next_state = STATE_SCHEDULING_ACTIVE
-                                # Tworzymy nowy kontekst i od razu wstawiamy dane o uczniu!
-                                context_data_to_save = {
-                                    'type': STATE_SCHEDULING_ACTIVE, 
-                                    'required_subject': confirmed_subject_by_ai,
-                                    'known_grade': grade_info_from_ai,
-                                    'known_level': level_info_from_ai
-                                }
-                                action = 'handle_scheduling' 
-                                current_state = next_state
-                            else:
-                                msg_result = (msg_result + "\n\n" if msg_result else "") + f"Nie jestem pewien, dla którego przedmiotu chcą Państwo umówić termin. Dostępne przedmioty to: {', '.join(AVAILABLE_SUBJECTS)}. Proszę sprecyzować."
-                                model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)]) 
-                                next_state = STATE_GENERAL
-                                context_data_to_save.update({'type': STATE_GENERAL, 'required_subject': current_subject})
-                        else: 
-                            msg_result = ai_response_text_raw
-                            next_state = STATE_GENERAL
-                            context_data_to_save.update({'type': STATE_GENERAL, 'required_subject': effective_subject_for_action})
-                            if was_temporary: 
-                                context_data_to_save.update({
-                                    'return_to_state': context.get('return_to_state'),
-                                    'return_to_context': context.get('return_to_context', {})
-                                })
-                    else: 
-                        msg_result = "Przepraszam, mam chwilowy problem z przetworzeniem Twojej wiadomości. Spróbuj ponownie za chwilę."
-                        model_resp_content = Content(role="model", parts=[Part.from_text(msg_result)])
-                        next_state = STATE_GENERAL
-                        context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True} 
+                    context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True} 
 
 
             elif current_action_in_loop == 'handle_scheduling':
