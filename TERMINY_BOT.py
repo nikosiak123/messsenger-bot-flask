@@ -485,8 +485,5 @@ def webhook():
 
 # --- URUCHOMIENIE SERWERA ---
 if __name__ == '__main__':
-    if not PAGE_CONFIG or not CALENDARS_CONFIG:
-        print("!!! ZAKOŃCZONO DZIAŁANIE: Konfiguracja nie została załadowana. Sprawdź plik 'config.json'.")
-    else:
-        print("Uruchamianie serwera Flask na porcie 8081...")
-        app.run(host='0.0.0.0', port=8081, debug=True)
+    print("Uruchamianie serwera Flask na porcie 8081...")
+    app.run(host='0.0.0.0', port=8081, debug=True)
