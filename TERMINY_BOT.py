@@ -23,46 +23,48 @@ except locale.Error:
 
 # --- KONFIGURACJA ---
 API_KEY = "AIzaSyCJGoODg04hUZ3PpKf5tb7NoIMtT9G9K9I"
-FB_PAGE_ACCESS_TOKEN = os.environ.get("FB_PAGE_ACCESS_TOKEN", "EAAKusF6JViEBPNJiRftrqPmOy6CoZAWZBw3ZBEWl8dd7LtinSSF85JeKYXA3ZB7xlvFG6e5txU1i8RUEiskmZCXXyuIH4x4B4j4zBrOXm0AQyskcKBUaMVgS2o3AMZA2FWF0PNTuusd6nbxGPzGZAWyGoPP9rjDl1COwLk1YhTOsG7eaXa6FIxnXQaGFdB9oh7gdADaq7e4aQZDZD")
-VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "KOLAGEN")
-
-# --- KONFIGURACJA AIRTABLE ---
-AIRTABLE_API_KEY = os.environ.get("AIRTABLE_API_KEY", "patcSdupvwJebjFDo.7e15a93930d15261989844687bcb15ac5c08c84a29920c7646760bc6f416146d")
-AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID", "appTjrMTVhYBZDPw9")
+VERIFY_TOKEN = "KOLAGEN"
+AIRTABLE_API_KEY = "patcSdupvwJebjFDo.7e15a93930d15261989844687bcb15ac5c08c84a29920c7646760bc6f416146d"
+AIRTABLE_BASE_ID = "appTjrMTVhYBZDPw9"
 AIRTABLE_BOOKINGS_TABLE_NAME = "Rezerwacje"
-
-# --- KONFIGURACJA KALENDARZA GOOGLE ---
-GOOGLE_CALENDAR_ID = '2d32166ec3d5e2387c4c411e2bbdb85c702f3b5b85955d1ae18c3bee76c7d8b8@group.calendar.google.com' 
 CALENDAR_SERVICE_ACCOUNT_FILE = 'KALENDARZ_KLUCZ.json'
-CALENDAR_SCOPES = ['https://www.googleapis.com/auth/calendar'] 
 CALENDAR_TIMEZONE = 'Europe/Warsaw'
-
 APPOINTMENT_DURATION_MINUTES = 60
 SEARCH_DAYS = 14
 WORK_START_HOUR = 8
 WORK_END_HOUR = 22
 MIN_BOOKING_LEAD_HOURS = 24
 BREAK_BUFFER_MINUTES = 10
-
-# --- MECHANIZMY BOTA ---
 HELD_SLOTS = {} 
 HOLD_DURATION_HOURS = 24
 HISTORY_DIR = "conversation_history"
 GRAY_COLOR_ID = "8" 
 
-# === NOWA ZMIENNA: INFORMACJE O USŁUGACH ===
-SERVICE_INFO = {
-    "Cennik": {
-        "Szkoła Podstawowa": "60 zł / 60 min",
-        "Liceum (Podstawa)": "70 zł / 60 min",
-        "Liceum (Rozszerzenie)": "80 zł / 60 min"
-    },
-    "Format Lekcji": "Wszystkie zajęcia odbywają się online za pośrednictwem platformy Google Meet. Link do spotkania jest generowany automatycznie po potwierdzeniu terminu.",
-    "Dostępne Przedmioty": ["Matematyka", "Fizyka", "Chemia"],
-    "Polityka Odwoływania": "Zajęcia można bezpłatnie odwołać najpóźniej na 24 godziny przed ich planowanym rozpoczęciem."
-}
+# --- Dynamiczne ładowanie konfiguracji ---
+PAGE_CONFIG = {}
+CALENDARS_CONFIG = []
+CALENDAR_NAME_TO_ID = {}
 
-# --- Inicjalizacja API ---
+def load_config():
+    global PAGE_CONFIG, CALENDARS_CONFIG, CALENDAR_NAME_TO_ID
+    try:
+        with open('config.json', 'r', encoding='utf-8') as f:
+            config = json.load(f)
+            PAGE_CONFIG = config.get("PAGE_CONFIG", {})
+            CALENDARS_CONFIG = config.get("CALENDARS", [])
+            # Tworzymy mapowanie Nazwa -> ID dla szybkiego dostępu
+            CALENDAR_NAME_TO_ID = {cal['name']: cal['id'] for cal in CALENDARS_CONFIG}
+            print("--- Konfiguracja stron i kalendarzy załadowana pomyślnie. ---")
+            print(f"--- Znaleziono {len(PAGE_CONFIG)} stron i {len(CALENDARS_CONFIG)} kalendarzy. ---")
+    except FileNotFoundError:
+        print("!!! KRYTYCZNY BŁĄD: Plik 'config.json' nie został znaleziony! !!!")
+    except json.JSONDecodeError:
+        print("!!! KRYTYCZNY BŁĄD: Błąd parsowania pliku 'config.json'! Sprawdź jego składnię. !!!")
+    except Exception as e:
+        print(f"!!! KRYTYCZNY BŁĄD podczas ładowania konfiguracji: {e} !!!")
+
+# --- Inicjalizacja ---
+load_config()
 try:
     genai.configure(api_key=API_KEY)
     airtable_api = Api(AIRTABLE_API_KEY)
@@ -75,11 +77,17 @@ app = Flask(__name__)
 
 # --- FUNKCJE POMOCNICZE ---
 
-def send_message(recipient_psid, message_text):
-    print(f"Wysyłanie do {recipient_psid}: '{message_text[:100]}...'")
-    params = {"access_token": FB_PAGE_ACCESS_TOKEN}
+def send_message(psid, message_text, page_id):
+    """Wysyła wiadomość, używając tokenu odpowiedniej strony."""
+    page_token = PAGE_CONFIG.get(page_id, {}).get('token')
+    if not page_token:
+        print(f"BŁĄD: Brak tokenu dla strony {page_id}. Nie można wysłać wiadomości.")
+        return
+        
+    print(f"Wysyłanie do {psid} (przez stronę {page_id}): '{message_text[:100]}...'")
+    params = {"access_token": page_token}
     headers = {"Content-Type": "application/json"}
-    data = json.dumps({"recipient": {"id": recipient_psid}, "message": {"text": message_text}, "messaging_type": "RESPONSE"})
+    data = json.dumps({"recipient": {"id": psid}, "message": {"text": message_text}, "messaging_type": "RESPONSE"})
     try:
         r = requests.post("https://graph.facebook.com/v19.0/me/messages", params=params, headers=headers, data=data)
         if r.status_code != 200:
@@ -87,9 +95,14 @@ def send_message(recipient_psid, message_text):
     except Exception as e:
         print(f"BŁĄD: Wyjątek podczas wysyłania wiadomości: {e}")
 
-def get_user_profile(psid):
+def get_user_profile(psid, page_id):
+    """Pobiera profil użytkownika, używając tokenu odpowiedniej strony."""
+    page_token = PAGE_CONFIG.get(page_id, {}).get('token')
+    if not page_token:
+        print(f"BŁĄD: Brak tokenu dla strony {page_id}. Nie można pobrać profilu.")
+        return None, None
     try:
-        url = f"https://graph.facebook.com/{psid}?fields=first_name,last_name&access_token={FB_PAGE_ACCESS_TOKEN}"
+        url = f"https://graph.facebook.com/{psid}?fields=first_name,last_name&access_token={page_token}"
         response = requests.get(url)
         response.raise_for_status()
         data = response.json()
@@ -309,14 +322,36 @@ def stworz_instrukcje_STANDARDOWA(dostepne_sloty_str, aktualne_wydarzenia_str, i
     5. Inne akcje (ODWOLAJ_ZAJECIA, PRZELOZ_ZAJECIA, UTWORZ_CYKLICZNE) działają według poprzednich wzorców.
     """
     return instrukcja
-# =====================================================================
-# === KONIEC PIERWSZEJ POŁOWY KODU ===
-# =====================================================================
-# =====================================================================
-# === POCZĄTEK DRUGIEJ POŁOWY KODU ===
-# =====================================================================
-
 # --- GŁÓWNA LOGIKA BOTA ---
+def process_message(user_psid, page_id, message_text):
+    first_name, last_name = get_user_profile(user_psid, page_id)
+    if not first_name or not last_name:
+        send_message(user_psid, "Przepraszam, mam problem z weryfikacją Twojego konta na Facebooku.", page_id)
+        return
+
+    user_status, record_data = check_user_status_in_airtable(first_name, last_name)
+    
+    assigned_calendar_id = None
+    if user_status == "OK_PROCEED" or user_status == "AWAITING_CONFIRMATION":
+        assigned_calendar_name = record_data.get('fields', {}).get('Nazwa Kalendarza')
+        if assigned_calendar_name:
+            assigned_calendar_id = CALENDAR_NAME_TO_ID.get(assigned_calendar_name)
+        
+        if not assigned_calendar_id:
+            # "Żelazna Zasada Pełnych Danych"
+            print(f"--- BŁĄD KONFIGURACJI KLIENTA: Użytkownik {first_name} {last_name} ma nieprawidłową lub brak nazwy kalendarza: '{assigned_calendar_name}'. Traktuję jak NOT_FOUND. ---")
+            user_status = "NOT_FOUND" 
+
+    if user_status == "NOT_FOUND":
+        send_message(user_psid, "Witaj! Wygląda na to, że jesteś nowym klientem lub w Twojej rezerwacji brakuje kluczowych informacji. Aby umówić pierwsze zajęcia, skontaktuj się z nami bezpośrednio.", page_id)
+        return
+    
+    if user_status == "AWAITING_CONFIRMATION":
+        # Uruchom logikę potwierdzania, przekazując ID przypisanego kalendarza
+        uruchom_logike_potwierdzania(user_psid, page_id, message_text, record_data, assigned_calendar_id)
+    else: # OK_PROCEED
+        # Uruchom główną logikę, przekazując ID przypisanego kalendarza
+        uruchom_glowna_logike_planowania(user_psid, page_id, message_text, assigned_calendar_id)
 
 def uruchom_logike_potwierdzania(user_psid, message_text, record_data, historia_konwersacji):
     """Uruchamia wyspecjalizowaną logikę AI, której celem jest potwierdzenie rezerwacji."""
@@ -365,7 +400,6 @@ def uruchom_logike_potwierdzania(user_psid, message_text, record_data, historia_
             
     historia_konwersacji.append({'role': 'model', 'parts': [{'text': json.dumps(decyzja_ai, ensure_ascii=False)}]})
     return historia_konwersacji
-
 
 def uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersacji):
     """Uruchamia standardową logikę planowania dla zweryfikowanych klientów."""
@@ -457,39 +491,6 @@ def uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersac
     historia_konwersacji.append({'role': 'model', 'parts': [{'text': json.dumps(decyzja_ai, ensure_ascii=False)}]})
     return historia_konwersacji
 
-def process_message(user_psid, message_text):
-    first_name, last_name = get_user_profile(user_psid)
-    if not first_name or not last_name:
-        send_message(user_psid, "Przepraszam, mam problem z weryfikacją Twojego konta na Facebooku. Upewnij się, że Twoje imię i nazwisko są widoczne publicznie.")
-        return
-
-    user_status, record_data = check_user_status_in_airtable(first_name, last_name)
-    
-    os.makedirs(HISTORY_DIR, exist_ok=True)
-    history_file = os.path.join(HISTORY_DIR, f"{user_psid}.json")
-    try:
-        with open(history_file, 'r') as f:
-            historia_konwersacji = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        historia_konwersacji = []
-        
-    historia_konwersacji.append({'role': 'user', 'parts': [{'text': message_text}]})
-
-    if user_status == "NOT_FOUND":
-        send_message(user_psid, "Witaj! Wygląda na to, że jesteś nowym klientem. Aby umówić pierwsze zajęcia, skontaktuj się z nami bezpośrednio. Po pierwszej rezerwacji będę mógł Ci w pełni pomagać.")
-        return 
-    
-    if user_status == "AWAITING_CONFIRMATION":
-        print(f"--- Uruchamianie logiki POTWIERDZANIA dla {user_psid} ---")
-        historia_konwersacji = uruchom_logike_potwierdzania(user_psid, message_text, record_data, historia_konwersacji)
-    else: # OK_PROCEED
-        print(f"--- Uruchamianie logiki STANDARDOWEJ dla {user_psid} ---")
-        historia_konwersacji = uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersacji)
-
-    # Zapisz zaktualizowaną historię
-    with open(history_file, 'w') as f:
-        json.dump(historia_konwersacji[-20:], f, indent=2)
-
 # --- WEBHOOK MESSENGERA ---
 @app.route('/webhook2', methods=['GET', 'POST'])
 def webhook():
@@ -504,18 +505,22 @@ def webhook():
         print(json.dumps(data, indent=2))
         if data.get("object") == "page":
             for entry in data.get("entry", []):
+                page_id = entry.get("id") # ID strony, która otrzymała wiadomość
                 for messaging_event in entry.get("messaging", []):
                     if messaging_event.get("message"):
                         sender_psid = messaging_event["sender"]["id"]
                         message = messaging_event["message"]
                         if message.get("text") and not message.get("is_echo"):
                             message_text = message["text"]
-                            thread = threading.Thread(target=process_message, args=(sender_psid, message_text))
+                            # Przekazujemy page_id do głównej logiki
+                            thread = threading.Thread(target=process_message, args=(sender_psid, page_id, message_text))
                             thread.start()
         return "ok", 200
 
 # --- URUCHOMIENIE SERWERA ---
 if __name__ == '__main__':
-    print("Uruchamianie serwera Flask na porcie 8081...")
-    # W środowisku produkcyjnym użyj serwera WSGI, np. Gunicorn lub Waitress
-    app.run(host='0.0.0.0', port=8081, debug=True)
+    if not PAGE_CONFIG or not CALENDARS_CONFIG:
+        print("!!! ZAKOŃCZONO DZIAŁANIE: Konfiguracja nie została załadowana. Sprawdź plik 'config.json'.")
+    else:
+        print("Uruchamianie serwera Flask na porcie 8081...")
+        app.run(host='0.0.0.0', port=8081, debug=True)
