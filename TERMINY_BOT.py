@@ -289,7 +289,7 @@ def stworz_instrukcje_STANDARDOWA(dostepne_sloty_str, aktualne_wydarzenia_str, i
     """
     return instrukcja
 # --- GŁÓWNA LOGIKA BOTA ---
-def process_message(user_psid, page_id, message_text):
+def process_message(user_psid, message_text):
     first_name, last_name = get_user_profile(user_psid)
     if not first_name or not last_name:
         send_message(user_psid, "Przepraszam, mam problem z weryfikacją Twojego konta na Facebooku.", page_id)
