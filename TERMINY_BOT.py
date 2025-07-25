@@ -312,7 +312,7 @@ def stworz_instrukcje_STANDARDOWA(dostepne_sloty_str, aktualne_wydarzenia_str, i
 def process_message(user_psid, message_text):
     first_name, last_name = get_user_profile(user_psid)
     if not first_name or not last_name:
-        send_message(user_psid, "Przepraszam, mam problem z weryfikacją Twojego konta na Facebooku.", page_id)
+        send_message(user_psid, "Przepraszam, mam problem z weryfikacją Twojego konta na Facebooku.")
         return
 
     user_status, record_data = check_user_status_in_airtable(first_name, last_name)
@@ -329,15 +329,15 @@ def process_message(user_psid, message_text):
             user_status = "NOT_FOUND" 
 
     if user_status == "NOT_FOUND":
-        send_message(user_psid, "Witaj! Wygląda na to, że jesteś nowym klientem lub w Twojej rezerwacji brakuje kluczowych informacji. Aby umówić pierwsze zajęcia, skontaktuj się z nami bezpośrednio.", page_id)
+        send_message(user_psid, "Witaj! Wygląda na to, że jesteś nowym klientem lub w Twojej rezerwacji brakuje kluczowych informacji. Aby umówić pierwsze zajęcia, skontaktuj się z nami bezpośrednio.")
         return
     
     if user_status == "AWAITING_CONFIRMATION":
         # Uruchom logikę potwierdzania, przekazując ID przypisanego kalendarza
-        uruchom_logike_potwierdzania(user_psid, page_id, message_text, record_data, assigned_calendar_id)
+        uruchom_logike_potwierdzania(user_psid, message_text, record_data, assigned_calendar_id)
     else: # OK_PROCEED
         # Uruchom główną logikę, przekazując ID przypisanego kalendarza
-        uruchom_glowna_logike_planowania(user_psid, page_id, message_text, assigned_calendar_id)
+        uruchom_glowna_logike_planowania(user_psid, message_text, assigned_calendar_id)
 
 def uruchom_logike_potwierdzania(user_psid, message_text, record_data, historia_konwersacji):
     """Uruchamia wyspecjalizowaną logikę AI, której celem jest potwierdzenie rezerwacji."""
