@@ -1,0 +1,34 @@
+{
+  "PAGE_CONFIG": {
+    "661857023673365": {
+      "token": "EAAJUltDBrJQBPOBUTGeEQusJwEZA2CwhD63gy7TXOVcQpnDW2gKtNZASCZBnUZBvhlh5OAe9iaOR8Cn0hrG34wacQHlUCYXBxZBzDg1sHuAjV0IBZAHvc9RT9ZAXbFgn0CMQq00ZCS52RFVwlgM4rDKVwSJrzGKJqvaJOCmTeuE9ZBY6IXYB1rR2iXb3beNo4lGZBF8h0nvRoCmQZDZD",
+      "subject": "Polski",
+      "name": "Zakręcone Korepetycje - Polski",
+      "link": "https://tiny.pl/0xnsgbt2"
+    },
+    "638454406015018": {
+      "token": "EAAJUltDBrJQBPAZAylC5nVzVG4NjbhPZCtvI40aWuk4y8jm6wLdQqjuhsMMxHATytTF6Awh0LPKI9Rljckk9yC31JKtzgWMGhRoCsah1IRDqV0TBYs9XZAZBvWYBW0rSt95NFOz6nRw5GZAXlT7yIbKUO3tkZCTuZB3eTDX0kaTjRl9I8ueLsZCa9ZBVZCHNb7f5pj8F8ZC9yyehQZDZD",
+      "subject": "Matematyka",
+      "name": "Zakręcone Korepetycje - MATEMATYKA",
+      "link": "https://tiny.pl/f7xz5n0g"
+    },
+    "653018101222547": {
+      "token": "EAAJUltDBrJQBPOkydccFPcQ1SDZBhYFBFZCMTohk1hgtLbHNmwdA0ylZCZBMTDeDG2OOmbhYaN5KJTJV5N4pX1LLR60G9ye8btGM1hfCfXoLsz1qSw7YUqZCrzeLQqrKQ5uEOn19VGGg7zfEDuLy6TZAPBtf5kQK7ZBKGnrZBaWcmfGofVoAQ5R2stUyG6bGCnPWpx1CZBzzlZAgZDZD",
+      "subject": "Angielski",
+      "name": "English Zone: Zakręcone Korepetycje",
+      "link": "https://tiny.pl/prrr7qf1"
+    }
+  },
+  "CALENDARS": [
+    {
+      "id": "f19e189826b9d6e36950da347ac84d5501ecbd6bed0d76c8641be61a67749c67@group.calendar.google.com",
+      "name": "Kalendarz Główny Polski",
+      "subject": "Polski"
+    },
+    {
+      "id": "3762cdf9ca674ed1e5dd87ff406dc92f365121aab827cea4d9a02085d31d15fb@group.calendar.google.com",
+      "name": "Kalendarz Dodatkowy Matematyka",
+      "subject": "Matematyka"
+    }
+  ]
+}
