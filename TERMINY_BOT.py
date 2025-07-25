@@ -52,6 +52,7 @@ SERVICE_INFO = {
 }
 CALENDARS_CONFIG = []
 CALENDAR_NAME_TO_ID = {}
+CALENDAR_SCOPES = ['https://www.googleapis.com/auth/calendar'] 
 
 def load_config():
     global CALENDARS_CONFIG, CALENDAR_NAME_TO_ID
