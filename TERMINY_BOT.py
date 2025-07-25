@@ -46,9 +46,9 @@ SERVICE_INFO = {
         "Liceum (Podstawa)": "70 zł / 60 min",
         "Liceum (Rozszerzenie)": "80 zł / 60 min"
     },
-    "Format Lekcji": "Wszystkie zajęcia odbywają się online za pośrednictwem platformy Google Meet. Link do spotkania jest generowany automatycznie po potwierdzeniu terminu.",
+    "Format Lekcji": "Wszystkie zajęcia odbywają się online za pośrednictwem platformy Google Meet.",
     "Dostępne Przedmioty": ["Matematyka", "Fizyka", "Chemia"],
-    "Polityka Odwoływania": "Zajęcia można bezpłatnie odwołać najpóźniej na 24 godziny przed ich planowanym rozpoczęciem."
+    "Polityka Odwoływania": "Zajęcia można bezpłatnie odwołać najpóźniej na 24 godziny przed ich rozpoczęciem."
 }
 CALENDARS_CONFIG = []
 CALENDAR_NAME_TO_ID = {}
@@ -285,13 +285,14 @@ def stworz_instrukcje_STANDARDOWA(dostepne_sloty_str, aktualne_wydarzenia_str, i
 
 # =====================================================================
 # === KONIEC PIERWSZEJ POŁOWY KODU ===
-# =====================================================================# =====================================================================
+# =====================================================================
+# =====================================================================
 # === POCZĄTEK DRUGIEJ POŁOWY KODU ===
 # =====================================================================
 
-def uruchom_logike_potwierdzania(user_psid, page_id, message_text, record_data, historia_konwersacji, calendar_id):
+def uruchom_logike_potwierdzania(user_psid, message_text, record_data, historia_konwersacji, calendar_id):
     """Uruchamia wyspecjalizowaną logikę AI, której celem jest potwierdzenie rezerwacji."""
-    calendar_service = get_calendar_service(CALENDAR_SERVICE_ACCOUNT_FILE, CALENDAR_SCOPES)
+    calendar_service = get_calendar_service(CALENDAR_SERVICE_ACCOUNT_FILE, ['https://www.googleapis.com/auth/calendar'])
     model = genai.GenerativeModel('gemini-1.5-pro-latest')
     
     info_o_uslugach_str = json.dumps(SERVICE_INFO, indent=2, ensure_ascii=False)
@@ -312,10 +313,10 @@ def uruchom_logike_potwierdzania(user_psid, page_id, message_text, record_data, 
         if not akcja or not odpowiedz_tekstowa: raise ValueError("Niekompletna odpowiedź AI.")
     except (json.JSONDecodeError, ValueError) as e:
         print(f"Bot (wątek {user_psid}): Błąd parsowania w logice potwierdzania: {e}")
-        send_message(user_psid, "Przepraszam, mam chwilowy problem techniczny. Spróbuj ponownie.", page_id)
+        send_message(user_psid, "Przepraszam, mam chwilowy problem techniczny. Spróbuj ponownie.")
         return historia_konwersacji
 
-    send_message(user_psid, odpowiedz_tekstowa, page_id)
+    send_message(user_psid, odpowiedz_tekstowa)
 
     if akcja == "POTWIERDZ_I_UTWORZ_WYDARZENIE":
         record_id = record_data.get('id')
@@ -328,17 +329,17 @@ def uruchom_logike_potwierdzania(user_psid, page_id, message_text, record_data, 
             if update_success:
                 create_success, result = create_google_event(calendar_service, calendar_id, termin_iso, summary)
                 if not create_success:
-                    send_message(user_psid, "UWAGA: Wystąpił błąd przy tworzeniu wydarzenia w Kalendarzu Google. Skontaktuj się z administratorem.", page_id)
+                    send_message(user_psid, "UWAGA: Wystąpił błąd przy tworzeniu wydarzenia w Kalendarzu Google. Skontaktuj się z administratorem.")
         else:
-            send_message(user_psid, "UWAGA: Brak kluczowych danych w rekordzie Airtable do potwierdzenia rezerwacji.", page_id)
+            send_message(user_psid, "UWAGA: Brak kluczowych danych w rekordzie Airtable do potwierdzenia rezerwacji.")
             
     historia_konwersacji.append({'role': 'model', 'parts': [{'text': json.dumps(decyzja_ai, ensure_ascii=False)}]})
     return historia_konwersacji
 
 
-def uruchom_glowna_logike_planowania(user_psid, page_id, message_text, historia_konwersacji, calendar_id):
+def uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersacji, calendar_id):
     """Uruchamia standardową logikę planowania dla zweryfikowanych klientów."""
-    calendar_service = get_calendar_service(CALENDAR_SERVICE_ACCOUNT_FILE, CALENDAR_SCOPES)
+    calendar_service = get_calendar_service(CALENDAR_SERVICE_ACCOUNT_FILE, ['https://www.googleapis.com/auth/calendar'])
     model = genai.GenerativeModel('gemini-1.5-pro-latest')
     
     MAX_RETRIES = 3; decyzja_ai = None; proposal_verified = False
@@ -371,7 +372,7 @@ def uruchom_glowna_logike_planowania(user_psid, page_id, message_text, historia_
             proposal_verified = False; break
     
     if not proposal_verified:
-        send_message(user_psid, "Przepraszam, mam chwilowy problem z przetworzeniem Twojej prośby.", page_id)
+        send_message(user_psid, "Przepraszam, mam chwilowy problem z przetworzeniem Twojej prośby.")
         return historia_konwersacji
 
     akcja = decyzja_ai.get("action")
@@ -379,7 +380,7 @@ def uruchom_glowna_logike_planowania(user_psid, page_id, message_text, historia_
     odpowiedz_tekstowa = decyzja_ai.get("user_response")
     
     print(f"--- DEBUG (wątek {user_psid}): AI chce wykonać akcję: '{akcja}' ze szczegółami: {szczegoly} ---")
-    send_message(user_psid, odpowiedz_tekstowa, page_id)
+    send_message(user_psid, odpowiedz_tekstowa)
     
     if akcja == "DOPISZ_ZAJECIA":
         summary = szczegoly.get("summary", "Korepetycje")
@@ -391,10 +392,10 @@ def uruchom_glowna_logike_planowania(user_psid, page_id, message_text, historia_
     historia_konwersacji.append({'role': 'model', 'parts': [{'text': json.dumps(decyzja_ai, ensure_ascii=False)}]})
     return historia_konwersacji
 
-def process_message(user_psid, page_id, message_text):
-    first_name, last_name = get_user_profile(user_psid, page_id)
+def process_message(user_psid, message_text):
+    first_name, last_name = get_user_profile(user_psid)
     if not first_name or not last_name:
-        send_message(user_psid, "Przepraszam, mam problem z weryfikacją Twojego konta na Facebooku.", page_id)
+        send_message(user_psid, "Przepraszam, mam problem z weryfikacją Twojego konta na Facebooku.")
         return
 
     user_status, record_data = check_user_status_in_airtable(first_name, last_name)
@@ -419,15 +420,15 @@ def process_message(user_psid, page_id, message_text):
     historia_konwersacji.append({'role': 'user', 'parts': [{'text': message_text}]})
 
     if user_status == "NOT_FOUND":
-        send_message(user_psid, "Witaj! Wygląda na to, że jesteś nowym klientem lub w Twojej rezerwacji brakuje kluczowych informacji. Aby umówić pierwsze zajęcia, skontaktuj się z nami bezpośrednio.", page_id)
+        send_message(user_psid, "Witaj! Wygląda na to, że jesteś nowym klientem lub w Twojej rezerwacji brakuje kluczowych informacji. Aby umówić pierwsze zajęcia, skontaktuj się z nami bezpośrednio.")
         return 
     
     if user_status == "AWAITING_CONFIRMATION":
         print(f"--- Uruchamianie logiki POTWIERDZANIA dla {user_psid} ---")
-        historia_konwersacji = uruchom_logike_potwierdzania(user_psid, page_id, message_text, record_data, historia_konwersacji, assigned_calendar_id)
+        historia_konwersacji = uruchom_logike_potwierdzania(user_psid, message_text, record_data, historia_konwersacji, assigned_calendar_id)
     else: # OK_PROCEED
         print(f"--- Uruchamianie logiki STANDARDOWEJ dla {user_psid} ---")
-        historia_konwersacji = uruchom_glowna_logike_planowania(user_psid, page_id, message_text, historia_konwersacji, assigned_calendar_id)
+        historia_konwersacji = uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersacji, assigned_calendar_id)
 
     with open(history_file, 'w', encoding='utf-8') as f:
         json.dump(historia_konwersacji[-20:], f, indent=2)
@@ -453,7 +454,7 @@ def webhook():
                         message = messaging_event["message"]
                         if message.get("text") and not message.get("is_echo"):
                             message_text = message["text"]
-                            thread = threading.Thread(target=process_message, args=(sender_psid, page_id, message_text))
+                            thread = threading.Thread(target=process_message, args=(user_psid, page_id, message_text))
                             thread.start()
         return "ok", 200
 
