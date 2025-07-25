@@ -133,12 +133,12 @@ def update_airtable_status(record_id, new_status):
         print(f"BŁĄD: Nie udało się zaktualizować statusu dla rekordu {record_id}: {e}")
         return False, str(e)
 
-def get_calendar_service():
-    if not os.path.exists(CALENDAR_SERVICE_ACCOUNT_FILE):
-        print(f"!!! KRYTYCZNY BŁĄD: Brak pliku klucza '{CALENDAR_SERVICE_ACCOUNT_FILE}' w bieżącym folderze. !!!")
+def get_calendar_service(service_account_file, scopes):
+    if not os.path.exists(service_account_file):
+        print(f"!!! KRYTYCZNY BŁĄD: Brak pliku klucza '{service_account_file}' w bieżącym folderze. !!!")
         return None
     try:
-        creds = service_account.Credentials.from_service_account_file(CALENDAR_SERVICE_ACCOUNT_FILE, scopes=CALENDAR_SCOPES)
+        creds = service_account.Credentials.from_service_account_file(service_account_file, scopes=scopes)
         service = build('calendar', 'v3', credentials=creds)
         print("--- Usługa Google Calendar API połączona (z uprawnieniami do zapisu). ---")
         return service
@@ -322,22 +322,36 @@ def process_message(user_psid, message_text):
         assigned_calendar_name = record_data.get('fields', {}).get('Nazwa Kalendarza')
         if assigned_calendar_name:
             assigned_calendar_id = CALENDAR_NAME_TO_ID.get(assigned_calendar_name)
-        
         if not assigned_calendar_id:
-            # "Żelazna Zasada Pełnych Danych"
             print(f"--- BŁĄD KONFIGURACJI KLIENTA: Użytkownik {first_name} {last_name} ma nieprawidłową lub brak nazwy kalendarza: '{assigned_calendar_name}'. Traktuję jak NOT_FOUND. ---")
             user_status = "NOT_FOUND" 
 
+    # Wczytanie historii rozmowy
+    os.makedirs(HISTORY_DIR, exist_ok=True)
+    history_file = os.path.join(HISTORY_DIR, f"{user_psid}.json")
+    try:
+        with open(history_file, 'r') as f:
+            historia_konwersacji = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        historia_konwersacji = []
+    
+    historia_konwersacji.append({'role': 'user', 'parts': [{'text': message_text}]})
+
+    # "Rozjazd" logiki
     if user_status == "NOT_FOUND":
         send_message(user_psid, "Witaj! Wygląda na to, że jesteś nowym klientem lub w Twojej rezerwacji brakuje kluczowych informacji. Aby umówić pierwsze zajęcia, skontaktuj się z nami bezpośrednio.")
-        return
+        return 
     
     if user_status == "AWAITING_CONFIRMATION":
-        # Uruchom logikę potwierdzania, przekazując ID przypisanego kalendarza
-        uruchom_logike_potwierdzania(user_psid, message_text, record_data, assigned_calendar_id)
+        print(f"--- Uruchamianie logiki POTWIERDZANIA dla {user_psid} ---")
+        historia_konwersacji = uruchom_logike_potwierdzania(user_psid, message_text, record_data, historia_konwersacji, assigned_calendar_id)
     else: # OK_PROCEED
-        # Uruchom główną logikę, przekazując ID przypisanego kalendarza
-        uruchom_glowna_logike_planowania(user_psid, message_text, assigned_calendar_id)
+        print(f"--- Uruchamianie logiki STANDARDOWEJ dla {user_psid} ---")
+        historia_konwersacji = uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersacji, assigned_calendar_id)
+
+    # Zapisz zaktualizowaną historię
+    with open(history_file, 'w') as f:
+        json.dump(historia_konwersacji[-20:], f, indent=2)
 
 def uruchom_logike_potwierdzania(user_psid, message_text, record_data, historia_konwersacji):
     """Uruchamia wyspecjalizowaną logikę AI, której celem jest potwierdzenie rezerwacji."""
