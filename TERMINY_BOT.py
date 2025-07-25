@@ -393,7 +393,7 @@ def uruchom_glowna_logike_planowania(user_psid, page_id, message_text, historia_
     return historia_konwersacji
 
 def process_message(user_psid, page_id, message_text):
-    first_name, last_name = get_user_profile(user_psid, page_id)
+    first_name, last_name = get_user_profile(user_psid)
     if not first_name or not last_name:
         send_message(user_psid, "Przepraszam, mam problem z weryfikacją Twojego konta na Facebooku.", page_id)
         return
