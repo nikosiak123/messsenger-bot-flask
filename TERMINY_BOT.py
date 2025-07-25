@@ -22,12 +22,9 @@ except locale.Error:
     print("Ostrzeżenie: Nie można ustawić polskiej lokalizacji.")
 
 # --- KONFIGURACJA ---
-# --- Dynamiczne ładowanie konfiguracji ---
-CALENDARS_CONFIG = []
-CALENDAR_NAME_TO_ID = {}
 API_KEY = "AIzaSyCJGoODg04hUZ3PpKf5tb7NoIMtT9G9K9I"
-VERIFY_TOKEN = "KOLAGEN"
 FB_PAGE_ACCESS_TOKEN = "EAAKusF6JViEBPNJiRftrqPmOy6CoZAWZBw3ZBEWl8dd7LtinSSF85JeKYXA3ZB7xlvFG6e5txU1i8RUEiskmZCXXyuIH4x4B4j4zBrOXm0AQyskcKBUaMVgS2o3AMZA2FWF0PNTuusd6nbxGPzGZAWyGoPP9rjDl1COwLk1YhTOsG7eaXa6FIxnXQaGFdB9oh7gdADaq7e4aQZDZD"
+VERIFY_TOKEN = "KOLAGEN"
 AIRTABLE_API_KEY = "patcSdupvwJebjFDo.7e15a93930d15261989844687bcb15ac5c08c84a29920c7646760bc6f416146d"
 AIRTABLE_BASE_ID = "appTjrMTVhYBZDPw9"
 AIRTABLE_BOOKINGS_TABLE_NAME = "Rezerwacje"
@@ -43,8 +40,37 @@ HELD_SLOTS = {}
 HOLD_DURATION_HOURS = 24
 HISTORY_DIR = "conversation_history"
 GRAY_COLOR_ID = "8" 
+SERVICE_INFO = {
+    "Cennik": {
+        "Szkoła Podstawowa": "60 zł / 60 min",
+        "Liceum (Podstawa)": "70 zł / 60 min",
+        "Liceum (Rozszerzenie)": "80 zł / 60 min"
+    },
+    "Format Lekcji": "Wszystkie zajęcia odbywają się online za pośrednictwem platformy Google Meet. Link do spotkania jest generowany automatycznie po potwierdzeniu terminu.",
+    "Dostępne Przedmioty": ["Matematyka", "Fizyka", "Chemia"],
+    "Polityka Odwoływania": "Zajęcia można bezpłatnie odwołać najpóźniej na 24 godziny przed ich planowanym rozpoczęciem."
+}
+CALENDARS_CONFIG = []
+CALENDAR_NAME_TO_ID = {}
 
-# --- Dynamiczne ładowanie konfiguracji ---
+def load_config():
+    global CALENDARS_CONFIG, CALENDAR_NAME_TO_ID
+    try:
+        with open('config.json', 'r', encoding='utf-8') as f:
+            config = json.load(f)
+            CALENDARS_CONFIG = config.get("CALENDARS", [])
+            CALENDAR_NAME_TO_ID = {cal['name']: cal['id'] for cal in CALENDARS_CONFIG}
+            print("--- Konfiguracja kalendarzy załadowana pomyślnie. ---")
+            print(f"--- Znaleziono {len(CALENDARS_CONFIG)} kalendarzy. ---")
+    except FileNotFoundError:
+        print("!!! KRYTYCZNY BŁĄD: Plik 'config.json' nie został znaleziony! !!!")
+    except json.JSONDecodeError:
+        print("!!! KRYTYCZNY BŁĄD: Błąd parsowania pliku 'config.json'! Sprawdź jego składnię. !!!")
+    except Exception as e:
+        print(f"!!! KRYTYCZNY BŁĄD podczas ładowania konfiguracji: {e} !!!")
+
+# --- Inicjalizacja ---
+load_config()
 try:
     genai.configure(api_key=API_KEY)
     airtable_api = Api(AIRTABLE_API_KEY)
@@ -56,23 +82,6 @@ except Exception as e:
 app = Flask(__name__)
 
 # --- FUNKCJE POMOCNICZE ---
-def load_config():
-    global CALENDARS_CONFIG, CALENDAR_NAME_TO_ID
-    try:
-        with open('config.json', 'r', encoding='utf-8') as f:
-            config = json.load(f)
-            # Wczytujemy TYLKO informacje o kalendarzach
-            CALENDARS_CONFIG = config.get("CALENDARS", [])
-            CALENDAR_NAME_TO_ID = {cal['name']: cal['id'] for cal in CALENDARS_CONFIG}
-            print("--- Konfiguracja kalendarzy załadowana pomyślnie. ---")
-            print(f"--- Znaleziono {len(CALENDARS_CONFIG)} kalendarzy. ---")
-    except FileNotFoundError:
-        print("!!! KRYTYCZNY BŁĄD: Plik 'config.json' nie został znaleziony! !!!")
-    except json.JSONDecodeError:
-        print("!!! KRYTYCZNY BŁĄD: Błąd parsowania pliku 'config.json'! Sprawdź jego składnię. !!!")
-    except Exception as e:
-        print(f"!!! KRYTYCZNY BŁĄD podczas ładowania konfiguracji: {e} !!!")
-load_config()
 
 def send_message(psid, message_text):
     print(f"Wysyłanie do {psid}: '{message_text[:100]}...'")
@@ -109,10 +118,8 @@ def check_user_status_in_airtable(first_name, last_name):
         if not record:
             print(f"--- AIRTABLE CHECK: Użytkownik {first_name} {last_name} nie znaleziony. Status: NOT_FOUND ---")
             return "NOT_FOUND", None
-        
         status = record.get('fields', {}).get('Status')
         print(f"--- AIRTABLE CHECK: Użytkownik {first_name} {last_name} znaleziony. Status w bazie: '{status}' ---")
-        
         if status == "Dane zebrane - oczekiwanie na potwierdzenie":
             return "AWAITING_CONFIRMATION", record
         else:
@@ -308,54 +315,22 @@ def stworz_instrukcje_STANDARDOWA(dostepne_sloty_str, aktualne_wydarzenia_str, i
     5. Inne akcje (ODWOLAJ_ZAJECIA, PRZELOZ_ZAJECIA, UTWORZ_CYKLICZNE) działają według poprzednich wzorców.
     """
     return instrukcja
+
+# =====================================================================
+# === KONIEC PIERWSZEJ POŁOWY KODU ===
+# =====================================================================# =====================================================================
+# === POCZĄTEK DRUGIEJ POŁOWY KODU ===
+# =====================================================================
+
 # --- GŁÓWNA LOGIKA BOTA ---
-def process_message(user_psid, message_text):
-    first_name, last_name = get_user_profile(user_psid)
-    if not first_name or not last_name:
-        send_message(user_psid, "Przepraszam, mam problem z weryfikacją Twojego konta na Facebooku.")
-        return
 
-    user_status, record_data = check_user_status_in_airtable(first_name, last_name)
-    
-    assigned_calendar_id = None
-    if user_status == "OK_PROCEED" or user_status == "AWAITING_CONFIRMATION":
-        assigned_calendar_name = record_data.get('fields', {}).get('Nazwa Kalendarza')
-        if assigned_calendar_name:
-            assigned_calendar_id = CALENDAR_NAME_TO_ID.get(assigned_calendar_name)
-        if not assigned_calendar_id:
-            print(f"--- BŁĄD KONFIGURACJI KLIENTA: Użytkownik {first_name} {last_name} ma nieprawidłową lub brak nazwy kalendarza: '{assigned_calendar_name}'. Traktuję jak NOT_FOUND. ---")
-            user_status = "NOT_FOUND" 
-
-    # Wczytanie historii rozmowy
-    os.makedirs(HISTORY_DIR, exist_ok=True)
-    history_file = os.path.join(HISTORY_DIR, f"{user_psid}.json")
-    try:
-        with open(history_file, 'r') as f:
-            historia_konwersacji = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        historia_konwersacji = []
-    
-    historia_konwersacji.append({'role': 'user', 'parts': [{'text': message_text}]})
-
-    # "Rozjazd" logiki
-    if user_status == "NOT_FOUND":
-        send_message(user_psid, "Witaj! Wygląda na to, że jesteś nowym klientem lub w Twojej rezerwacji brakuje kluczowych informacji. Aby umówić pierwsze zajęcia, skontaktuj się z nami bezpośrednio.")
-        return 
-    
-    if user_status == "AWAITING_CONFIRMATION":
-        print(f"--- Uruchamianie logiki POTWIERDZANIA dla {user_psid} ---")
-        historia_konwersacji = uruchom_logike_potwierdzania(user_psid, message_text, record_data, historia_konwersacji, assigned_calendar_id)
-    else: # OK_PROCEED
-        print(f"--- Uruchamianie logiki STANDARDOWEJ dla {user_psid} ---")
-        historia_konwersacji = uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersacji, assigned_calendar_id)
-
-    # Zapisz zaktualizowaną historię
-    with open(history_file, 'w') as f:
-        json.dump(historia_konwersacji[-20:], f, indent=2)
-
-def uruchom_logike_potwierdzania(user_psid, message_text, record_data, historia_konwersacji):
+def uruchom_logike_potwierdzania(user_psid, page_id, message_text, record_data, historia_konwersacji, calendar_id):
     """Uruchamia wyspecjalizowaną logikę AI, której celem jest potwierdzenie rezerwacji."""
-    calendar_service = get_calendar_service()
+    calendar_service = get_calendar_service(CALENDAR_SERVICE_ACCOUNT_FILE, CALENDAR_SCOPES)
+    if not calendar_service:
+        send_message(user_psid, "Przepraszam, mam problem z połączeniem z systemem kalendarza.", page_id)
+        return historia_konwersacji
+        
     model = genai.GenerativeModel('gemini-1.5-pro-latest')
     
     info_o_uslugach_str = json.dumps(SERVICE_INFO, indent=2, ensure_ascii=False)
@@ -376,10 +351,10 @@ def uruchom_logike_potwierdzania(user_psid, message_text, record_data, historia_
         if not akcja or not odpowiedz_tekstowa: raise ValueError("Niekompletna odpowiedź AI.")
     except (json.JSONDecodeError, ValueError) as e:
         print(f"Bot (wątek {user_psid}): Błąd parsowania w logice potwierdzania: {e}")
-        send_message(user_psid, "Przepraszam, mam chwilowy problem techniczny. Spróbuj ponownie.")
+        send_message(user_psid, "Przepraszam, mam chwilowy problem techniczny. Spróbuj ponownie.", page_id)
         return historia_konwersacji
 
-    send_message(user_psid, odpowiedz_tekstowa)
+    send_message(user_psid, odpowiedz_tekstowa, page_id)
 
     if akcja == "POTWIERDZ_I_UTWORZ_WYDARZENIE":
         record_id = record_data.get('id')
@@ -392,25 +367,30 @@ def uruchom_logike_potwierdzania(user_psid, message_text, record_data, historia_
             update_success, _ = update_airtable_status(record_id, "Potwierdzone")
             if update_success:
                 # Krok 2: Utwórz wydarzenie w Kalendarzu Google
-                create_success, result = create_google_event(calendar_service, GOOGLE_CALENDAR_ID, termin_iso, summary)
+                create_success, result = create_google_event(calendar_service, calendar_id, termin_iso, summary)
                 if not create_success:
-                    send_message(user_psid, "UWAGA: Wystąpił błąd przy tworzeniu wydarzenia w Kalendarzu Google. Skontaktuj się z administratorem.")
+                    send_message(user_psid, "UWAGA: Wystąpił błąd przy tworzeniu wydarzenia w Kalendarzu Google. Skontaktuj się z administratorem.", page_id)
         else:
-            send_message(user_psid, "UWAGA: Brak kluczowych danych w rekordzie Airtable do potwierdzenia rezerwacji.")
+            send_message(user_psid, "UWAGA: Brak kluczowych danych w rekordzie Airtable do potwierdzenia rezerwacji.", page_id)
             
     historia_konwersacji.append({'role': 'model', 'parts': [{'text': json.dumps(decyzja_ai, ensure_ascii=False)}]})
     return historia_konwersacji
 
-def uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersacji):
+
+def uruchom_glowna_logike_planowania(user_psid, page_id, message_text, historia_konwersacji, calendar_id):
     """Uruchamia standardową logikę planowania dla zweryfikowanych klientów."""
-    calendar_service = get_calendar_service()
+    calendar_service = get_calendar_service(CALENDAR_SERVICE_ACCOUNT_FILE, CALENDAR_SCOPES)
+    if not calendar_service:
+        send_message(user_psid, "Przepraszam, mam problem z połączeniem z systemem kalendarza.", page_id)
+        return historia_konwersacji
+
     model = genai.GenerativeModel('gemini-1.5-pro-latest')
     
     MAX_RETRIES = 3; decyzja_ai = None; proposal_verified = False
     for attempt in range(MAX_RETRIES):
-        events = get_google_calendar_events(calendar_service, GOOGLE_CALENDAR_ID)
+        events = get_google_calendar_events(calendar_service, calendar_id)
         events_str_for_ai = format_events_for_ai(events)
-        available_slots = find_available_slots_gcal(calendar_service, GOOGLE_CALENDAR_ID, APPOINTMENT_DURATION_MINUTES, SEARCH_DAYS)
+        available_slots = find_available_slots_gcal(calendar_service, calendar_id, APPOINTMENT_DURATION_MINUTES, SEARCH_DAYS)
         available_slots_text_for_ai = "\n".join([slot.isoformat() for slot in available_slots])
         if not available_slots_text_for_ai:
             available_slots_text_for_ai = "Brak dostępnych terminów w najbliższym czasie."
@@ -430,28 +410,13 @@ def uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersac
             if "action" not in decyzja_ai or "user_response" not in decyzja_ai:
                 raise ValueError("Odpowiedź AI jest niekompletna.")
             
-            if decyzja_ai.get("action") == "ZAPROPONUJ_TERMIN":
-                proponowany_iso = decyzja_ai.get("details", {}).get("proponowany_termin_iso")
-                if proponowany_iso:
-                    cleanup_and_get_active_held_slots()
-                    if proponowany_iso in HELD_SLOTS:
-                        historia_konwersacji.append({'role': 'model', 'parts': [{'text': raw_text}]})
-                        historia_konwersacji.append({'role': 'user', 'parts': [{'text': "Twoja ostatnia propozycja terminu okazała się już zajęta. Proszę, wybierz inny wolny termin."}]})
-                        print(f"Bot (wątek {user_psid}): Chwileczkę, weryfikuję termin... (próba {attempt + 1}/{MAX_RETRIES})")
-                        continue
-                    else:
-                        HELD_SLOTS[proponowany_iso] = datetime.datetime.now(pytz.timezone(CALENDAR_TIMEZONE))
-                        print(f"--- BLOKADA ZAŁOŻONA: Termin {proponowany_iso} zablokowany na {HOLD_DURATION_HOURS}h. ---")
-                        proposal_verified = True; break
-                else: raise ValueError("Akcja ZAPROPONUJ_TERMIN nie zawiera terminu w 'details'.")
-            else: 
-                proposal_verified = True; break
+            proposal_verified = True; break
         except (json.JSONDecodeError, ValueError) as e:
             print(f"Bot (wątek {user_psid}): Błąd parsowania w głównej logice: {e}")
             proposal_verified = False; break
     
     if not proposal_verified:
-        send_message(user_psid, "Przepraszam, mam chwilowy problem z przetworzeniem Twojej prośby.")
+        send_message(user_psid, "Przepraszam, mam chwilowy problem z przetworzeniem Twojej prośby.", page_id)
         return historia_konwersacji
 
     akcja = decyzja_ai.get("action")
@@ -459,37 +424,58 @@ def uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersac
     odpowiedz_tekstowa = decyzja_ai.get("user_response")
     
     print(f"--- DEBUG (wątek {user_psid}): AI chce wykonać akcję: '{akcja}' ze szczegółami: {szczegoly} ---")
-    send_message(user_psid, odpowiedz_tekstowa)
+    send_message(user_psid, odpowiedz_tekstowa, page_id)
     
-    # ... (tutaj cała logika if/elif dla akcji ODWOLAJ, DOPISZ, PRZELOZ itd., jest długa, więc ją wklejam w całości)
-    if akcja == "DOPISZ_ZAJECIA" or akcja == "PRZELOZ_ZAJECIA":
+    if akcja == "DOPISZ_ZAJECIA":
+        summary = szczegoly.get("summary", "Korepetycje")
         nowy_termin_iso = szczegoly.get("nowy_termin_iso")
-        if nowy_termin_iso and nowy_termin_iso in HELD_SLOTS:
-            del HELD_SLOTS[nowy_termin_iso]
-            print(f"--- BLOKADA USUNIĘTA: Termin {nowy_termin_iso} został sfinalizowany. ---")
-        if akcja == "DOPISZ_ZAJECIA":
-            summary = szczegoly.get("summary", "Korepetycje")
-            if nowy_termin_iso:
-                success, result = create_google_event(calendar_service, GOOGLE_CALENDAR_ID, nowy_termin_iso, summary)
-                if success: print(f"--- Utworzono wydarzenie: {result.get('htmlLink')} ---")
-        elif akcja == "PRZELOZ_ZAJECIA":
-            event_id = szczegoly.get("eventId")
-            if event_id and nowy_termin_iso:
-                event_details = get_google_event_details(calendar_service, GOOGLE_CALENDAR_ID, event_id)
-                if event_details:
-                    summary = event_details.get('summary', 'Przełożone zajęcia')
-                    recurrence_rule = event_details.get('recurrence')
-                    delete_success, _ = delete_google_event(calendar_service, GOOGLE_CALENDAR_ID, event_id)
-                    if delete_success:
-                        create_google_event(calendar_service, GOOGLE_CALENDAR_ID, nowy_termin_iso, summary, recurrence_rule)
-    elif akcja == "ODWOLAJ_ZAJECIA":
-        event_id = szczegoly.get("eventId")
-        if event_id:
-            success, message = delete_google_event(calendar_service, GOOGLE_CALENDAR_ID, event_id)
-            if success: print(f"--- {message} ---")
-    
+        if nowy_termin_iso:
+            success, result = create_google_event(calendar_service, calendar_id, nowy_termin_iso, summary)
+            if success: print(f"--- Utworzono wydarzenie: {result.get('htmlLink')} ---")
+
     historia_konwersacji.append({'role': 'model', 'parts': [{'text': json.dumps(decyzja_ai, ensure_ascii=False)}]})
     return historia_konwersacji
+
+def process_message(user_psid, page_id, message_text):
+    first_name, last_name = get_user_profile(user_psid, page_id)
+    if not first_name or not last_name:
+        send_message(user_psid, "Przepraszam, mam problem z weryfikacją Twojego konta na Facebooku.", page_id)
+        return
+
+    user_status, record_data = check_user_status_in_airtable(first_name, last_name)
+    
+    assigned_calendar_id = None
+    if user_status == "OK_PROCEED" or user_status == "AWAITING_CONFIRMATION":
+        assigned_calendar_name = record_data.get('fields', {}).get('Nazwa Kalendarza')
+        if assigned_calendar_name:
+            assigned_calendar_id = CALENDAR_NAME_TO_ID.get(assigned_calendar_name)
+        if not assigned_calendar_id:
+            print(f"--- BŁĄD KONFIGURACJI KLIENTA: Użytkownik {first_name} {last_name} ma nieprawidłową lub brak nazwy kalendarza: '{assigned_calendar_name}'. Traktuję jak NOT_FOUND. ---")
+            user_status = "NOT_FOUND" 
+
+    os.makedirs(HISTORY_DIR, exist_ok=True)
+    history_file = os.path.join(HISTORY_DIR, f"{user_psid}.json")
+    try:
+        with open(history_file, 'r') as f:
+            historia_konwersacji = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        historia_konwersacji = []
+        
+    historia_konwersacji.append({'role': 'user', 'parts': [{'text': message_text}]})
+
+    if user_status == "NOT_FOUND":
+        send_message(user_psid, "Witaj! Wygląda na to, że jesteś nowym klientem lub w Twojej rezerwacji brakuje kluczowych informacji. Aby umówić pierwsze zajęcia, skontaktuj się z nami bezpośrednio.", page_id)
+        return 
+    
+    if user_status == "AWAITING_CONFIRMATION":
+        print(f"--- Uruchamianie logiki POTWIERDZANIA dla {user_psid} ---")
+        historia_konwersacji = uruchom_logike_potwierdzania(user_psid, page_id, message_text, record_data, historia_konwersacji, assigned_calendar_id)
+    else: # OK_PROCEED
+        print(f"--- Uruchamianie logiki STANDARDOWEJ dla {user_psid} ---")
+        historia_konwersacji = uruchom_glowna_logike_planowania(user_psid, page_id, message_text, historia_konwersacji, assigned_calendar_id)
+
+    with open(history_file, 'w') as f:
+        json.dump(historia_konwersacji[-20:], f, indent=2)
 
 # --- WEBHOOK MESSENGERA ---
 @app.route('/webhook2', methods=['GET', 'POST'])
@@ -505,19 +491,21 @@ def webhook():
         print(json.dumps(data, indent=2))
         if data.get("object") == "page":
             for entry in data.get("entry", []):
+                page_id = entry.get("id")
                 for messaging_event in entry.get("messaging", []):
                     if messaging_event.get("message"):
                         sender_psid = messaging_event["sender"]["id"]
                         message = messaging_event["message"]
                         if message.get("text") and not message.get("is_echo"):
                             message_text = message["text"]
-                            # === ZMIANA: Nie przekazujemy już page_id ===
-                            thread = threading.Thread(target=process_message, args=(sender_psid, message_text))
+                            thread = threading.Thread(target=process_message, args=(sender_psid, page_id, message_text))
                             thread.start()
         return "ok", 200
 
-
 # --- URUCHOMIENIE SERWERA ---
 if __name__ == '__main__':
-    print("Uruchamianie serwera Flask na porcie 8081...")
-    app.run(host='0.0.0.0', port=8081, debug=True)
+    if not CALENDARS_CONFIG:
+        print("!!! ZAKOŃCZONO DZIAŁANIE: Konfiguracja kalendarzy nie została załadowana. Sprawdź plik 'config.json'.")
+    else:
+        print("Uruchamianie serwera Flask na porcie 8081...")
+        app.run(host='0.0.0.0', port=8081, debug=True)
