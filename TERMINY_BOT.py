@@ -247,72 +247,39 @@ def stworz_instrukcje_POTWIERDZENIE(dane_lekcji, info_o_uslugach_str):
     szczegoly_lekcji_str = json.dumps(dane_lekcji.get('fields', {}), indent=2, ensure_ascii=False)
     instrukcja = f"""
     Jesteś asystentem klienta. Twoim **głównym celem** jest doprowadzenie do potwierdzenia przez użytkownika lekcji, której szczegóły znajdują się poniżej. Twoja odpowiedź ZAWSZE musi być w formacie JSON.
-
     --- SZCZEGÓŁY LEKCJI DO POTWIERDZENIA ---
     {szczegoly_lekcji_str}
-    --- KONIEC SZCZEGÓŁÓW ---
-
-    --- OGÓLNE INFORMACJE O USŁUGACH (do odpowiadania na inne pytania) ---
+    --- OGÓLNE INFORMACJE O USŁUGACH ---
     {info_o_uslugach_str}
-    --- KONIEC INFORMACJI ---
-
     TWOJA LOGIKA DZIAŁANIA:
-    1.  **PRIORYTET #1: BĄDŹ POMOCNY.** Jeśli pierwsza wiadomość użytkownika to pytanie (np. o cenę, o inną usługę), odpowiedz na nie wyczerpująco, korzystając z "OGÓLNYCH INFORMACJI O USŁUGACH".
-    2.  **CEL GŁÓWNY:** ZAWSZE na końcu swojej pomocnej odpowiedzi, przypomnij o lekcji do potwierdzenia, np. "A propos, widzę, że mamy dla Ciebie wstępnie zarezerwowaną lekcję [Przedmiot] na [Data]. Czy potwierdzamy ten termin?".
-    3.  Jeśli pierwsza wiadomość użytkownika nie jest pytaniem (np. to "hej"), od razu przejdź do celu głównego i zapytaj o potwierdzenie.
-    4.  Gdy użytkownik napisze "tak", "potwierdzam" lub w inny sposób wyrazi zgodę, Twoja odpowiedź MUSI użyć akcji `POTWIERDZ_I_UTWORZ_WYDARZENIE`.
-
+    1.  **PRIORYTET #1: BĄDŹ POMOCNY.** Jeśli pierwsza wiadomość użytkownika to pytanie, odpowiedz na nie wyczerpująco.
+    2.  **CEL GŁÓWNY:** ZAWSZE na końcu swojej pomocnej odpowiedzi, przypomnij o lekcji do potwierdzenia.
+    3.  Jeśli pierwsza wiadomość użytkownika nie jest pytaniem, od razu przejdź do celu głównego.
+    4.  Gdy użytkownik się zgodzi, użyj akcji `POTWIERDZ_I_UTWORZ_WYDARZENIE`.
     --- PRZYKŁADY AKCJI ---
-    1. Akcja: ROZMOWA (gdy odpowiadasz na pytanie i przypominasz)
-       - Przykład JSON:
-         {{
-           "action": "ROZMOWA",
-           "details": {{}},
-           "user_response": "Cena za liceum to 70 zł. A propos, widzę, że mamy dla Ciebie wstępnie zarezerwowaną lekcję na jutro. Czy potwierdzamy ją?"
-         }}
-    2. Akcja: POTWIERDZ_I_UTWORZ_WYDARZENIE (gdy użytkownik się zgodził)
-       - Przykład JSON:
-         {{
-           "action": "POTWIERDZ_I_UTWORZ_WYDARZENIE",
-           "details": {{}},
-           "user_response": "Świetnie! Potwierdziłem Twoją lekcję. Została ona właśnie dodana do oficjalnego kalendarza. Do zobaczenia!"
-         }}
+    1. Akcja: ROZMOWA: {{ "action": "ROZMOWA", "details": {{}}, "user_response": "Cena za liceum to 70 zł. A propos, widzę, że mamy dla Ciebie lekcję na jutro. Czy potwierdzamy?" }}
+    2. Akcja: POTWIERDZ_I_UTWORZ_WYDARZENIE: {{ "action": "POTWIERDZ_I_UTWORZ_WYDARZENIE", "details": {{}}, "user_response": "Świetnie! Potwierdziłem Twoją lekcję. Do zobaczenia!" }}
     """
     return instrukcja
 
 def stworz_instrukcje_STANDARDOWA(dostepne_sloty_str, aktualne_wydarzenia_str, info_o_uslugach_str):
     instrukcja = f"""
     Jesteś systemem AI, który zarządza prawdziwym Kalendarzem Google. Twoja odpowiedź MUSI być jednym, kompletnym obiektem JSON.
-
     --- GŁÓWNE DYREKTYWY ---
     1.  **ŚWIADOMOŚĆ DANYCH:** Działasz na prawdziwych danych z eventId.
     2.  **PROAKTYWNE DOPYTYWANIE:** Gdy użytkownik chce umówić termin, ZAWSZE najpierw zapytaj, czy ma być jednorazowy czy cykliczny.
     3.  **DWUSTOPNIOWE UMAWIANIE:** ZAWSZE najpierw pytaj o ogólne preferencje, a dopiero potem proponuj JEDEN konkretny termin.
-
     --- OGÓLNE INFORMACJE O USŁUGACH ---
     {info_o_uslugach_str}
-    --- KONIEC INFORMACJI ---
-    
     AKTUALNE WYDARZENIA W KALENDARZU:
     {aktualne_wydarzenia_str}
-
     DOSTĘPNE SLOTY DO REZERWACJI:
     {dostepne_sloty_str}
-
     --- BIBLIOTEKA PRZYKŁADÓW AKCJI ---
-    1. Akcja: ROZMOWA (gdy inicjujesz proces rezerwacji)
-       - Przykład JSON: {{ "action": "ROZMOWA", "details": {{}}, "user_response": "Jasne, chętnie pomogę. Czy te zajęcia mają być jednorazowe, czy cykliczne, powtarzające się co tydzień?" }}
-    
-    2. Akcja: ROZMOWA (gdy dopytujesz o preferencje terminu)
-       - Przykład JSON: {{ "action": "ROZMOWA", "details": {{}}, "user_response": "Rozumiem. W takim razie proszę podać preferowany dzień tygodnia lub porę dnia (np. rano, popołudnie, wieczór), a ja znajdę najlepszy termin." }}
-
-    3. Akcja: ZAPROPONUJ_TERMIN
-       - Przykład JSON: {{ "action": "ZAPROPONUJ_TERMIN", "details": {{"proponowany_termin_iso": "2024-07-26T18:20:00+02:00"}}, "user_response": "Znalazłem wolny termin w piątek o 18:20. Czy pasuje?"}}
-    
-    4. Akcja: DOPISZ_ZAJECIA
-       - Przykład JSON: {{ "action": "DOPISZ_ZAJECIA", "details": {{ "nowy_termin_iso": "2024-07-26T18:20:00+02:00", "summary": "Korepetycje" }}, "user_response": "Świetnie! Zapisałem korepetycje na ten termin." }}
-    
-    5. Inne akcje (ODWOLAJ_ZAJECIA, PRZELOZ_ZAJECIA, UTWORZ_CYKLICZNE) działają według poprzednich wzorców.
+    1. Akcja: ROZMOWA (gdy inicjujesz rezerwację): {{ "action": "ROZMOWA", "details": {{}}, "user_response": "Jasne, chętnie pomogę. Czy te zajęcia mają być jednorazowe, czy cykliczne, powtarzające się co tydzień?" }}
+    2. Akcja: ROZMOWA (gdy dopytujesz o preferencje): {{ "action": "ROZMOWA", "details": {{}}, "user_response": "Rozumiem. W takim razie proszę podać preferowany dzień tygodnia lub porę dnia, a ja znajdę najlepszy termin." }}
+    3. Akcja: ZAPROPONUJ_TERMIN: {{ "action": "ZAPROPONUJ_TERMIN", "details": {{"proponowany_termin_iso": "2024-07-26T18:20:00+02:00"}}, "user_response": "Znalazłem wolny termin w piątek o 18:20. Czy pasuje?"}}
+    4. Akcja: DOPISZ_ZAJECIA: {{ "action": "DOPISZ_ZAJECIA", "details": {{ "nowy_termin_iso": "2024-07-26T18:20:00+02:00", "summary": "Korepetycje" }}, "user_response": "Świetnie! Zapisałem korepetycje na ten termin." }}
     """
     return instrukcja
 
@@ -322,15 +289,9 @@ def stworz_instrukcje_STANDARDOWA(dostepne_sloty_str, aktualne_wydarzenia_str, i
 # === POCZĄTEK DRUGIEJ POŁOWY KODU ===
 # =====================================================================
 
-# --- GŁÓWNA LOGIKA BOTA ---
-
 def uruchom_logike_potwierdzania(user_psid, page_id, message_text, record_data, historia_konwersacji, calendar_id):
     """Uruchamia wyspecjalizowaną logikę AI, której celem jest potwierdzenie rezerwacji."""
     calendar_service = get_calendar_service(CALENDAR_SERVICE_ACCOUNT_FILE, CALENDAR_SCOPES)
-    if not calendar_service:
-        send_message(user_psid, "Przepraszam, mam problem z połączeniem z systemem kalendarza.", page_id)
-        return historia_konwersacji
-        
     model = genai.GenerativeModel('gemini-1.5-pro-latest')
     
     info_o_uslugach_str = json.dumps(SERVICE_INFO, indent=2, ensure_ascii=False)
@@ -363,10 +324,8 @@ def uruchom_logike_potwierdzania(user_psid, page_id, message_text, record_data, 
         summary = f"Korepetycje: {fields.get('Imię Ucznia', '')} ({fields.get('Przedmiot', '')})"
         
         if record_id and termin_iso:
-            # Krok 1: Zaktualizuj status w Airtable
             update_success, _ = update_airtable_status(record_id, "Potwierdzone")
             if update_success:
-                # Krok 2: Utwórz wydarzenie w Kalendarzu Google
                 create_success, result = create_google_event(calendar_service, calendar_id, termin_iso, summary)
                 if not create_success:
                     send_message(user_psid, "UWAGA: Wystąpił błąd przy tworzeniu wydarzenia w Kalendarzu Google. Skontaktuj się z administratorem.", page_id)
@@ -380,10 +339,6 @@ def uruchom_logike_potwierdzania(user_psid, page_id, message_text, record_data, 
 def uruchom_glowna_logike_planowania(user_psid, page_id, message_text, historia_konwersacji, calendar_id):
     """Uruchamia standardową logikę planowania dla zweryfikowanych klientów."""
     calendar_service = get_calendar_service(CALENDAR_SERVICE_ACCOUNT_FILE, CALENDAR_SCOPES)
-    if not calendar_service:
-        send_message(user_psid, "Przepraszam, mam problem z połączeniem z systemem kalendarza.", page_id)
-        return historia_konwersacji
-
     model = genai.GenerativeModel('gemini-1.5-pro-latest')
     
     MAX_RETRIES = 3; decyzja_ai = None; proposal_verified = False
@@ -456,7 +411,7 @@ def process_message(user_psid, page_id, message_text):
     os.makedirs(HISTORY_DIR, exist_ok=True)
     history_file = os.path.join(HISTORY_DIR, f"{user_psid}.json")
     try:
-        with open(history_file, 'r') as f:
+        with open(history_file, 'r', encoding='utf-8') as f:
             historia_konwersacji = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         historia_konwersacji = []
@@ -474,7 +429,7 @@ def process_message(user_psid, page_id, message_text):
         print(f"--- Uruchamianie logiki STANDARDOWEJ dla {user_psid} ---")
         historia_konwersacji = uruchom_glowna_logike_planowania(user_psid, page_id, message_text, historia_konwersacji, assigned_calendar_id)
 
-    with open(history_file, 'w') as f:
+    with open(history_file, 'w', encoding='utf-8') as f:
         json.dump(historia_konwersacji[-20:], f, indent=2)
 
 # --- WEBHOOK MESSENGERA ---
