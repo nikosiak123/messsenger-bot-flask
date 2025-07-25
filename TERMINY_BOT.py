@@ -42,30 +42,6 @@ HISTORY_DIR = "conversation_history"
 GRAY_COLOR_ID = "8" 
 
 # --- Dynamiczne ładowanie konfiguracji ---
-PAGE_CONFIG = {}
-CALENDARS_CONFIG = []
-CALENDAR_NAME_TO_ID = {}
-
-def load_config():
-    global PAGE_CONFIG, CALENDARS_CONFIG, CALENDAR_NAME_TO_ID
-    try:
-        with open('config.json', 'r', encoding='utf-8') as f:
-            config = json.load(f)
-            PAGE_CONFIG = config.get("PAGE_CONFIG", {})
-            CALENDARS_CONFIG = config.get("CALENDARS", [])
-            # Tworzymy mapowanie Nazwa -> ID dla szybkiego dostępu
-            CALENDAR_NAME_TO_ID = {cal['name']: cal['id'] for cal in CALENDARS_CONFIG}
-            print("--- Konfiguracja stron i kalendarzy załadowana pomyślnie. ---")
-            print(f"--- Znaleziono {len(PAGE_CONFIG)} stron i {len(CALENDARS_CONFIG)} kalendarzy. ---")
-    except FileNotFoundError:
-        print("!!! KRYTYCZNY BŁĄD: Plik 'config.json' nie został znaleziony! !!!")
-    except json.JSONDecodeError:
-        print("!!! KRYTYCZNY BŁĄD: Błąd parsowania pliku 'config.json'! Sprawdź jego składnię. !!!")
-    except Exception as e:
-        print(f"!!! KRYTYCZNY BŁĄD podczas ładowania konfiguracji: {e} !!!")
-
-# --- Inicjalizacja ---
-load_config()
 try:
     genai.configure(api_key=API_KEY)
     airtable_api = Api(AIRTABLE_API_KEY)
