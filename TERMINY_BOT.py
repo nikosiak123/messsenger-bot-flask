@@ -24,6 +24,7 @@ except locale.Error:
 # --- KONFIGURACJA ---
 API_KEY = "AIzaSyCJGoODg04hUZ3PpKf5tb7NoIMtT9G9K9I"
 VERIFY_TOKEN = "KOLAGEN"
+FB_PAGE_ACCESS_TOKEN = "EAAKusF6JViEBPNJiRftrqPmOy6CoZAWZBw3ZBEWl8dd7LtinSSF85JeKYXA3ZB7xlvFG6e5txU1i8RUEiskmZCXXyuIH4x4B4j4zBrOXm0AQyskcKBUaMVgS2o3AMZA2FWF0PNTuusd6nbxGPzGZAWyGoPP9rjDl1COwLk1YhTOsG7eaXa6FIxnXQaGFdB9oh7gdADaq7e4aQZDZD"
 AIRTABLE_API_KEY = "patcSdupvwJebjFDo.7e15a93930d15261989844687bcb15ac5c08c84a29920c7646760bc6f416146d"
 AIRTABLE_BASE_ID = "appTjrMTVhYBZDPw9"
 AIRTABLE_BOOKINGS_TABLE_NAME = "Rezerwacje"
@@ -77,15 +78,9 @@ app = Flask(__name__)
 
 # --- FUNKCJE POMOCNICZE ---
 
-def send_message(psid, message_text, page_id):
-    """Wysyła wiadomość, używając tokenu odpowiedniej strony."""
-    page_token = PAGE_CONFIG.get(page_id, {}).get('token')
-    if not page_token:
-        print(f"BŁĄD: Brak tokenu dla strony {page_id}. Nie można wysłać wiadomości.")
-        return
-        
-    print(f"Wysyłanie do {psid} (przez stronę {page_id}): '{message_text[:100]}...'")
-    params = {"access_token": page_token}
+def send_message(psid, message_text):
+    print(f"Wysyłanie do {psid}: '{message_text[:100]}...'")
+    params = {"access_token": FB_PAGE_ACCESS_TOKEN}
     headers = {"Content-Type": "application/json"}
     data = json.dumps({"recipient": {"id": psid}, "message": {"text": message_text}, "messaging_type": "RESPONSE"})
     try:
@@ -95,14 +90,9 @@ def send_message(psid, message_text, page_id):
     except Exception as e:
         print(f"BŁĄD: Wyjątek podczas wysyłania wiadomości: {e}")
 
-def get_user_profile(psid, page_id):
-    """Pobiera profil użytkownika, używając tokenu odpowiedniej strony."""
-    page_token = PAGE_CONFIG.get(page_id, {}).get('token')
-    if not page_token:
-        print(f"BŁĄD: Brak tokenu dla strony {page_id}. Nie można pobrać profilu.")
-        return None, None
+def get_user_profile(psid):
     try:
-        url = f"https://graph.facebook.com/{psid}?fields=first_name,last_name&access_token={page_token}"
+        url = f"https://graph.facebook.com/{psid}?fields=first_name,last_name&access_token={FB_PAGE_ACCESS_TOKEN}"
         response = requests.get(url)
         response.raise_for_status()
         data = response.json()
@@ -324,7 +314,7 @@ def stworz_instrukcje_STANDARDOWA(dostepne_sloty_str, aktualne_wydarzenia_str, i
     return instrukcja
 # --- GŁÓWNA LOGIKA BOTA ---
 def process_message(user_psid, page_id, message_text):
-    first_name, last_name = get_user_profile(user_psid, page_id)
+    first_name, last_name = get_user_profile(user_psid)
     if not first_name or not last_name:
         send_message(user_psid, "Przepraszam, mam problem z weryfikacją Twojego konta na Facebooku.", page_id)
         return
@@ -505,17 +495,17 @@ def webhook():
         print(json.dumps(data, indent=2))
         if data.get("object") == "page":
             for entry in data.get("entry", []):
-                page_id = entry.get("id") # ID strony, która otrzymała wiadomość
                 for messaging_event in entry.get("messaging", []):
                     if messaging_event.get("message"):
                         sender_psid = messaging_event["sender"]["id"]
                         message = messaging_event["message"]
                         if message.get("text") and not message.get("is_echo"):
                             message_text = message["text"]
-                            # Przekazujemy page_id do głównej logiki
-                            thread = threading.Thread(target=process_message, args=(sender_psid, page_id, message_text))
+                            # === ZMIANA: Nie przekazujemy już page_id ===
+                            thread = threading.Thread(target=process_message, args=(sender_psid, message_text))
                             thread.start()
         return "ok", 200
+
 
 # --- URUCHOMIENIE SERWERA ---
 if __name__ == '__main__':
