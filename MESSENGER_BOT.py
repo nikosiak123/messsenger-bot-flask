@@ -26,24 +26,6 @@ import re
 from collections import defaultdict
 
 # --- Konfiguracja Stron Facebook ---
-PAGE_CONFIG = {
-    "661857023673365": {
-        "token": "EAAJUltDBrJQBPOBUTGeEQusJwEZA2CwhD63gy7TXOVcQpnDW2gKtNZASCZBnUZBvhlh5OAe9iaOR8Cn0hrG34wacQHlUCYXBxZBzDg1sHuAjV0IBZAHvc9RT9ZAXbFgn0CMQq00ZCS52RFVwlgM4rDKVwSJrzGKJqvaJOCmTeuE9ZBY6IXYB1rR2iXb3beNo4lGZBF8h0nvRoCmQZDZD",
-        "subject": "Polski", "name": "Zakręcone Korepetycje - Polski", "link": "https://tiny.pl/0xnsgbt2"
-    },
-    "638454406015018": {
-        "token": "EAAJUltDBrJQBPAZAylC5nVzVG4NjbhPZCtvI40aWuk4y8jm6wLdQqjuhsMMxHATytTF6Awh0LPKI9Rljckk9yC31JKtzgWMGhRoCsah1IRDqV0TBYs9XZAZBvWYBW0rSt95NFOz6nRw5GZAXlT7yIbKUO3tkZCTuZB3eTDX0kaTjRl9I8ueLsZCa9ZBVZCHNb7f5pj8F8ZC9yyehQZDZD",
-        "subject": "Matematyka", "name": "Zakręcone Korepetycje - MATEMATYKA", "link": "https://tiny.pl/f7xz5n0g"
-    },
-    "653018101222547": {
-        "token": "EAAJUltDBrJQBPOkydccFPcQ1SDZBhYFBFZCMTohk1hgtLbHNmwdA0ylZCZBMTDeDG2OOmbhYaN5KJTJV5N4pX1LLR60G9ye8btGM1hfCfXoLsz1qSw7YUqZCrzeLQqrKQ5uEOn19VGGg7zfEDuLy6TZAPBtf5kQK7ZBKGnrZBaWcmfGofVoAQ5R2stUyG6bGCnPWpx1CZBzzlZAgZDZD",
-        "subject": "Angielski", "name": "English Zone: Zakręcone Korepetycje", "link": "https://tiny.pl/prrr7qf1"
-    },
-}
-ALL_SUBJECT_LINKS = {
-    page_data["subject"]: page_data["link"]
-    for page_data in PAGE_CONFIG.values() if "subject" in page_data and "link" in page_data
-}
 
 app = Flask(__name__)
 
@@ -61,16 +43,6 @@ CALENDAR_SERVICE_ACCOUNT_FILE = 'KALENDARZ_KLUCZ.json'
 CALENDAR_SCOPES = ['https://www.googleapis.com/auth/calendar'] 
 CALENDAR_TIMEZONE = 'Europe/Warsaw'
 APPOINTMENT_DURATION_MINUTES = 60
-
-AVAILABLE_SUBJECTS = sorted(list(ALL_SUBJECT_LINKS.keys()))
-CALENDARS = [
-    {'id': 'f19e189826b9d6e36950da347ac84d5501ecbd6bed0d76c8641be61a67749c67@group.calendar.google.com', 'name': 'Kalendarz Główny Polski', 'subject': 'Polski'},
-    {'id': '3762cdf9ca674ed1e5dd87ff406dc92f365121aab827cea4d9a02085d31d15fb@group.calendar.google.com', 'name': 'Kalendarz Dodatkowy Matematyka', 'subject': 'Matematyka'},
-]
-SUBJECT_TO_CALENDARS = defaultdict(list)
-for cal_config in CALENDARS:
-    if 'subject' in cal_config and cal_config['subject'] in AVAILABLE_SUBJECTS:
-        SUBJECT_TO_CALENDARS[cal_config['subject'].lower()].append(cal_config)
 
 # --- Konfiguracja Airtable ---
 AIRTABLE_API_KEY = os.environ.get("AIRTABLE_API_KEY", "patcSdupvwJebjFDo.7e15a93930d15261989844687bcb15ac5c08c84a29920c7646760bc6f416146d")
@@ -149,6 +121,49 @@ except Exception as e:
 # =====================================================================
 # === FUNKCJE POMOCNICZE (Ogólne) =====================================
 # =====================================================================
+
+def load_and_process_config(config_file='config.json'):
+    """Wczytuje, parsuje i przetwarza konfigurację z pliku JSON."""
+    default_config = {
+        "PAGE_CONFIG": {}, "CALENDARS": [], "ALL_SUBJECT_LINKS": {},
+        "AVAILABLE_SUBJECTS": [], "SUBJECT_TO_CALENDARS": defaultdict(list)
+    }
+    try:
+        with open(config_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        # Pobierz główne sekcje
+        page_config = data.get("PAGE_CONFIG", {})
+        calendars = data.get("CALENDARS", [])
+        
+        # Przetwórz dane (logika, która była wcześniej na poziomie globalnym)
+        all_subject_links = {
+            page_data["subject"]: page_data["link"]
+            for page_data in page_config.values() if "subject" in page_data and "link" in page_data
+        }
+        available_subjects = sorted(list(all_subject_links.keys()))
+        subject_to_calendars = defaultdict(list)
+        for cal_config in calendars:
+            if 'subject' in cal_config and cal_config['subject'] in available_subjects:
+                subject_to_calendars[cal_config['subject'].lower()].append(cal_config)
+
+        logging.info(f"Pomyślnie wczytano i przetworzono konfigurację z {config_file}.")
+        return {
+            "PAGE_CONFIG": page_config,
+            "CALENDARS": calendars,
+            "ALL_SUBJECT_LINKS": all_subject_links,
+            "AVAILABLE_SUBJECTS": available_subjects,
+            "SUBJECT_TO_CALENDARS": subject_to_calendars
+        }
+    except FileNotFoundError:
+        logging.critical(f"!!! KRYTYCZNY BŁĄD: Brak pliku konfiguracyjnego '{config_file}'! Bot nie będzie działał poprawnie. !!!")
+        return default_config
+    except json.JSONDecodeError as e:
+        logging.critical(f"!!! KRYTYCZNY BŁĄD: Błąd parsowania pliku JSON '{config_file}': {e}. Bot nie będzie działał poprawnie. !!!")
+        return default_config
+    except Exception as e:
+        logging.critical(f"!!! KRYTYCZNY BŁĄD: Nieoczekiwany błąd podczas ładowania konfiguracji: {e} !!!", exc_info=True)
+        return default_config
 
 def create_google_event_from_airtable(calendar_service, airtable_record_fields):
     """Tworzy wydarzenie w Google Calendar na podstawie danych z rekordu Airtable."""
@@ -417,20 +432,26 @@ def save_history(user_psid, history, context_to_save=None):
 # =====================================================================
 # === FUNKCJA PRZETWARZANIA POJEDYNCZEGO ZDARZENIA W TLE ==============
 # =====================================================================
-# =====================================================================
-# === FUNKCJA PRZETWARZANIA POJEDYNCZEGO ZDARZENIA W TLE ==============
-# =====================================================================
-def process_single_event(event_payload, page_id_from_entry_info): # page_id_from_entry_info to ID strony, która FAKTYCZNIE otrzymała webhook
+def process_single_event(event_payload, page_id_from_entry_info):
     """
     Przetwarza pojedyncze zdarzenie 'messaging' od Facebooka.
     Ta funkcja będzie uruchamiana w osobnym wątku.
     """
+    
+    # === KLUCZOWA ZMIANA: Dynamiczne ładowanie konfiguracji na początku każdego zdarzenia ===
+    config = load_and_process_config()
+    
+    # Od teraz używamy zmiennych z wczytanej konfiguracji
+    PAGE_CONFIG = config['PAGE_CONFIG']
+    SUBJECT_TO_CALENDARS = config['SUBJECT_TO_CALENDARS']
+    AVAILABLE_SUBJECTS = config['AVAILABLE_SUBJECTS']
+
     try:
         logging.info(f"(Wątek) RAW EVENT PAYLOAD: {json.dumps(event_payload)}")
 
         # --- KROK 1: Ostrożna identyfikacja ról i konfiguracji strony ---
         actual_user_psid = None
-        page_config_for_event = None # Konfiguracja strony, z którą użytkownik rozmawia
+        page_config_for_event = None
 
         event_sender_id = event_payload.get("sender", {}).get("id")
         event_recipient_id = event_payload.get("recipient", {}).get("id")
@@ -457,14 +478,14 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
             return
 
         if actual_user_psid in PAGE_CONFIG:
-            logging.warning(f"!!! (Wątek) Potencjalny problem: actual_user_psid ('{actual_user_psid}') jest taki sam jak ID jednej ze skonfigurowanych stron. Strona kontaktu: {page_being_contacted_id}. Pomijam to zdarzenie dla bezpieczeństwa.")
+            logging.warning(f"!!! (Wątek) Potencjalny problem: actual_user_psid ('{actual_user_psid}') jest taki sam jak ID jednej ze skonfigurowanych stron. Pomijam to zdarzenie dla bezpieczeństwa.")
             return 
 
         current_page_token = page_config_for_event['token']
-        current_subject = page_config_for_event.get('subject', "nieznany przedmiot") # Bezpieczne pobieranie
+        current_subject = page_config_for_event.get('subject', "nieznany przedmiot")
         current_page_name = page_config_for_event['name']
 
-        logging.info(f"--- (Wątek) Przetwarzanie zdarzenia dla Strony: '{current_page_name}' ({page_being_contacted_id}) | Przedmiot Główny Strony: {current_subject} | User PSID: {actual_user_psid} ---")
+        logging.info(f"--- (Wątek) Przetwarzanie zdarzenia dla Strony: '{current_page_name}' ({page_being_contacted_id}) | Przedmiot: {current_subject} | User PSID: {actual_user_psid} ---")
 
         if not current_page_token or len(current_page_token) < 50:
             logging.error(f"!!! KRYTYCZNY BŁĄD (Wątek): Brak lub nieprawidłowy token dostępu dla strony '{current_page_name}' ({page_being_contacted_id}).")
@@ -476,19 +497,27 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
         current_state = context.get('type', STATE_GENERAL)
 
         if is_new_contact:
-            logging.info(f"[{actual_user_psid}] (Wątek) Wykryto nowy kontakt dla strony '{current_page_name}'. Logowanie statystyki.")
+            logging.info(f"[{actual_user_psid}] (Wątek) Wykryto nowy kontakt. Logowanie statystyki.")
             log_statistic("new_contact")
 
         logging.info(f"    (Wątek) [{actual_user_psid}] Aktualny stan: {current_state}")
-        logging.debug(f"    (Wątek) [{actual_user_psid}] Kontekst wejściowy (klucze): {list(context.keys())}")
-
+        
+        # Inicjalizacja zmiennych na potrzeby pętli
         action = None
         msg_result = None
+        context_data_to_save = context.copy()
+        
+        # =====================================================================
+        # === KONIEC PIERWSZEJ POŁOWY FUNKCJI process_single_event ===
+        # Poniżej znajduje się druga połowa z analizą wiadomości i pętlą `while`.
+        # =====================================================================
+        # =====================================================================
+        # === POCZĄTEK DRUGIEJ POŁOWY FUNKCJI process_single_event ===
+        # =====================================================================
+        
         ai_response_text_raw = None
-        next_state = current_state
         model_resp_content = None 
         user_content = None 
-        context_data_to_save = context.copy() 
         
         context_data_to_save.pop('return_to_state', None)
         context_data_to_save.pop('return_to_context', None)
@@ -560,15 +589,12 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
             current_action_in_loop = action
             action = None
 
-            # --- handle_general ---
             if current_action_in_loop == 'handle_general':
-                is_initial_general_entry = (current_state != STATE_GENERAL) or \
-                                        (not history_for_gemini and not user_content) or \
-                                        (context_data_to_save.get('_just_reset', False))
+                is_initial_general_entry = (current_state != STATE_GENERAL) or (not history_for_gemini and not user_content) or (context_data_to_save.get('_just_reset', False))
                 context_data_to_save.pop('_just_reset', None)
                 user_message_text_for_ai = user_content.parts[0].text if user_content and user_content.parts else None
                 
-                if is_initial_general_entry and not user_message_text_for_ai: 
+                 if is_initial_general_entry and not user_message_text_for_ai: 
                     logging.debug(f"    (Wątek) [{actual_user_psid}] Generowanie wiadomości powitalnej. Bieżący przedmiot strony: '{current_subject}'")
                     other_subjects_links_parts = []
                     
@@ -686,7 +712,7 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
                         next_state = STATE_GENERAL
                         context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True} 
 
-            # --- handle_scheduling ---
+
             elif current_action_in_loop == 'handle_scheduling':
                 if not effective_subject_for_action or effective_subject_for_action not in AVAILABLE_SUBJECTS:
                     msg_result = f"Przepraszam, wystąpił błąd. Nie wiem, dla jakiego przedmiotu ('{effective_subject_for_action}') próbujemy umówić termin. Proszę zacząć od nowa, np. pisząc 'Chcę umówić {current_subject if current_subject else 'korepetycje'}'."
@@ -824,7 +850,6 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
                             next_state = STATE_GENERAL
                             context_data_to_save = {'type': STATE_GENERAL, 'required_subject': current_subject, '_just_reset': True}
             
-            # --- handle_gathering ---
             elif current_action_in_loop == 'handle_gathering':
                 try:
                     user_msg_for_ai = user_content.parts[0].text if user_content and user_content.parts else None
@@ -933,8 +958,7 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
         original_context_no_return.pop('return_to_state', None) 
         original_context_no_return.pop('return_to_context', None)
 
-        should_save = (bool(user_content) or bool(model_resp_content) or
-                       (original_context_no_return != final_context_to_save_dict))
+        should_save = (bool(user_content) or bool(model_resp_content) or (original_context_no_return != final_context_to_save_dict))
         
         if should_save:
             history_to_save_final = [h for h in history_for_gemini if isinstance(h, Content) and h.role in ('user', 'model')]
@@ -946,13 +970,14 @@ def process_single_event(event_payload, page_id_from_entry_info): # page_id_from
             logging.info(f"    (Wątek) [{actual_user_psid}] Zapisywanie historii ({len(history_to_save_final)} wiad.). Stan: {final_context_to_save_dict.get('type')}, Przedmiot: {final_context_to_save_dict.get('required_subject')}")
             save_history(actual_user_psid, history_to_save_final, context_to_save=final_context_to_save_dict)
         else:
-            logging.debug(f"    (Wątek) [{actual_user_psid}] Brak zmian w historii lub kontekście (poza kluczami powrotu) - pomijanie zapisu.")
+            logging.debug(f"    (Wątek) [{actual_user_psid}] Brak zmian w historii lub kontekście - pomijanie zapisu.")
 
         logging.info(f"--- (Wątek) Zakończono przetwarzanie eventu dla Strony: '{current_page_name}', User PSID: {actual_user_psid} ---")
 
     except Exception as e_thread:
         event_mid = event_payload.get('message', {}).get('mid', 'N/A') if isinstance(event_payload, dict) else 'N/A_event_payload_not_dict'
         logging.critical(f"KRYTYCZNY BŁĄD W WĄTKU PRZETWARZANIA ZDARZENIA (event MID: {event_mid}): {e_thread}", exc_info=True)
+
 
 def _get_calendar_timezone():
     """Pobiera (i cachuje) obiekt strefy czasowej dla Kalendarza."""
