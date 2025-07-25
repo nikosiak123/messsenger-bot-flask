@@ -46,9 +46,9 @@ SERVICE_INFO = {
         "Liceum (Podstawa)": "70 zł / 60 min",
         "Liceum (Rozszerzenie)": "80 zł / 60 min"
     },
-    "Format Lekcji": "Wszystkie zajęcia odbywają się online za pośrednictwem platformy Google Meet.",
+    "Format Lekcji": "Wszystkie zajęcia odbywają się online za pośrednictwem platformy Google Meet. Link do spotkania jest generowany automatycznie po potwierdzeniu terminu.",
     "Dostępne Przedmioty": ["Matematyka", "Fizyka", "Chemia"],
-    "Polityka Odwoływania": "Zajęcia można bezpłatnie odwołać najpóźniej na 24 godziny przed ich rozpoczęciem."
+    "Polityka Odwoływania": "Zajęcia można bezpłatnie odwołać najpóźniej na 24 godziny przed ich planowanym rozpoczęciem."
 }
 CALENDARS_CONFIG = []
 CALENDAR_NAME_TO_ID = {}
@@ -264,7 +264,7 @@ def stworz_instrukcje_POTWIERDZENIE(dane_lekcji, info_o_uslugach_str):
 
 def stworz_instrukcje_STANDARDOWA(dostepne_sloty_str, aktualne_wydarzenia_str, info_o_uslugach_str):
     instrukcja = f"""
-    Jesteś systemem AI. Twoja odpowiedź MUSI być jednym, kompletnym obiektem JSON.
+    Jesteś systemem AI, który zarządza prawdziwym Kalendarzem Google. Twoja odpowiedź MUSI być jednym, kompletnym obiektem JSON.
     --- GŁÓWNE DYREKTYWY ---
     1.  **ŚWIADOMOŚĆ DANYCH:** Działasz na prawdziwych danych z eventId.
     2.  **PROAKTYWNE DOPYTYWANIE:** Gdy użytkownik chce umówić termin, ZAWSZE najpierw zapytaj, czy ma być jednorazowy czy cykliczny.
