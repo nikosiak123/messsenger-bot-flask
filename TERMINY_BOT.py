@@ -22,6 +22,9 @@ except locale.Error:
     print("Ostrzeżenie: Nie można ustawić polskiej lokalizacji.")
 
 # --- KONFIGURACJA ---
+# --- Dynamiczne ładowanie konfiguracji ---
+CALENDARS_CONFIG = []
+CALENDAR_NAME_TO_ID = {}
 API_KEY = "AIzaSyCJGoODg04hUZ3PpKf5tb7NoIMtT9G9K9I"
 VERIFY_TOKEN = "KOLAGEN"
 FB_PAGE_ACCESS_TOKEN = "EAAKusF6JViEBPNJiRftrqPmOy6CoZAWZBw3ZBEWl8dd7LtinSSF85JeKYXA3ZB7xlvFG6e5txU1i8RUEiskmZCXXyuIH4x4B4j4zBrOXm0AQyskcKBUaMVgS2o3AMZA2FWF0PNTuusd6nbxGPzGZAWyGoPP9rjDl1COwLk1YhTOsG7eaXa6FIxnXQaGFdB9oh7gdADaq7e4aQZDZD"
@@ -53,6 +56,23 @@ except Exception as e:
 app = Flask(__name__)
 
 # --- FUNKCJE POMOCNICZE ---
+def load_config():
+    global CALENDARS_CONFIG, CALENDAR_NAME_TO_ID
+    try:
+        with open('config.json', 'r', encoding='utf-8') as f:
+            config = json.load(f)
+            # Wczytujemy TYLKO informacje o kalendarzach
+            CALENDARS_CONFIG = config.get("CALENDARS", [])
+            CALENDAR_NAME_TO_ID = {cal['name']: cal['id'] for cal in CALENDARS_CONFIG}
+            print("--- Konfiguracja kalendarzy załadowana pomyślnie. ---")
+            print(f"--- Znaleziono {len(CALENDARS_CONFIG)} kalendarzy. ---")
+    except FileNotFoundError:
+        print("!!! KRYTYCZNY BŁĄD: Plik 'config.json' nie został znaleziony! !!!")
+    except json.JSONDecodeError:
+        print("!!! KRYTYCZNY BŁĄD: Błąd parsowania pliku 'config.json'! Sprawdź jego składnię. !!!")
+    except Exception as e:
+        print(f"!!! KRYTYCZNY BŁĄD podczas ładowania konfiguracji: {e} !!!")
+load_config()
 
 def send_message(psid, message_text):
     print(f"Wysyłanie do {psid}: '{message_text[:100]}...'")
