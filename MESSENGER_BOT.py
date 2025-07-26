@@ -184,20 +184,25 @@ def load_and_process_config(config_file='config.json'):
         return default_config
 
 # POPRAWKA: Funkcja przyjmuje `subject_to_calendars` jako argument, aby uniknąć problemu z zasięgiem.
+# POPRAWKA: Funkcja przyjmuje `subject_to_calendars` jako argument, aby uniknąć problemu z zasięgiem.
 def create_google_event_from_airtable(calendar_service, airtable_record_fields, subject_to_calendars):
     """Tworzy wydarzenie w Google Calendar na podstawie danych z rekordu Airtable."""
     if not calendar_service:
         logging.error("[GCAL CREATE] Usługa kalendarza niedostępna.")
         return
     
+    # Pobieranie wszystkich potrzebnych danych z Airtable
     subject = airtable_record_fields.get('Przedmiot')
     start_time_iso = airtable_record_fields.get('Date')
     student_first_name = airtable_record_fields.get('Imię Ucznia', 'Nieznany')
     student_last_name = airtable_record_fields.get('Nazwisko Ucznia', 'Uczeń')
-    parent_first_name = airtable_record_fields.get('Imię Rodzica', 'Brak')
-    parent_last_name = airtable_record_fields.get('Nazwisko Rodzica', 'Brak')
-    grade = airtable_record_fields.get('Klasa', 'Brak')
-    level = airtable_record_fields.get('Poziom', 'Brak')
+    
+    # --- NOWA LOGIKA: Pobieramy dane do opisu ---
+    # Używamy extract_school_type do ujednolicenia danych o szkole
+    grade_info_from_airtable = airtable_record_fields.get('Klasa', '')
+    numerical_grade, class_desc, school_type = extract_school_type(grade_info_from_airtable)
+    
+    level = airtable_record_fields.get('Poziom', 'Brak') # np. 'Podstawowy', 'Rozszerzony'
 
     if not subject or not start_time_iso:
         logging.error(f"[GCAL CREATE] Brak przedmiotu lub daty w danych z Airtable: {airtable_record_fields}")
@@ -216,17 +221,26 @@ def create_google_event_from_airtable(calendar_service, airtable_record_fields, 
         start_dt = datetime.datetime.fromisoformat(start_time_iso.replace('Z', '+00:00')).astimezone(tz)
         end_dt = start_dt + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
 
+        # === ZMIANA TUTAJ: Budowanie tytułu i opisu zgodnie z nowymi wymaganiami ===
+
+        # 1. Tworzenie tytułu wydarzenia
         summary = f"(NIEPOTWIERDZONE) {student_first_name} {student_last_name}"
         
-        description = (
-            f"Automatyczna rezerwacja z bota Messengera.\n\n"
-            f"Przedmiot: {subject}\n"
-            f"Uczeń: {student_first_name} {student_last_name}\n"
-            f"Rodzic: {parent_first_name} {parent_last_name}\n"
-            f"Klasa: {grade}\n"
-            f"Poziom: {level}\n\n"
-            f"Status: Oczekuje na ostateczne potwierdzenie."
-        )
+        # 2. Tworzenie opisu wydarzenia
+        description_parts = []
+        
+        # Dodajemy informację o szkole i klasie
+        school_info_line = f"Edukacja: {school_type}, {class_desc}".strip(', ')
+        description_parts.append(school_info_line)
+        
+        # Dodajemy informację o poziomie, ale tylko dla szkół średnich
+        if school_type in ["Liceum", "Technikum"] and level and level != 'Brak':
+            description_parts.append(f"Poziom: {level}")
+        
+        # Łączymy wszystkie części opisu
+        description = "\n".join(description_parts)
+        
+        # ======================================================================
         
         event_body = {
             'summary': summary,
