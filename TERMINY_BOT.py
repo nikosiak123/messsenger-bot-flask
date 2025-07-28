@@ -85,33 +85,50 @@ app = Flask(__name__)
 # --- FUNKCJE POMOCNICZE ---
 
 
-# Wstaw tę funkcję w sekcji z innymi funkcjami kalendarza
+def stworz_opis_wydarzenia(fields):
+    """Tworzy sformatowany opis wydarzenia na podstawie pól z Airtable."""
+    opis_czesci = []
+    
+    typ_szkoly = fields.get('Typ Szkoły', '')
+    klasa = fields.get('Klasa', '')
+    if typ_szkoly or klasa:
+        opis_czesci.append(f"Poziom: {typ_szkoly} {klasa}".strip())
 
-def delete_unconfirmed_event(service, calendar_id, parent_first_name, parent_last_name):
-    """Wyszukuje i usuwa wydarzenie z tytułem '(NIEPOTWIERDZONE) Imię Nazwisko'."""
-    if not service or not parent_first_name or not parent_last_name:
+    # Sprawdzamy, czy w typie szkoły jest słowo kluczowe wskazujące na szkołę średnią
+    if 'liceum' in typ_szkoly.lower() or 'technikum' in typ_szkoly.lower():
+        poziom_materialu = fields.get('Poziom', '')
+        if poziom_materialu:
+            opis_czesci.append(f"Materiał: {poziom_materialu}")
+
+    link_kontaktowy = fields.get('LINK', '')
+    if link_kontaktowy:
+        opis_czesci.append(f"Link do kontaktu: {link_kontaktowy}")
+        
+    return "\n".join(opis_czesci)
+    
+def delete_unconfirmed_event(service, calendar_id, student_first_name, student_last_name):
+    """Wyszukuje i usuwa wydarzenie z tytułem '(NIEPOTWIERDZONE) Imię Nazwisko Ucznia'."""
+    if not service or not student_first_name or not student_last_name:
         return False
 
-    # Konstruujemy dokładny tytuł, którego szukamy
-    target_summary = f"(NIEPOTWIERDZONE) {parent_first_name} {parent_last_name}"
+    # Konstruujemy nowy, dokładny tytuł, którego szukamy
+    target_summary = f"(NIEPOTWIERDZONE) {student_first_name} {student_last_name}"
     print(f"--- WYSZUKIWANIE WYDARZENIA DO USUNIĘCIA o tytule: '{target_summary}' w kalendarzu {calendar_id} ---")
 
     try:
-        # Używamy parametru 'q' do wyszukania wydarzenia po tytule
         events_result = service.events().list(
             calendarId=calendar_id,
             q=target_summary,
-            singleEvents=True # Traktujemy powtarzające się wydarzenia jako pojedyncze instancje
+            singleEvents=True
         ).execute()
         
         events_to_delete = events_result.get('items', [])
 
         if not events_to_delete:
             print(f"--- Nie znaleziono wydarzenia '{target_summary}' do usunięcia. ---")
-            return True # Uznajemy to za sukces, bo nie ma czego usuwać
+            return True 
 
         for event in events_to_delete:
-            # Sprawdzamy jeszcze raz dla pewności, czy tytuł się zgadza
             if event.get('summary') == target_summary:
                 event_id = event['id']
                 print(f"--- ZNALEZIONO i usuwam wydarzenie: ID={event_id}, Tytuł='{event.get('summary')}' ---")
@@ -273,19 +290,30 @@ def format_events_for_ai(events):
         formatted.append(f"- ID: {event['id']}, Nazwa: {summary}{recurrence_info}, Start: {formatted_start}")
     return "\n".join(formatted)
 
-def create_google_event(service, calendar_id, termin_iso, summary, recurrence_rule=None, color_id=None):
+def create_google_event(service, calendar_id, termin_iso, summary, description=None, recurrence_rule=None, color_id=None):
     if not service: return False, "Brak połączenia z API"
     start_dt = datetime.datetime.fromisoformat(termin_iso)
     if start_dt.tzinfo is None: start_dt = pytz.timezone(CALENDAR_TIMEZONE).localize(start_dt)
     end_dt = start_dt + datetime.timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
-    event = {'summary': summary, 'start': {'dateTime': start_dt.isoformat(), 'timeZone': CALENDAR_TIMEZONE}, 'end': {'dateTime': end_dt.isoformat(), 'timeZone': CALENDAR_TIMEZONE}}
-    if recurrence_rule: event['recurrence'] = [recurrence_rule]
-    if color_id: event['colorId'] = color_id
+    
+    event = {
+        'summary': summary,
+        'start': {'dateTime': start_dt.isoformat(), 'timeZone': CALENDAR_TIMEZONE},
+        'end': {'dateTime': end_dt.isoformat(), 'timeZone': CALENDAR_TIMEZONE}
+    }
+    
+    if description:
+        event['description'] = description
+    if recurrence_rule: 
+        event['recurrence'] = [recurrence_rule]
+    if color_id: 
+        event['colorId'] = color_id
+        
     try:
         created_event = service.events().insert(calendarId=calendar_id, body=event).execute()
         return True, created_event
-    except HttpError as e: return False, f"Błąd API podczas tworzenia: {e}"
-
+    except HttpError as e: 
+        return False, f"Błąd API podczas tworzenia: {e}"
 def stworz_instrukcje_POTWIERDZENIE(dane_lekcji, info_o_uslugach_str):
     szczegoly_lekcji_str = json.dumps(dane_lekcji.get('fields', {}), indent=2, ensure_ascii=False)
     instrukcja = f"""
@@ -365,28 +393,42 @@ def uruchom_logike_potwierdzania(user_psid, message_text, record_data, historia_
         record_id = record_data.get('id')
         fields = record_data.get('fields', {})
         
-        parent_first_name = fields.get('Imię Rodzica')
-        parent_last_name = fields.get('Nazwisko Rodzica')
-        termin_iso = fields.get('Date')
-        summary = f"Korepetycje: {fields.get('Imię Ucznia', '')} ({fields.get('Przedmiot', '')})"
+        # Pobieramy wszystkie potrzebne dane ucznia z Airtable
+        uczen_imie = fields.get('Imię Ucznia')
+        uczen_nazwisko = fields.get('Nazwisko Ucznia')
+        termin_iso = fields.get('Date') # Zakładam, że data jest w tym polu
 
-        if record_id and termin_iso and parent_first_name and parent_last_name:
-            # KROK 1: Usuń stare, niepotwierdzone wydarzenie z kalendarza
-            delete_unconfirmed_event(calendar_service, calendar_id, parent_first_name, parent_last_name)
+        # Sprawdzamy, czy mamy wszystkie kluczowe dane
+        if record_id and termin_iso and uczen_imie and uczen_nazwisko:
+            
+            # NOWA LOGIKA TWORZENIA WYDARZENIA
+            # 1. Stwórz nowy tytuł i opis zgodnie z wymaganiami
+            nowy_tytul = f"{uczen_imie} {uczen_nazwisko}"
+            nowy_opis = stworz_opis_wydarzenia(fields)
 
-            # KROK 2: Zaktualizuj status w Airtable
+            # 2. Usuń stare, niepotwierdzone wydarzenie z kalendarza (szukając po imieniu i nazwisku UCZNIA)
+            delete_unconfirmed_event(calendar_service, calendar_id, uczen_imie, uczen_nazwisko)
+
+            # 3. Zaktualizuj status w Airtable
             update_success, _ = update_airtable_status(record_id, "Potwierdzone")
 
-            # KROK 3: Utwórz nowe, potwierdzone wydarzenie w kalendarzu
+            # 4. Utwórz nowe, potwierdzone wydarzenie w kalendarzu z nowym tytułem i opisem
             if update_success:
-                create_success, result = create_google_event(calendar_service, calendar_id, termin_iso, summary)
+                create_success, result = create_google_event(
+                    service=calendar_service, 
+                    calendar_id=calendar_id, 
+                    termin_iso=termin_iso, 
+                    summary=nowy_tytul, 
+                    description=nowy_opis
+                )
                 if not create_success:
                     send_message(user_psid, "UWAGA: Wystąpił błąd przy tworzeniu nowego, potwierdzonego wydarzenia w Kalendarzu Google. Skontaktuj się z administratorem.")
             else:
                  send_message(user_psid, "UWAGA: Nie udało się zaktualizować statusu w bazie danych. Nowe wydarzenie nie zostało utworzone.")
 
         else:
-            send_message(user_psid, "UWAGA: Brak kluczowych danych (ID, termin, dane rodzica) w rekordzie Airtable do potwierdzenia rezerwacji. Nie można kontynuować.")
+            send_message(user_psid, "UWAGA: Brak kluczowych danych (ID, termin, dane ucznia) w rekordzie Airtable do potwierdzenia rezerwacji. Nie można kontynuować.")
+            
     historia_konwersacji.append({'role': 'model', 'parts': [{'text': json.dumps(decyzja_ai, ensure_ascii=False)}]})
     return historia_konwersacji
 
