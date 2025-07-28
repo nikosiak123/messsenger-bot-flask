@@ -84,6 +84,48 @@ app = Flask(__name__)
 
 # --- FUNKCJE POMOCNICZE ---
 
+
+# Wstaw tę funkcję w sekcji z innymi funkcjami kalendarza
+
+def delete_unconfirmed_event(service, calendar_id, parent_first_name, parent_last_name):
+    """Wyszukuje i usuwa wydarzenie z tytułem '(NIEPOTWIERDZONE) Imię Nazwisko'."""
+    if not service or not parent_first_name or not parent_last_name:
+        return False
+
+    # Konstruujemy dokładny tytuł, którego szukamy
+    target_summary = f"(NIEPOTWIERDZONE) {parent_first_name} {parent_last_name}"
+    print(f"--- WYSZUKIWANIE WYDARZENIA DO USUNIĘCIA o tytule: '{target_summary}' w kalendarzu {calendar_id} ---")
+
+    try:
+        # Używamy parametru 'q' do wyszukania wydarzenia po tytule
+        events_result = service.events().list(
+            calendarId=calendar_id,
+            q=target_summary,
+            singleEvents=True # Traktujemy powtarzające się wydarzenia jako pojedyncze instancje
+        ).execute()
+        
+        events_to_delete = events_result.get('items', [])
+
+        if not events_to_delete:
+            print(f"--- Nie znaleziono wydarzenia '{target_summary}' do usunięcia. ---")
+            return True # Uznajemy to za sukces, bo nie ma czego usuwać
+
+        for event in events_to_delete:
+            # Sprawdzamy jeszcze raz dla pewności, czy tytuł się zgadza
+            if event.get('summary') == target_summary:
+                event_id = event['id']
+                print(f"--- ZNALEZIONO i usuwam wydarzenie: ID={event_id}, Tytuł='{event.get('summary')}' ---")
+                service.events().delete(calendarId=calendar_id, eventId=event_id).execute()
+        
+        return True
+
+    except HttpError as e:
+        print(f"BŁĄD API podczas usuwania wydarzenia '{target_summary}': {e}")
+        return False
+    except Exception as e:
+        print(f"BŁĄD KRYTYCZNY podczas usuwania wydarzenia '{target_summary}': {e}")
+        return False
+
 def send_message(psid, message_text):
     print(f"Wysyłanie do {psid}: '{message_text[:100]}...'")
     params = {"access_token": FB_PAGE_ACCESS_TOKEN}
@@ -322,18 +364,29 @@ def uruchom_logike_potwierdzania(user_psid, message_text, record_data, historia_
     if akcja == "POTWIERDZ_I_UTWORZ_WYDARZENIE":
         record_id = record_data.get('id')
         fields = record_data.get('fields', {})
+        
+        parent_first_name = fields.get('Imię Rodzica')
+        parent_last_name = fields.get('Nazwisko Rodzica')
         termin_iso = fields.get('Date')
         summary = f"Korepetycje: {fields.get('Imię Ucznia', '')} ({fields.get('Przedmiot', '')})"
-        
-        if record_id and termin_iso:
+
+        if record_id and termin_iso and parent_first_name and parent_last_name:
+            # KROK 1: Usuń stare, niepotwierdzone wydarzenie z kalendarza
+            delete_unconfirmed_event(calendar_service, calendar_id, parent_first_name, parent_last_name)
+
+            # KROK 2: Zaktualizuj status w Airtable
             update_success, _ = update_airtable_status(record_id, "Potwierdzone")
+
+            # KROK 3: Utwórz nowe, potwierdzone wydarzenie w kalendarzu
             if update_success:
                 create_success, result = create_google_event(calendar_service, calendar_id, termin_iso, summary)
                 if not create_success:
-                    send_message(user_psid, "UWAGA: Wystąpił błąd przy tworzeniu wydarzenia w Kalendarzu Google. Skontaktuj się z administratorem.")
+                    send_message(user_psid, "UWAGA: Wystąpił błąd przy tworzeniu nowego, potwierdzonego wydarzenia w Kalendarzu Google. Skontaktuj się z administratorem.")
+            else:
+                 send_message(user_psid, "UWAGA: Nie udało się zaktualizować statusu w bazie danych. Nowe wydarzenie nie zostało utworzone.")
+
         else:
-            send_message(user_psid, "UWAGA: Brak kluczowych danych w rekordzie Airtable do potwierdzenia rezerwacji.")
-            
+            send_message(user_psid, "UWAGA: Brak kluczowych danych (ID, termin, dane rodzica) w rekordzie Airtable do potwierdzenia rezerwacji. Nie można kontynuować.")
     historia_konwersacji.append({'role': 'model', 'parts': [{'text': json.dumps(decyzja_ai, ensure_ascii=False)}]})
     return historia_konwersacji
 
