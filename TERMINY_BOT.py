@@ -85,6 +85,7 @@ app = Flask(__name__)
 # --- FUNKCJE POMOCNICZE ---
 
 
+# --- ZMIENIONA FUNKCJA ---
 def stworz_opis_wydarzenia(fields):
     """Tworzy sformatowany opis wydarzenia na podstawie pól z Airtable."""
     opis_czesci = []
@@ -103,6 +104,11 @@ def stworz_opis_wydarzenia(fields):
     link_kontaktowy = fields.get('LINK', '')
     if link_kontaktowy:
         opis_czesci.append(f"Link do kontaktu: {link_kontaktowy}")
+        
+    # NOWA CZĘŚĆ: Dodawanie linku do zajęć (np. Google Meet / Teams)
+    link_zajec = fields.get('TEAMS', '') # Pobieramy wartość z kolumny 'TEAMS'
+    if link_zajec:
+        opis_czesci.append(f"Link do zajęć: {link_zajec}")
         
     return "\n".join(opis_czesci)
     
@@ -433,7 +439,8 @@ def uruchom_logike_potwierdzania(user_psid, message_text, record_data, historia_
     return historia_konwersacji
 
 
-def uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersacji, calendar_id):
+# --- ZMIENIONA FUNKCJA ---
+def uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersacji, calendar_id, record_data):
     """Uruchamia standardową logikę planowania dla zweryfikowanych klientów."""
     calendar_service = get_calendar_service(CALENDAR_SERVICE_ACCOUNT_FILE, CALENDAR_SCOPES)
     model = genai.GenerativeModel('gemini-1.5-pro-latest')
@@ -478,12 +485,33 @@ def uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersac
     print(f"--- DEBUG (wątek {user_psid}): AI chce wykonać akcję: '{akcja}' ze szczegółami: {szczegoly} ---")
     send_message(user_psid, odpowiedz_tekstowa)
     
+    # --- ZMIENIONA LOGIKA TWORZENIA WYDARZENIA ---
     if akcja == "DOPISZ_ZAJECIA":
-        summary = szczegoly.get("summary", "Korepetycje")
         nowy_termin_iso = szczegoly.get("nowy_termin_iso")
-        if nowy_termin_iso:
-            success, result = create_google_event(calendar_service, calendar_id, nowy_termin_iso, summary)
-            if success: print(f"--- Utworzono wydarzenie: {result.get('htmlLink')} ---")
+        if nowy_termin_iso and record_data:
+            fields = record_data.get('fields', {})
+            uczen_imie = fields.get('Imię Ucznia')
+            uczen_nazwisko = fields.get('Nazwisko Ucznia')
+            
+            if uczen_imie and uczen_nazwisko:
+                # Tytuł i opis są teraz tworzone w ujednolicony sposób
+                summary = f"{uczen_imie} {uczen_nazwisko}"
+                description = stworz_opis_wydarzenia(fields)
+                
+                success, result = create_google_event(
+                    service=calendar_service, 
+                    calendar_id=calendar_id, 
+                    termin_iso=nowy_termin_iso, 
+                    summary=summary,
+                    description=description
+                )
+                if success:
+                    print(f"--- Utworzono szczegółowe wydarzenie: {result.get('htmlLink')} ---")
+                else:
+                    send_message(user_psid, "Niestety, wystąpił błąd podczas dodawania zajęć do kalendarza.")
+            else:
+                send_message(user_psid, "Błąd: Nie można utworzyć wydarzenia, brak danych ucznia w bazie.")
+                print(f"BŁĄD KRYTYCZNY (wątek {user_psid}): Brak Imienia/Nazwiska ucznia w record_data przy akcji DOPISZ_ZAJECIA.")
 
     historia_konwersacji.append({'role': 'model', 'parts': [{'text': json.dumps(decyzja_ai, ensure_ascii=False)}]})
     return historia_konwersacji
@@ -524,7 +552,8 @@ def process_message(user_psid, message_text):
         historia_konwersacji = uruchom_logike_potwierdzania(user_psid, message_text, record_data, historia_konwersacji, assigned_calendar_id)
     else: # OK_PROCEED
         print(f"--- Uruchamianie logiki STANDARDOWEJ dla {user_psid} ---")
-        historia_konwersacji = uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersacji, assigned_calendar_id)
+        # ZMIANA: Przekazujemy `record_data`, aby funkcja miała dostęp do szczegółów klienta
+        historia_konwersacji = uruchom_glowna_logike_planowania(user_psid, message_text, historia_konwersacji, assigned_calendar_id, record_data)
 
     with open(history_file, 'w', encoding='utf-8') as f:
         json.dump(historia_konwersacji[-20:], f, indent=2)
