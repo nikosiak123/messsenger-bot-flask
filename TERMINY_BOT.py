@@ -41,14 +41,14 @@ HOLD_DURATION_HOURS = 24
 HISTORY_DIR = "conversation_history"
 GRAY_COLOR_ID = "8" 
 SERVICE_INFO = {
-    "Cennik": {
-        "Szkoła Podstawowa": "60 zł / 60 min",
-        "Liceum (Podstawa)": "70 zł / 60 min",
-        "Liceum (Rozszerzenie)": "80 zł / 60 min"
+    "Cennik za 60 minut": {
+        "Szkoła Podstawowa: 60 zł",
+        "Liceum/Technikum (Podstawa, kl. 1-3): 65 zł; (Podstawa, kl. 4/5): 70 zł",
+        "Liceum/Technikum (Rozszerzenie, kl. 1-3): 70 zł; (Rozszerzenie, kl. 4/5): 75 zł"
     },
-    "Format Lekcji": "Wszystkie zajęcia odbywają się online za pośrednictwem platformy Google Meet. Link do spotkania jest generowany automatycznie po potwierdzeniu terminu.",
-    "Dostępne Przedmioty": ["Matematyka", "Fizyka", "Chemia"],
-    "Polityka Odwoływania": "Zajęcia można bezpłatnie odwołać najpóźniej na 24 godziny przed ich planowanym rozpoczęciem."
+    "Format Lekcji": "Wszystkie zajęcia odbywają się online za pośrednictwem platformy Teams. Link do spotkania jest taki sam na wszystkich zajęciach",
+    "Polityka Odwoływania": "Zajęcia można bezpłatnie odwołać najpóźniej na 24 godziny przed ich planowanym rozpoczęciem, zwrot za lekcje odwołane mniej niż 24h przed rozpoczęciem pokryje jedynie połowę ceny zajęć",
+    "Przedmioty z których udzielamy korepetycji oraz kontakt gdzie nalezy umówić pierwszą lekcję, ten profil zajmuję się tylko zarządzaniem kolejnymi terminami, pierwszy termin należy umówić pod którąś z tych stron": "Polski: https://tiny.pl/0xnsgbt2; Matematyka: https://tiny.pl/f7xz5n0g; Angielski: https://tiny.pl/prrr7qf1",
 }
 CALENDARS_CONFIG = []
 CALENDAR_NAME_TO_ID = {}
